@@ -2,8 +2,9 @@ import SwiftUI
 
 // Settings › Voice on the phone (PLAN.md, "Voice"): Dictation and Speech, each its engines
 // as tiles in black and white with Use, Add key or Change key, and its rows under them;
-// and the voice_setup card, the same tile and rows read only, with Add key while it waits
-// on one. The model (Voice.swift) reads `voice.get` and says what to send.
+// Live, live mode's rows; and the voice_setup card, the same tile and rows read only, with
+// Add key while it waits on one. The model (Voice.swift) reads `voice.get` and says what
+// to send.
 
 /// Settings › Voice.
 struct VoiceView: View {
@@ -13,9 +14,11 @@ struct VoiceView: View {
     /// The tile whose key field is open, as `kind/engine`.
     @State private var editing: String?
 
-    /// Opens on `kind`'s tab, or Speech with `-voiceSpeech` at launch, for its screenshot.
+    /// Opens on `kind`'s tab, or Speech with `-voiceSpeech` at launch and Live with
+    /// `-voiceLive`, for their screenshots.
     init(kind: String = "dictation") {
-        _tab = State(initialValue: ProcessInfo.processInfo.arguments.contains("-voiceSpeech") ? "speech" : kind)
+        let args = ProcessInfo.processInfo.arguments
+        _tab = State(initialValue: args.contains("-voiceSpeech") ? "speech" : args.contains("-voiceLive") ? "live" : kind)
     }
 
     var body: some View {
@@ -43,10 +46,10 @@ struct VoiceView: View {
                 }
             }
             if voice.came {
-                if tab == "speech" {
-                    speechRows(voice)
-                } else {
-                    dictationRows(voice)
+                switch tab {
+                case "speech": speechRows(voice)
+                case "live": liveRows(voice)
+                default: dictationRows(voice)
                 }
             }
         }
@@ -57,6 +60,7 @@ struct VoiceView: View {
             Picker("Voice", selection: $tab) {
                 Text("Dictation").tag("dictation")
                 Text("Speech").tag("speech")
+                Text("Live").tag("live")
             }
             .pickerStyle(.segmented)
             .padding(.horizontal, Tokens.PhoneSpace.gutter)
@@ -162,6 +166,32 @@ struct VoiceView: View {
             }
             .tint(P.ink3)
         }
+    }
+
+    // MARK: Live
+
+    private func liveRows(_ voice: VoiceState) -> some View {
+        let s = voice.settings
+        return Section {
+            Toggle(isOn: Binding(get: { s.bargeIn }, set: { live(["barge_in": JSON($0)]) })) {
+                Text("Talk over a reply to stop it").font(Fonts.body).foregroundStyle(P.ink)
+            }
+            Picker(selection: Binding(get: { s.pause }, set: { live(["pause": .number($0)]) })) {
+                ForEach(voice.pauses, id: \.self) { p in
+                    Text(pauseWords(p)).tag(p)
+                }
+            } label: {
+                Text("Send when I stop talking").font(Fonts.body).foregroundStyle(P.ink)
+            }
+            .tint(P.ink3)
+            Toggle(isOn: Binding(get: { s.captions }, set: { live(["captions": JSON($0)]) })) {
+                Text("Show what's said").font(Fonts.body).foregroundStyle(P.ink)
+            }
+        }
+    }
+
+    private func live(_ change: [String: JSON]) {
+        session.send(session.model.voiceLive(change))
     }
 
     /// The engine's voices, with the one set first when the list doesn't have it (its

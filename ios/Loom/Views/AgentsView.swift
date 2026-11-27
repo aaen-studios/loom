@@ -128,8 +128,9 @@ struct AgentsView: View {
         .onChange(of: path) { _, now in
             if now.isEmpty { model.leaveChat() }
         }
-        // A tap on an agent a message mentions opens its chat, in place of this one.
-        .onChange(of: model.openAgent) { _, id in
+        // A tap on an agent a message mentions opens its chat, in place of this one, and
+        // `-live` at launch the first agent's, which may be asked for before this shows.
+        .onChange(of: model.openAgent, initial: true) { _, id in
             guard let id else { return }
             model.openAgent = nil
             path = [id]

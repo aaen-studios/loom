@@ -14,6 +14,7 @@ pub mod context;
 pub mod draft_card;
 pub mod drafts;
 pub mod header;
+pub mod live;
 pub mod pools;
 mod popover;
 pub mod popup;
@@ -6605,6 +6606,8 @@ pub struct Model {
     pub spools: spools::Spools,
     /// Voice: the settings and tiles, the page's state, and dictation on screen.
     pub voice: voice::Voice,
+    /// Live mode, while it runs: what the core says, for the view in the chat's place.
+    pub talk: live::Live,
     /// The settings list pages' forms, each item's as the person left it, changed and
     /// not saved (`drafts`).
     pub drafts: drafts::Drafts,
@@ -7626,6 +7629,9 @@ impl Model {
         let t = s(f, "t");
         // Voice's frames, from the core and the instance, are the voice module's.
         if self.voice.take(f) {
+            return true;
+        }
+        if self.talk.take(f) {
             return true;
         }
         // The emoji frames are the emoji module's alone; `synced` is everyone's.

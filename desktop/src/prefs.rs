@@ -234,9 +234,11 @@ pub struct Prefs {
     /// picker (`crate::model::acta`).
     pub card_boards: Vec<String>,
     /// Settings › Voice: whether Ctrl+Shift+Space starts and stops dictation in the
-    /// window, and whether the mic records only while it's held.
+    /// window, and whether the mic records only while it's held; and whether it starts
+    /// and ends live mode instead, as it does unless dictation has it (one key, one use).
     pub dictation_shortcut: bool,
     pub hold_to_talk: bool,
+    pub live_shortcut: bool,
 }
 
 impl Default for Prefs {
@@ -267,8 +269,9 @@ impl Default for Prefs {
             server_names: BTreeMap::new(),
             popup_size: None,
             card_boards: Vec::new(),
-            dictation_shortcut: true,
+            dictation_shortcut: false,
             hold_to_talk: false,
+            live_shortcut: true,
         }
     }
 }
@@ -395,6 +398,7 @@ impl Prefs {
                 .unwrap_or_default(),
             dictation_shortcut: b("dictation_shortcut", d.dictation_shortcut),
             hold_to_talk: b("hold_to_talk", d.hold_to_talk),
+            live_shortcut: b("live_shortcut", d.live_shortcut),
         }
     }
 
@@ -474,6 +478,7 @@ impl Prefs {
         }
         m.insert("dictation_shortcut".into(), json!(self.dictation_shortcut));
         m.insert("hold_to_talk".into(), json!(self.hold_to_talk));
+        m.insert("live_shortcut".into(), json!(self.live_shortcut));
         Value::Object(m)
     }
 

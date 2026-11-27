@@ -293,7 +293,8 @@ impl Loom {
                     .items_center()
                     .gap(px(space::XS))
                     .child(tab("voice-dictation", "Dictation", Tab::Dictation))
-                    .child(tab("voice-speech", "Speech", Tab::Speech)),
+                    .child(tab("voice-speech", "Speech", Tab::Speech))
+                    .child(tab("voice-live", "Live", Tab::Live)),
             )
     }
 
@@ -528,7 +529,13 @@ impl Loom {
             "voice-shortcut",
             self.prefs.dictation_shortcut,
             &[(true, SHORTCUT), (false, "Off")],
-            |p, v| p.dictation_shortcut = v,
+            // One key, one use: picking it here takes it from live mode.
+            |p: &mut crate::prefs::Prefs, v: bool| {
+                p.dictation_shortcut = v;
+                if v {
+                    p.live_shortcut = false;
+                }
+            },
             cx,
         );
         vec![
@@ -701,8 +708,13 @@ impl Loom {
             let rows = match tab {
                 Tab::Dictation => self.dictation_rows(cx),
                 Tab::Speech => self.speech_rows(cx),
+                Tab::Live => self.live_rows(cx),
             };
-            column = column.child(grid).child(self.group(None, rows));
+            // Live uses the engines picked on the other two, so it has no tiles.
+            if !tiles.is_empty() {
+                column = column.child(grid);
+            }
+            column = column.child(self.group(None, rows));
         }
         let page = div()
             .id("voice-page")

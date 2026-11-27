@@ -22,6 +22,12 @@
 // answered in the group chat, and the mic's Dictation on and off, around loom's own dictation
 // writing the words into the composer as they're said.
 //
+// The composer's Live, beside the mic, starts live mode in an agent's chat, only once it's clicked
+// (desktop/src/model/live.rs): its view takes the chat's place, one thread across it that waves in
+// ink by the speech's level while the agent speaks and in grey by the mic's while you talk, the
+// words under it, and Text, Mute and End. The talk is scripted: you ask, the agent thinks and
+// answers in two sentences, and listens again. End leaves the talk in the chat as messages.
+//
 // It plays only while it's on screen, and with reduced motion it shows each chat's end instead.
 import { draft, type Draft } from './draft';
 import { cue, listen } from './sounds';
@@ -41,6 +47,74 @@ const T3_STEPS: [string, string][] = [
 	['Editing PayButton.tsx', 'Edit src/checkout/PayButton.tsx'],
 	['Running the checkout tests', 'bun test checkout'],
 ];
+
+/** Live mode's talk in each agent's chat: what you ask, and the two sentences of the answer. */
+const LIVE_TALKS: Record<'juniper' | 'moss', { name: string; color: string; ask: string; reply: string[] }> = {
+	juniper: {
+		name: 'Juniper',
+		color: 'sky',
+		ask: "What's on my plate today?",
+		reply: ['Two things today.', 'The release notes for 2.4 are due at 15:00, and Biscuit is waiting on your review of the billing fix.'],
+	},
+	moss: {
+		name: 'Moss',
+		color: 'mint',
+		ask: 'Is the checkout fix in?',
+		reply: ['It is.', 'The pull request fixes “Contiune” on the checkout button, and its checks pass.'],
+	},
+};
+/** How the thread follows its level: rising in 0.08 s and falling in 0.25 s, nearly still while
+ * the agent thinks, and taking half the mic's level (desktop/src/model/live.rs, RISE, FALL,
+ * THINKING, MIC). */
+const LIVE_RISE = 0.08;
+const LIVE_FALL = 0.25;
+const LIVE_THINKING = 0.03;
+const LIVE_MIC = 0.5;
+/** A word as it's said: when it starts and ends, in ms into the talk, and each of its syllables'
+ * start, length and loudness, which the level follows. */
+type Said = { w: string; at: number; end: number; syl: [number, number, number][] };
+/** About how many syllables a word has, a number being said as a few. */
+const syllables = (w: string) => {
+	if (/\d/.test(w)) return Math.min(4, Math.max(2, w.replace(/\D/g, '').length));
+	const groups = w.toLowerCase().match(/[aeiouy]+/g)?.length ?? 1;
+	return Math.max(1, groups - (/[^aeiou]e$/i.test(w) && w.length > 3 ? 1 : 0));
+};
+/** Words said one after another from `from` ms, each syllable its own loudness, with a breath
+ * after a comma or a full stop; `pace` stretches it. */
+function spoken(words: string[], from: number, pace: number): Said[] {
+	const out: Said[] = [];
+	let t = from;
+	for (const w of words) {
+		const syl: [number, number, number][] = [];
+		const at = t;
+		for (let i = 0; i < syllables(w); i++) {
+			const dur = (130 + Math.random() * 90) * pace;
+			syl.push([t, dur, 0.55 + Math.random() * 0.45]);
+			t += dur + 18;
+		}
+		out.push({ w, at, end: t, syl });
+		t += (/[,.?!]$/.test(w) ? 280 : 60 + Math.random() * 50) * pace;
+	}
+	return out;
+}
+/** How loud the words are at `e` ms: a swell on each syllable, a dip between them, and nothing
+ * between words. */
+function levelIn(words: Said[], e: number) {
+	for (const s of words) {
+		if (e < s.at) break;
+		if (e >= s.end) continue;
+		for (const [at, dur, peak] of s.syl) {
+			if (e >= at && e < at + dur) return peak * Math.pow(Math.sin((Math.PI * (e - at)) / dur), 0.6) * (0.9 + 0.1 * Math.sin(e * 0.15));
+		}
+		return 0.12;
+	}
+	return 0;
+}
+/** A token's colour as red, green and blue, so the thread can ease from grey to ink. */
+const rgbOf = (hex: string): [number, number, number] => {
+	const m = /^#?([0-9a-f]{2})([0-9a-f]{2})([0-9a-f]{2})$/i.exec(hex.trim());
+	return m ? [parseInt(m[1], 16), parseInt(m[2], 16), parseInt(m[3], 16)] : [128, 128, 128];
+};
 
 /** Lucide's crossed-out pin, as the app's Unpin has it (Ico::PinOff). */
 const UNPIN_ICON =
@@ -387,7 +461,7 @@ export function play(app: HTMLElement) {
 		// Deleting a message takes its pin.
 		if (pinned.delete(row)) drawPins();
 	};
-	for (const b of app.querySelectorAll<HTMLButtonElement>('.msgs .more-btn')) {
+	const moreOf = (b: HTMLElement) =>
 		b.addEventListener('click', (e) => {
 			unmenu();
 			const row = b.closest<HTMLElement>('.row')!;
@@ -415,7 +489,7 @@ export function play(app: HTMLElement) {
 			const low = at.height - menu.offsetHeight - 8;
 			if (e.clientY - at.top + 6 > low) menu.style.top = `${Math.max(8, low)}px`;
 		});
-	}
+	app.querySelectorAll<HTMLElement>('.msgs .more-btn').forEach(moreOf);
 	document.addEventListener('pointerdown', (e) => {
 		const on = e.target as Element;
 		if (menu && !menu.contains(on) && !on.closest?.('.more-btn')) unmenu();
@@ -516,6 +590,8 @@ export function play(app: HTMLElement) {
 	const phName = app.querySelector<HTMLElement>('[data-ph-name]')!;
 	const openChat = (to: Chat) => {
 		if (to === chat) return;
+		// Live mode ends as another chat opens, its talk left in its own.
+		endLive();
 		if (!pop.hidden) showPins(false);
 		showCard(false);
 		openPlus(false);
@@ -793,6 +869,15 @@ export function play(app: HTMLElement) {
 	for (const row of pinRows) {
 		row.querySelector(':scope > .pin-btn')!.addEventListener('click', () => pin(row, !pinned.has(row)));
 	}
+	/** A message come into a chat since the page was made, as live mode leaves its talk: its pin,
+	 * Reply and ⋯ by its corner, as every other message has. */
+	const wire = (row: HTMLElement) => {
+		pinRows.push(row);
+		row.querySelector(':scope > .pin-btn')?.addEventListener('click', () => pin(row, !pinned.has(row)));
+		row.querySelector(':scope > .reply-btn')?.addEventListener('click', () => replyTo(row));
+		const more = row.querySelector<HTMLElement>(':scope > .more-btn');
+		if (more) moreOf(more);
+	};
 	drawPins();
 	pinsBtn.addEventListener('click', () => showPins(pop.hidden === true));
 	pinList.addEventListener('scroll', () => pop.classList.toggle('scrolled', pinList.scrollTop > 0));
@@ -1226,6 +1311,249 @@ export function play(app: HTMLElement) {
 		},
 		{ capture: true },
 	);
+
+	// Live mode (PLAN.md, "Live mode"; desktop/src/model/live.rs), from the composer's Live, in an
+	// agent's chat: its view in the chat's place, its head in the header's, and a talk on a clock
+	// of its own, which stops off screen and in a hidden tab. You ask, a word at a time, the thread
+	// moving lightly in grey by a mic's level; quiet for 0.8 s sends it, and the agent thinks for a
+	// second, nearly still; then it answers, its words lit in ink as they're said and the thread
+	// waving in ink by the speech's level, each syllable its own; then it listens again. With
+	// reduced motion the thread lies still and the words come whole. End brings the chat back
+	// with the talk in it.
+	const liveView = app.querySelector<HTMLElement>('[data-live]')!;
+	const liveHead = app.querySelector<HTMLElement>('[data-live-head]')!;
+	const canvas = liveView.querySelector<HTMLCanvasElement>('[data-live-wave]')!;
+	const pen = canvas.getContext('2d');
+	const liveWords = liveView.querySelector<HTMLElement>('[data-live-words]')!;
+	const liveState = liveHead.querySelector<HTMLElement>('[data-live-state]')!;
+	const liveTime = liveHead.querySelector<HTMLElement>('[data-live-time]')!;
+	const textBtn = liveView.querySelector<HTMLButtonElement>('[data-live-text]')!;
+	const muteBtn = liveView.querySelector<HTMLButtonElement>('[data-live-mute]')!;
+	const stillLive = matchMedia('(prefers-reduced-motion: reduce)');
+	type Talk = { you: Said[]; sent: number; speak: number; sentences: Said[][]; reply: Said[]; done: number };
+	let living: { chat: 'juniper' | 'moss'; talk: Talk; began: number } | null = null;
+	/** The talk's own clock, in ms, which runs only while the view is seen. */
+	let clock = 0;
+	let last = 0;
+	let raf = 0;
+	let level = 0;
+	let inked = 0;
+	let muted = false;
+	let liveSeen = false;
+	let drawnWords = '';
+	let drawnState = '';
+	let ink: [number, number, number] = [0, 0, 0];
+	let quiet: [number, number, number] = [128, 128, 128];
+	const readInk = () => {
+		const css = getComputedStyle(app);
+		ink = rgbOf(css.getPropertyValue('--ink'));
+		quiet = rgbOf(css.getPropertyValue('--ink-3'));
+	};
+	const talkOf = (c: 'juniper' | 'moss'): Talk => {
+		const t = LIVE_TALKS[c];
+		const you = spoken(t.ask.split(' '), 900, 1.15);
+		const sent = you[you.length - 1].end + 800;
+		const speak = sent + 1000;
+		const sentences: Said[][] = [];
+		let at = speak;
+		for (const s of t.reply) {
+			const said = spoken(s.split(' '), at, 1);
+			sentences.push(said);
+			at = said[said.length - 1].end + 380;
+		}
+		return { you, sent, speak, sentences, reply: sentences.flat(), done: at - 80 };
+	};
+	const stateAt = (t: Talk, e: number) => (e < t.sent ? 'Listening' : e < t.speak ? 'Thinking' : e < t.done ? 'Speaking' : 'Listening');
+	/** The words under the thread at `e`: yours as they come, then the sentence being said, its
+	 * words in ink once they're said. */
+	const drawWords = (t: Talk, e: number) => {
+		const still = stillLive.matches;
+		let words: Said[] = [];
+		let lit = (_: Said) => true;
+		if (e < t.speak) words = t.you.filter((w) => w.at <= e || (still && e >= t.you[0].at));
+		else if (still) words = t.reply;
+		else {
+			let n = 0;
+			while (n + 1 < t.sentences.length && t.sentences[n + 1][0].at <= e) n++;
+			words = t.sentences[n];
+			lit = (w) => w.at <= e || e >= t.done;
+		}
+		const key = words.map((w) => (lit(w) ? w.w : `_${w.w}`)).join(' ');
+		if (key === drawnWords) return;
+		drawnWords = key;
+		liveWords.replaceChildren(
+			...words.flatMap((w, i) => {
+				const span = document.createElement('span');
+				span.textContent = w.w;
+				if (lit(w)) span.className = 'on';
+				return i ? [' ', span] : [span];
+			}),
+		);
+	};
+	/** The thread across the view, held at both ends between its insets: y(u, t) = A · H · sin(πu) ·
+	 * (0.6 sin 2π(1.5u − 0.9t) + 0.4 sin 2π(2.5u + 0.6t)), H about 18% of the view's height. */
+	const drawWave = (t: number) => {
+		if (!pen) return;
+		const ratio = devicePixelRatio || 1;
+		const w = canvas.clientWidth;
+		const h = canvas.clientHeight;
+		if (canvas.width !== Math.round(w * ratio) || canvas.height !== Math.round(h * ratio)) {
+			canvas.width = Math.round(w * ratio);
+			canvas.height = Math.round(h * ratio);
+		}
+		pen.setTransform(ratio, 0, 0, ratio, 0, 0);
+		pen.clearRect(0, 0, w, h);
+		const inset = w < 480 ? 20 : 48;
+		const span = w - 2 * inset;
+		if (span <= 0) return;
+		const amp = Math.min(stillLive.matches ? 0 : level * 0.18 * liveView.clientHeight, h / 2 - 2);
+		const steps = Math.max(64, Math.round(span / 3));
+		pen.beginPath();
+		for (let i = 0; i <= steps; i++) {
+			const u = i / steps;
+			const y = amp * Math.sin(Math.PI * u) * (0.6 * Math.sin(2 * Math.PI * (1.5 * u - 0.9 * t)) + 0.4 * Math.sin(2 * Math.PI * (2.5 * u + 0.6 * t)));
+			if (i) pen.lineTo(inset + u * span, h / 2 - y);
+			else pen.moveTo(inset, h / 2);
+		}
+		const [r, g, b] = quiet.map((q, i) => Math.round(q + (ink[i] - q) * inked));
+		pen.strokeStyle = `rgb(${r} ${g} ${b})`;
+		pen.lineWidth = 1.5;
+		pen.lineCap = 'round';
+		pen.lineJoin = 'round';
+		pen.stroke();
+	};
+	/** What the thread follows at `e`: the speech's level while the agent speaks, half the mic's
+	 * while you talk, nearly nothing while it thinks or listens to a quiet room, and nothing muted. */
+	const targetAt = (t: Talk, e: number, state: string) => {
+		if (muted) return 0;
+		if (state === 'Speaking') return Math.max(0.04, levelIn(t.reply, e));
+		if (state === 'Thinking') return LIVE_THINKING;
+		const heard = e < t.sent ? levelIn(t.you, e) : 0;
+		return heard > 0 ? heard * LIVE_MIC : 0.02 + 0.01 * Math.sin(e / 310);
+	};
+	const frame = (ms: number) => {
+		raf = 0;
+		if (!living) return;
+		if (!liveSeen || document.hidden) {
+			last = 0;
+			return;
+		}
+		const dt = last ? Math.min((ms - last) / 1000, 0.1) : 0;
+		last = ms;
+		clock += dt * 1000;
+		const { talk } = living;
+		const state = stateAt(talk, clock);
+		const target = targetAt(talk, clock, state);
+		level += (target - level) * (1 - Math.exp(-dt / (target > level ? LIVE_RISE : LIVE_FALL)));
+		const toInk = state === 'Speaking' ? 1 : 0;
+		inked = stillLive.matches ? toInk : inked + (toInk - inked) * (1 - Math.exp(-dt / 0.2));
+		if (state !== drawnState) {
+			drawnState = state;
+			liveState.textContent = state;
+			if (stillLive.matches) drawWave(0);
+		}
+		drawWords(talk, clock);
+		if (!stillLive.matches) drawWave(clock / 1000);
+		const run = Math.floor((Date.now() - living.began) / 1000);
+		liveTime.textContent = `${Math.floor(run / 60)}:${String(run % 60).padStart(2, '0')}`;
+		raf = requestAnimationFrame(frame);
+	};
+	const kickLive = () => {
+		if (living && !raf) raf = requestAnimationFrame(frame);
+	};
+	new IntersectionObserver((entries) => {
+		liveSeen = entries[entries.length - 1].isIntersecting;
+		kickLive();
+	}).observe(app);
+	document.addEventListener('visibilitychange', kickLive);
+	new ResizeObserver(() => {
+		if (living) drawWave(clock / 1000);
+	}).observe(canvas);
+	// The theme changes the ink, and the thread with it.
+	const redraw = () => {
+		readInk();
+		if (living) drawWave(clock / 1000);
+	};
+	matchMedia('(prefers-color-scheme: dark)').addEventListener('change', redraw);
+	new MutationObserver(redraw).observe(document.documentElement, { attributes: true, attributeFilter: ['data-theme'] });
+	stillLive.addEventListener('change', () => {
+		drawnWords = '';
+		redraw();
+	});
+
+	app.querySelector('[data-live-btn]')!.addEventListener('click', () => {
+		if (living || chat === 'shop') return;
+		if (!pop.hidden) showPins(false);
+		showCard(false);
+		openPlus(false);
+		unreply();
+		const side = app.querySelector<HTMLElement>('[data-acta-side]');
+		if (side) side.hidden = true;
+		living = { chat, talk: talkOf(chat), began: Date.now() };
+		clock = 0;
+		last = 0;
+		level = 0;
+		inked = 0;
+		muted = false;
+		drawnWords = '';
+		drawnState = '';
+		muteBtn.setAttribute('aria-pressed', 'false');
+		liveWords.replaceChildren();
+		liveHead.querySelector('[data-live-name]')!.textContent = LIVE_TALKS[chat].name;
+		liveState.textContent = 'Listening';
+		liveTime.textContent = '0:00';
+		app.classList.add('living');
+		readInk();
+		drawWave(0);
+		kickLive();
+	});
+	textBtn.addEventListener('click', () => {
+		const on = textBtn.getAttribute('aria-pressed') !== 'true';
+		textBtn.setAttribute('aria-pressed', String(on));
+		liveWords.classList.toggle('off', !on);
+	});
+	muteBtn.addEventListener('click', () => {
+		muted = muteBtn.getAttribute('aria-pressed') !== 'true';
+		muteBtn.setAttribute('aria-pressed', String(muted));
+	});
+	liveView.querySelector('[data-live-end]')!.addEventListener('click', endLive);
+	liveHead.querySelector('.head-bar')!.addEventListener('click', () => drawer(true));
+	/** End: the chat back, with the talk in it as messages once what you said was sent. */
+	function endLive() {
+		if (!living) return;
+		const { chat: at, talk } = living;
+		living = null;
+		cancelAnimationFrame(raf);
+		raf = 0;
+		app.classList.remove('living');
+		if (clock >= talk.sent) {
+			const t = LIVE_TALKS[at];
+			const list = lists[at];
+			const lines = list.querySelectorAll('.time-line');
+			const when = 'Today 11:32';
+			const latest = lines[lines.length - 1];
+			if (latest && latest.textContent !== when) {
+				// A copy of the chat's own, so the page's styles reach it.
+				const line = latest.cloneNode() as HTMLElement;
+				line.textContent = when;
+				list.append(line);
+			}
+			const you = tpl('demo-live-you');
+			you.querySelector('.bubble')!.textContent = t.ask;
+			const reply = tpl('demo-live-reply');
+			reply.dataset.by = t.name;
+			reply.querySelector('.who')!.textContent = t.name;
+			reply.querySelector('.said p')!.textContent = t.reply.join(' ');
+			reply.querySelector('svg[data-thread]')!.setAttribute('data-color', t.color);
+			list.append(you, reply);
+			threadsIn(reply);
+			for (const row of [you, reply]) {
+				wire(row);
+				send(row);
+			}
+		}
+		fitHeader();
+	}
 
 	const reduced = matchMedia('(prefers-reduced-motion: reduce)');
 	reduced.addEventListener('change', () => {

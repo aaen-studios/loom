@@ -91,9 +91,10 @@ struct Composer: View {
             if let now { replaceEmoji(now) }
         }
         .onChange(of: model.voice.heard) { _, now in dictation(now) }
-        // The mic with no engine set up opens Settings › Voice.
+        // The mic or Live with no engine set up opens Settings › Voice, on the tab of the
+        // one missing.
         .sheet(isPresented: Binding(get: { session.model.voice.open }, set: { session.model.voice.open = $0 })) {
-            NavigationStack { VoiceView() }
+            NavigationStack { VoiceView(kind: session.model.voice.openKind) }
         }
         .onChange(of: box.attached) { _, ids in model.syncAttachments(ids) }
         // Starting a reply puts the cursor in the composer.
@@ -233,6 +234,23 @@ struct Composer: View {
                 }
 
                 mic
+
+                // Live mode with the agent, in an agent's chat (PLAN.md, "Live mode").
+                if model.room == nil {
+                    Button {
+                        UIImpactFeedbackGenerator(style: .light).impactOccurred()
+                        box.view?.resignFirstResponder()
+                        model.emoji.shutPicker()
+                        session.startLive()
+                    } label: {
+                        Image(systemName: "waveform")
+                            .font(.system(size: 17, weight: .medium))
+                            .foregroundStyle(P.ink2)
+                            .frame(width: Tokens.Control.iconComposer, height: Tokens.Control.iconComposer)
+                            .contentShape(Circle())
+                    }
+                    .accessibilityLabel("Live")
+                }
 
                 Button {
                     if busy && idle {

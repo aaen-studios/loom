@@ -47,6 +47,7 @@ struct ChatView: View {
         let messages = here ? model.shown : []
         let approvals = here ? model.shownApprovals : []
         let stacked = stackedLines(messages)
+        let live = !warming && here && model.liveMode.on && model.liveMode.conversation == model.conversation
         ScrollViewReader { proxy in
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: Tokens.Space.l + 2) {
@@ -193,6 +194,14 @@ struct ChatView: View {
             }
         }
         .background(P.bg)
+        // Live mode with this chat's agent, in place of its header, messages and composer.
+        .overlay {
+            if live {
+                LiveView().transition(.opacity)
+            }
+        }
+        .animation(.easeOut(duration: 0.2), value: live)
+        .toolbar(live ? .hidden : .automatic, for: .navigationBar)
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
             ToolbarItem(placement: .principal) {

@@ -1,0 +1,950 @@
+module core.live
+
+// Live mode (PLAN.md, "Live mode"; LOO-440): talking with an agent, in place of the
+// chat. The app records the mic and plays what it's told; everything between is here.
+//
+// - **The ear.** The mic's PCM comes as it does for dictation (`voice.audio`), brought
+//   to 24 kHz mono and judged 20 ms at a time: how loud it is against the room's own
+//   level, which it keeps learning while no one talks. Speech that lasts 60 ms starts a
+//   turn, with the 300 ms before it, so the first word isn't lost; quiet for the
+//   person's pause (Send when I stop talking) ends it.
+// - **The turn** is heard by the dictation engine in use, through core/voice.calx's
+//   dictation: it starts as speech starts and stops as it ends, and its last words go
+//   to the agent as the person's message (`send`), in the chat, as any other.
+// - **The reply** streams in as deltas. Its words are cut into sentences as they come,
+//   said as words (no code, no marks), and spoken by the speech engine in use a few
+//   sentences at a time: the first as soon as it's whole, the next while the one
+//   before plays. Each is played when the one before ends, by its own length.
+// - **Barge-in.** With Talk over a reply on, speech louder than the room by more, for
+//   300 ms, while the agent speaks, stops what plays, drops what's waiting, stops the
+//   run (`cancel`), and starts the person's turn.
+// - **What the view draws** comes with `core.live`: the state (listening, thinking or
+//   speaking), the mic's level about every 100 ms while it listens, and with each
+//   piece of speech to play, its words, when each starts, and its level each 20 ms,
+//   from the PCM itself.
+//
+// It changes nothing itself: what it wants done is in `to_voice` (dictation and speech,
+// for the core's Voice), `sends` (frames for the instance: the person's `send` and
+// `cancel`) and `to_app`, which core/conn.calx carries out.
+import std.json.{Json, parse}
+import std.math.{log10, sin}
+import shared.obj.{Obj, at, bool_at, merge, str_at}
+import shared.voice as engines
+
+const FRAME: usize = 480           // 20 ms of 24 kHz samples, what the ear judges at once
+const FRAME_MS: i64 = 20
+const BEFORE: usize = 15           // frames kept from before speech starts: 300 ms
+const ONSET: u32 = 3               // frames of speech in a row that start a turn: 60 ms
+const BARGE: u32 = 15              // and that stop a reply: 300 ms
+const OVER_ROOM_DB: f64 = 12.0     // how much louder than the room speech is
+const BARGE_DB: f64 = 8.0          // and more while the agent speaks, over its echo
+const QUIETEST_DB: f64 = -52.0     // never speech below this
+const LEARNING: u32 = 10           // frames that only learn the room: 200 ms
+const SAY_MOST: usize = 280        // the most text spoken in one request
+const SENTENCE_LEAST: usize = 8    // a shorter sentence goes with the next
+const LIVE_ID: str = "live:"       // the id speech for live mode goes with
+
+/// What live mode asks of the core's Voice (core/voice.calx).
+pub enum Do {
+    Listen               // dictation starts
+    Hear(List<u8>)       // 24 kHz mono 16-bit PCM for it
+    Stop                 // dictation ends: its last words come
+    Speak(String, String)    // the text to say, and the id its core.speak comes with
+    Hush                 // speech waiting is dropped, and what plays stops
+}
+
+/// Where the turn's dictation is.
+enum Ear {
+    Idle
+    Hearing      // Listen went, and what the mic hears goes after it
+    Finishing    // Stop went: the last words are coming
+}
+
+// A piece of speech, written, waiting to play or playing.
+struct Piece {
+    file: String
+    words: List<String>
+    at: List<i64>      // when each word starts, ms into it
+    levels: List<f64>  // its level each 20 ms, 0 to 1
+    ms: i64
+}
+
+// A text block of the reply being cut into sentences.
+struct Block {
+    message: String
+    index: i64
+    pending: String    // what came that isn't a whole sentence yet
+    seen: String       // everything that came
+    code: bool         // inside a fenced code block
+}
+
+pub struct Live {
+    pub on: bool
+    pub agent: String
+    pub name: String
+    pub conversation: String
+    started: i64
+    muted: bool
+    barge_in: bool
+    pause_ms: i64
+    captions: bool
+    speaks: bool           // replies are read aloud in live mode (Never isn't)
+    // The ear.
+    floor: f64             // the room's level, dBFS
+    frames: u32
+    rest: List<i16>        // samples short of a frame
+    run: u32               // frames of speech in a row
+    quiet_ms: i64          // since the last frame of speech
+    talking: bool
+    before: List<List<i16>>    // the last frames, for what came before speech started
+    ear: Ear
+    held: List<u8>         // what the mic heard while the last turn's words came
+    pub draining: bool     // live ended while the ear was still hearing
+    discard: bool          // and started again: those words are dropped
+    heard: String          // the person's words this turn, or the last one's
+    // The reply.
+    waiting: bool          // a turn went, and its run hasn't started
+    run_id: String
+    going: bool            // the run hasn't finished
+    reply: String          // the reply's message id
+    caption: String        // the reply's words, for Never, which shows them
+    blocks: List<Block>
+    gen: u64               // speech from before a barge-in is dropped by this
+    next: u64
+    queue: List<String>    // sentences to say
+    saying: String         // the id of the speech being written, or ""
+    saying_text: String    // and its words
+    ready: List<Piece>
+    playing: Piece?
+    ends: i64              // when the piece playing ends, ms
+    played: bool           // this reply has played something
+    told: String           // the state the app was last told
+    pub to_voice: List<Do>
+    pub sends: List<Json>
+    pub to_app: List<Json>
+}
+
+/// A sound's level from its loudness: -60 dBFS and below is 0, -10 and above is 1.
+pub fn level_of(db: f64) -> f64 {
+    let l = (db + 60.0) / 50.0
+    return if l < 0.0 { 0.0 } else if l > 1.0 { 1.0 } else { l }
+}
+
+/// How loud samples are, in dBFS: their RMS against a full-scale sine's peak.
+pub fn db_of(samples: List<i16>) -> f64 {
+    if samples.len() == 0 { return -100.0 }
+    var sum = 0.0
+    for s in samples {
+        let x = f64(s) / 32768.0
+        sum += x * x
+    }
+    let rms = (sum / f64.nearest(samples.len())).sqrt()
+    if rms < 0.00001 { return -100.0 }
+    return 20.0 * log10(rms)
+}
+
+fn rounded(x: f64) -> f64 {
+    return (x * 100.0).rint() / 100.0
+}
+
+/// 16-bit little-endian PCM as samples.
+fn samples_of(pcm: List<u8>, from: usize) -> List<i16> {
+    var out = List<i16>()
+    var i = from
+    while i + 1 < pcm.len() {
+        out.push(i16.wrap(u32(pcm[i]) | (u32(pcm[i + 1]) << 8)))
+        i += 2
+    }
+    return out
+}
+
+/// A WAV of speech, 16-bit mono at 24 kHz with std.wave's 44-byte header, as live mode
+/// plays it: how long it is, its level each 20 ms, and `text`'s words, each starting
+/// at its share of the time between the first sound and the last.
+fn piece_of(file: own String, wav: List<u8>, text: String) -> Piece {
+    let samples = samples_of(wav, 44)
+    var levels = List<f64>()
+    var i: usize = 0
+    while i < samples.len() {
+        let end = if i + FRAME < samples.len() { i + FRAME } else { samples.len() }
+        var frame = List<i16>()
+        for k in i..end { frame.push(samples[k]) }
+        levels.push(rounded(level_of(db_of(frame))))
+        i = end
+    }
+    let ms = i64.wrap(samples.len() / 24)
+    // The words go where there's sound, not the silence at either end.
+    var first: usize = 0
+    var last: usize = levels.len()
+    while first < levels.len() and levels[first] < 0.2 { first += 1 }
+    while last > first and levels[last - 1] < 0.2 { last -= 1 }
+    if first >= last {
+        first = 0
+        last = levels.len()
+    }
+    let from_ms = i64.wrap(first) * FRAME_MS
+    let span = i64.wrap(last - first) * FRAME_MS
+    let words = text.split_whitespace()
+    var weights: usize = 0
+    for w in words { weights += w.len() + 2 }
+    var at_ms = List<i64>()
+    var so_far: usize = 0
+    for w in words {
+        at_ms.push(from_ms + if weights == 0 { 0i64 } else { i64.wrap(so_far) * span / i64.wrap(weights) })
+        so_far += w.len() + 2
+    }
+    return Piece { file: file, words: words, at: at_ms, levels: levels, ms: ms }
+}
+
+/// Where a whole sentence ends in `text`, the last such place: just after a `.`, `!`
+/// or `?` with a space after it, past the first `least` bytes and not after a number
+/// alone ("1. "). None if there's none.
+fn last_stop(text: String, least: usize) -> usize? {
+    var found: usize? = none
+    var i: usize = 0
+    while i + 1 < text.len() {
+        let c = text.byte_at(i)
+        if (c == 46 or c == 33 or c == 63) and text.byte_at(i + 1) == 32 and i + 1 >= least {
+            // "1. " starts a list item, and isn't a sentence's end.
+            var k = i
+            while k > 0 and text.byte_at(k - 1) >= 48 and text.byte_at(k - 1) <= 57 { k -= 1 }
+            let numbered = k < i and (k == 0 or text.byte_at(k - 1) == 32)
+            if not numbered { found = some(i + 1) }
+        }
+        i += 1
+    }
+    return found
+}
+
+/// What of a block can be said now: each whole line, and whole sentences of the line
+/// still coming, or with `end`, all of it. Lines in fenced code aren't said. What's
+/// left waits in `pending`.
+fn cut(b: mut Block, end: bool) -> List<String> {
+    var out = List<String>()
+    while let nl = b.pending.find("\n") {
+        let line = b.pending[0..nl].copy()
+        b.pending = b.pending[nl + 1..].copy()
+        if line.trim().starts_with("```") {
+            b.code = not b.code
+            continue
+        }
+        if not b.code and line.trim().len() > 0 { out.push(line) }
+    }
+    if b.code or b.pending.trim_start().starts_with("`") {
+        if end { b.pending = String() }
+        return out
+    }
+    if end {
+        if b.pending.trim().len() > 0 { out.push(b.pending.copy()) }
+        b.pending = String()
+        return out
+    }
+    if let stop = last_stop(b.pending.copy(), SENTENCE_LEAST) {
+        out.push(b.pending[0..stop].copy())
+        b.pending = b.pending[stop..].copy()
+    }
+    return out
+}
+
+impl Live {
+    pub fn new() -> Live {
+        return Live { on: false, agent: String(), name: String(), conversation: String(), started: 0, muted: false, barge_in: true, pause_ms: 800, captions: true, speaks: true, floor: -60.0, frames: 0, rest: List<i16>(), run: 0, quiet_ms: 0, talking: false, before: List<List<i16>>(), ear: Ear.Idle, held: List<u8>(), draining: false, discard: false, heard: String(), waiting: false, run_id: String(), going: false, reply: String(), caption: String(), blocks: List<Block>(), gen: 0, next: 0, queue: List<String>(), saying: String(), saying_text: String(), ready: List<Piece>(), playing: none, ends: 0, played: false, told: String(), to_voice: List<Do>(), sends: List<Json>(), to_app: List<Json>() }
+    }
+
+    /// Whether the dictation Voice is doing is live mode's, whose core.dictation is
+    /// live mode's too, not the composer's.
+    pub fn owns_ear(self) -> bool {
+        return self.ear != Ear.Idle and (self.on or self.draining)
+    }
+
+    /// Whether a core.speak is live mode's.
+    pub fn is_mine(id: String) -> bool {
+        return id.starts_with(LIVE_ID)
+    }
+
+    /// Live mode starts with `agent` in `conversation`, by the person's voice
+    /// `settings`. With no dictation engine, or no speech engine while replies are read
+    /// aloud, the app is told so (`no_engine`), and opens Settings › Voice.
+    pub fn start(mut self, settings: Json, agent: String, name: String, conversation: String, now: i64) {
+        let dictation = str_at(at(settings.copy(), "dictation"), "engine") ?? String()
+        let speech = str_at(at(settings.copy(), "speech"), "engine") ?? String()
+        let read = str_at(at(settings.copy(), "speech"), "read_aloud") ?? String()
+        let speaks = read != "never"
+        if dictation.len() == 0 or (speaks and speech.len() == 0) {
+            let kind = if dictation.len() == 0 { "dictation" } else { "speech" }
+            let why = if dictation.len() == 0 { "Set up dictation in Settings › Voice to talk with an agent." } else { "Set up speech in Settings › Voice to hear an agent's replies." }
+            self.to_app.push(Obj.new().s("t", String("core.live")).s("state", String("no_engine")).s("kind", String(kind)).s("why", String(why)).done())
+            return
+        }
+        let live = at(settings, "live")
+        var fresh = Live.new()
+        fresh.on = true
+        fresh.agent = agent.copy()
+        fresh.name = name.copy()
+        fresh.conversation = conversation.copy()
+        fresh.started = now
+        fresh.barge_in = bool_at(live.copy(), "barge_in") ?? true
+        fresh.captions = bool_at(live.copy(), "captions") ?? true
+        let pause = match at(live, "pause") {
+            Json.Float(p) => p,
+            _ => 0.8,
+        }
+        fresh.pause_ms = i64.round(pause * 1000.0)
+        fresh.speaks = speaks
+        fresh.gen = self.gen + 1
+        fresh.next = self.next
+        fresh.to_voice.push(Do.Hush)
+        // A turn of the last time still being heard ends first, and its words are dropped.
+        if self.ear != Ear.Idle {
+            fresh.ear = Ear.Finishing
+            fresh.discard = true
+        }
+        self = fresh
+        self.tell(Json.Null)
+    }
+
+    /// The person ended it: the mic's turn is dropped, speech stops, and the app goes
+    /// back to the chat, where the talk is, as messages.
+    pub fn end(mut self) {
+        if not self.on { return }
+        if self.ear == Ear.Hearing { self.to_voice.push(Do.Stop) }
+        self.draining = self.ear != Ear.Idle
+        self.drop_speech()
+        self.on = false
+        self.to_app.push(Obj.new().s("t", String("core.live")).s("state", String("ended")).s("conversation", self.conversation.copy()).b("stop", true).done())
+    }
+
+    /// Mute: the mic is heard no more until it's let go. A turn being said ends there.
+    pub fn mute(mut self, on: bool) {
+        if not self.on or self.muted == on { return }
+        self.muted = on
+        if on and self.talking {
+            self.talking = false
+            self.ended()
+        }
+        self.run = 0
+        self.tell(Json.Null)
+    }
+
+    // The state the view shows: speaking while speech plays, or more is coming after
+    // what played; thinking once a turn went, until its reply speaks or ends; and
+    // listening otherwise, as while the person talks.
+    fn state(self) -> str {
+        if self.playing != none { return "speaking" }
+        let more = self.ready.len() > 0 or self.saying.len() > 0 or self.queue.len() > 0
+        if more and self.played { return "speaking" }
+        if self.ear != Ear.Idle or self.talking { return "listening" }
+        if self.waiting or more or (self.going and self.speaks) { return "thinking" }
+        return "listening"
+    }
+
+    // Whether the agent is speaking, so the person's voice is a barge-in.
+    fn speaking(self) -> bool {
+        return self.playing != none or self.ready.len() > 0 or self.saying.len() > 0 or self.queue.len() > 0
+    }
+
+    // Tells the app how it stands, with `extra` (level, play, stop, why).
+    fn tell(mut self, extra: Json) {
+        let state = self.state()
+        self.told = String(state)
+        var f = Obj.new().s("t", String("core.live")).s("state", String(state)).s("agent", self.agent.copy()).s("name", self.name.copy()).s("conversation", self.conversation.copy()).i("started", self.started).b("muted", self.muted).b("captions", self.captions)
+        let words = if self.caption.len() == 0 { self.heard.copy() } else { self.caption.copy() }
+        f = f.s("words", words)
+        self.to_app.push(merge(f.done(), extra.copy()))
+    }
+
+    // Tells the app only if the state changed.
+    fn retell(mut self) {
+        if self.state() != self.told { self.tell(Json.Null) }
+    }
+
+    /// What the mic heard: 16-bit PCM, `channels` interleaved at `rate`.
+    pub fn audio(mut self, pcm: List<u8>, rate: u32, channels: u32) {
+        if not self.on or self.muted { return }
+        var samples = self.rest.copy()
+        for s in engines.to_24k(pcm, rate, channels) { samples.push(s) }
+        var loudest = 0.0
+        var i: usize = 0
+        var feed = List<i16>()
+        while i + FRAME <= samples.len() {
+            var frame = List<i16>()
+            for k in i..i + FRAME { frame.push(samples[k]) }
+            i += FRAME
+            let l = self.frame(frame, mut feed)
+            if l > loudest { loudest = l }
+            if not self.on { return }
+        }
+        var rest = List<i16>()
+        for k in i..samples.len() { rest.push(samples[k]) }
+        self.rest = rest
+        if feed.len() > 0 { self.hear(feed) }
+        if not self.speaking() { self.tell(Obj.new().j("level", Json.Float(rounded(loudest))).done()) }
+    }
+
+    // One frame: the room learnt, speech found, a turn started or ended. Gives its
+    // level. What's to go to the dictation goes in `feed`.
+    fn frame(mut self, frame: List<i16>, feed: mut List<i16>) -> f64 {
+        let db = db_of(frame.copy())
+        self.frames += 1
+        if self.frames <= LEARNING {
+            self.floor = if self.frames == 1 or db < self.floor { db } else { self.floor + 0.2 * (db - self.floor) }
+            self.keep_before(frame.copy())
+            return level_of(db)
+        }
+        let barging = self.speaking()
+        // While the agent speaks with barge-in off, the mic isn't heard.
+        if barging and not self.barge_in {
+            self.run = 0
+            return 0.0
+        }
+        let over = if barging { OVER_ROOM_DB + BARGE_DB } else { OVER_ROOM_DB }
+        let least = if barging { QUIETEST_DB + BARGE_DB } else { QUIETEST_DB }
+        let threshold = if self.floor + over > least { self.floor + over } else { least }
+        let speech = db > threshold
+        // The room's level falls at once and rises slowly, and hardly while someone talks.
+        if db < self.floor {
+            self.floor = if db < -90.0 { -90.0 } else { db }
+        } else {
+            self.floor += (if speech { 0.001 } else { 0.02 }) * (db - self.floor)
+        }
+        if speech {
+            self.run += 1
+            self.quiet_ms = 0
+        } else {
+            self.run = 0
+            self.quiet_ms += FRAME_MS
+        }
+        if not self.talking {
+            self.keep_before(frame.copy())
+            if self.run >= (if barging { BARGE } else { ONSET }) {
+                self.talking = true
+                if barging { self.barge() }
+                // The turn starts with what came just before it.
+                var all = List<i16>()
+                while self.before.len() > 0 {
+                    let f = self.before.remove(0)
+                    for s in f { all.push(s) }
+                }
+                self.began(all)
+            }
+        } else {
+            if self.ear == Ear.Finishing {
+                for b in engines.le_bytes(frame) { self.held.push(b) }
+            } else {
+                for s in frame { feed.push(s) }
+            }
+            if self.quiet_ms >= self.pause_ms {
+                self.talking = false
+                if feed.len() > 0 {
+                    self.hear(feed.copy())
+                    feed.clear()
+                }
+                self.ended()
+            }
+        }
+        return level_of(db)
+    }
+
+    fn keep_before(mut self, frame: own List<i16>) {
+        self.before.push(frame)
+        while self.before.len() > BEFORE { _ = self.before.remove(0) }
+    }
+
+    fn hear(mut self, samples: List<i16>) {
+        if self.ear == Ear.Hearing { self.to_voice.push(Do.Hear(engines.le_bytes(samples))) }
+    }
+
+    // Speech started: the turn's dictation starts with `first`, or while the last
+    // turn's words are still coming, `first` waits for it.
+    fn began(mut self, first: List<i16>) {
+        self.caption = String()
+        if self.ear == Ear.Idle {
+            self.ear = Ear.Hearing
+            self.heard = String()
+            self.to_voice.push(Do.Listen)
+            self.to_voice.push(Do.Hear(engines.le_bytes(first)))
+        } else if self.ear == Ear.Finishing {
+            for b in engines.le_bytes(first) { self.held.push(b) }
+        }
+        self.retell()
+    }
+
+    // Quiet for the person's pause: the turn's last words come.
+    fn ended(mut self) {
+        if self.ear == Ear.Hearing {
+            self.to_voice.push(Do.Stop)
+            self.ear = Ear.Finishing
+        }
+    }
+
+    // The person talked over the reply: what plays stops, what's waiting goes, and the
+    // run is stopped, its words so far kept in the chat.
+    fn barge(mut self) {
+        self.drop_speech()
+        if self.going and self.run_id.len() > 0 {
+            self.sends.push(Obj.new().s("t", String("cancel")).s("run", self.run_id.copy()).done())
+        }
+        self.blocks = List<Block>()
+        self.reply = String()
+        self.tell(Obj.new().b("stop", true).done())
+    }
+
+    fn drop_speech(mut self) {
+        let had = self.playing != none or self.saying.len() > 0 or self.ready.len() > 0
+        self.queue = List<String>()
+        self.ready = List<Piece>()
+        self.playing = none
+        self.saying = String()
+        self.played = false
+        self.gen += 1
+        if had { self.to_voice.push(Do.Hush) }
+    }
+
+    /// What the dictation said (`core.dictation`), while it's live mode's.
+    pub fn dictation(mut self, f: Json) {
+        let state = str_at(f.copy(), "state") ?? String()
+        if not self.on {
+            if state == "done" or state == "failed" or state == "no_engine" {
+                self.ear = Ear.Idle
+                self.draining = false
+            }
+            return
+        }
+        let text = (str_at(f.copy(), "text") ?? String()).trim().copy()
+        if state == "listening" or state == "finishing" {
+            if text != self.heard {
+                self.heard = text
+                self.tell(Json.Null)
+            }
+            return
+        }
+        if state == "no_engine" {
+            self.ear = Ear.Idle
+            let why = str_at(f, "why") ?? String("Set up dictation in Settings › Voice to talk with an agent.")
+            self.drop_speech()
+            self.on = false
+            self.to_app.push(Obj.new().s("t", String("core.live")).s("state", String("no_engine")).s("kind", String("dictation")).s("why", why).b("stop", true).done())
+            return
+        }
+        if state != "done" and state != "failed" { return }
+        self.ear = Ear.Idle
+        if self.discard {
+            self.discard = false
+            self.restart()
+            return
+        }
+        self.heard = text.copy()
+        if state == "failed" {
+            self.tell(Obj.new().s("why", str_at(f, "why") ?? String("Dictation stopped.")).done())
+        } else if text.len() > 0 {
+            self.next += 1
+            self.sends.push(Obj.new().s("t", String("send")).s("cid", "live_{self.started}_{self.next}").s("conversation", self.conversation.copy()).s("text", text).done())
+            self.waiting = true
+            self.caption = String()
+            self.tell(Json.Null)
+        } else {
+            self.retell()
+        }
+        self.restart()
+    }
+
+    // The person went on talking while the last words came: the next turn starts with
+    // what the mic heard meanwhile.
+    fn restart(mut self) {
+        if self.held.len() > 0 or self.talking {
+            self.ear = Ear.Hearing
+            self.heard = String()
+            self.to_voice.push(Do.Listen)
+            self.to_voice.push(Do.Hear(self.held.copy()))
+            self.held = List<u8>()
+            if not self.talking { self.ended() }
+        }
+    }
+
+    /// A live event, after the cache applied it: a reply starting, finished, and its
+    /// run ending, in the live chat.
+    pub fn event(mut self, f: Json, now: i64) {
+        if not self.on { return }
+        let kind = str_at(f.copy(), "kind") ?? String()
+        if kind == "run.started" {
+            if str_at(f.copy(), "conversation") != some(self.conversation.copy()) { return }
+            if bool_at(f.copy(), "quiet") == some(true) or str_at(f.copy(), "routine") != none { return }
+            self.run_id = str_at(f.copy(), "run") ?? String()
+            self.reply = str_at(f, "message") ?? String()
+            self.going = true
+            self.waiting = false
+            self.caption = String()
+            self.retell()
+            return
+        }
+        if kind == "message.created" {
+            let m = at(f, "message")
+            let id = str_at(m.copy(), "id") ?? String()
+            if id.len() == 0 or id != self.reply { return }
+            // Whatever wasn't streamed, and the ends of what was, said now.
+            if let Json.Array(blocks) = at(m.copy(), "blocks") {
+                var index: i64 = 0
+                for b in blocks {
+                    if (str_at(b.copy(), "kind") ?? String()) == "text" and str_at(b.copy(), "parent") == none {
+                        let whole = str_at(b.copy(), "text") ?? String()
+                        match self.block_at(id.copy(), index) {
+                            some(k) => if whole.len() > self.blocks[k].seen.len() and whole.starts_with(self.blocks[k].seen.copy()) {
+                                let more = whole[self.blocks[k].seen.len()..].copy()
+                                self.blocks[k].pending.push_str(more)
+                            },
+                            none => self.blocks.push(Block { message: id.copy(), index: index, pending: whole, seen: String(), code: false }),
+                        }
+                    }
+                    index += 1
+                }
+            }
+            var all = List<String>()
+            for k in 0..self.blocks.len() {
+                if self.blocks[k].message == id {
+                    for s in cut(mut self.blocks[k], true) { all.push(s.copy()) }
+                }
+            }
+            self.blocks = List<Block>()
+            self.reply = String()
+            if self.speaks {
+                for s in all { self.say(s) }
+            } else {
+                self.caption = engines.speakable(all.join("\n"))
+            }
+            self.pump(now)
+            self.tell(Json.Null)
+            return
+        }
+        if kind == "run.finished" {
+            if str_at(f, "run") != some(self.run_id.copy()) { return }
+            self.going = false
+            self.waiting = false
+            self.retell()
+        }
+    }
+
+    fn block_at(self, message: String, index: i64) -> usize? {
+        for k in 0..self.blocks.len() {
+            if self.blocks[k].message == message and self.blocks[k].index == index { return some(k) }
+        }
+        return none
+    }
+
+    /// More of a reply's words as they're written: a delta's new text, for `block` of
+    /// `message`. Only the reply's own text is said, not a subagent's or its thoughts.
+    pub fn delta(mut self, message: String, block: i64, kind: String, parent: bool, text: String, now: i64) {
+        if not self.on or not self.speaks or message != self.reply or kind != "text" or parent { return }
+        let k = match self.block_at(message.copy(), block) {
+            some(k) => k,
+            none => {
+                self.blocks.push(Block { message: message.copy(), index: block, pending: String(), seen: String(), code: false })
+                self.blocks.len() - 1
+            },
+        }
+        self.blocks[k].pending.push_str(text)
+        self.blocks[k].seen.push_str(text)
+        for s in cut(mut self.blocks[k], false) { self.say(s) }
+        self.pump(now)
+    }
+
+    // A sentence to say, as words.
+    fn say(mut self, sentence: String) {
+        let words = engines.speakable(sentence)
+        if words.len() > 0 { self.queue.push(words) }
+    }
+
+    // Speech going on: the next to write once nothing waits to play, and the next to
+    // play once nothing plays.
+    fn pump(mut self, now: i64) {
+        if self.playing == none and self.ready.len() > 0 {
+            let p = self.ready.remove(0)
+            self.ends = now + p.ms
+            self.played = true
+            let play = Obj.new().s("file", p.file.copy()).j("words", Json.Array(p.words.map(|w| Json.Str(w.copy())))).j("at", Json.Array(p.at.map(|t| Json.Int(t)))).j("levels", Json.Array(p.levels.map(|l| Json.Float(l)))).i("step", FRAME_MS).i("ms", p.ms).done()
+            self.playing = some(p)
+            self.tell(Obj.new().j("play", play).done())
+        }
+        if self.saying.len() == 0 and self.ready.len() == 0 and self.queue.len() > 0 {
+            var text = self.queue.remove(0)
+            while self.queue.len() > 0 and text.len() + self.queue[0].len() < SAY_MOST {
+                text = "{text} {self.queue.remove(0)}"
+            }
+            self.next += 1
+            self.saying = "{LIVE_ID}{self.gen}.{self.next}"
+            self.saying_text = text.copy()
+            self.to_voice.push(Do.Speak(text, self.saying.copy()))
+        }
+    }
+
+    /// Speech the Voice wrote for live mode (`core.speak` with a live id): `wav` is
+    /// its file's bytes, or `failed` says why there are none.
+    pub fn spoke(mut self, f: Json, wav: own List<u8>, failed: String, now: i64) {
+        let id = str_at(f.copy(), "id") ?? String()
+        if not self.on or id != self.saying { return }
+        self.saying = String()
+        let file = str_at(f.copy(), "file") ?? String()
+        let why = str_at(f, "error") ?? failed.copy()
+        if why.len() > 0 {
+            self.tell(Obj.new().s("why", why).done())
+            self.pump(now)
+            self.retell()
+            return
+        }
+        let text = self.saying_text.copy()
+        self.ready.push(piece_of(file, wav, text))
+        self.pump(now)
+    }
+
+    /// Time going by: the piece playing ends, and the next plays.
+    pub fn tick(mut self, now: i64) {
+        if not self.on { return }
+        if self.playing != none and now >= self.ends {
+            self.playing = none
+            self.pump(now)
+            if self.playing == none and not self.speaking() { self.played = false }
+            self.retell()
+        }
+    }
+
+    /// How long until the piece playing ends.
+    pub fn due_ms(self, now: i64) -> i64? {
+        if not self.on or self.playing == none { return none }
+        let left = self.ends - now
+        return some(if left < 0 { 0i64 } else { left + 1 })
+    }
+}
+
+// --- Tests ---
+
+// `ms` of 24 kHz PCM: a tone at `loud`, or with 0, the room's hum, a few units.
+fn tone(ms: usize, loud: f64) -> List<u8> {
+    var out = List<i16>()
+    for i in 0..ms * 24 {
+        let hum = if i % 2 == 0 { 3i16 } else { -3i16 }
+        let x = if loud > 0.0 { i16.wrap(i32.saturate(loud * 32767.0 * sin(f64.nearest(i) * 0.13))) } else { hum }
+        out.push(x)
+    }
+    return engines.le_bytes(out)
+}
+
+// A WAV of `ms` of speech for a piece.
+fn wav_of(ms: usize) -> List<u8> {
+    return engines.to_wav(tone(ms, 0.3))
+}
+
+fn json(text: str) -> Json {
+    return match parse(String(text)) {
+        ok(j) => j,
+        err(_) => Json.Null,
+    }
+}
+
+fn settings_with(read: str, barge: bool) -> Json {
+    let j = json(#"{"dictation":{"engine":"deepgram"},"speech":{"engine":"openai"},"live":{"pause":0.5}}"#)
+    return match engines.apply(j, Obj.new().j("speech", Obj.new().s("read_aloud", String(read)).done()).j("live", Obj.new().b("barge_in", barge).done()).done()) {
+        ok(s) => s,
+        err(_) => Json.Null,
+    }
+}
+
+// What live mode asked of the voice, in order.
+fn asked(l: mut Live) -> List<String> {
+    var out = List<String>()
+    while l.to_voice.len() > 0 {
+        let d = l.to_voice.remove(0)
+        out.push(match d {
+            Do.Listen => String("listen"),
+            Do.Hear(_) => String("hear"),
+            Do.Stop => String("stop"),
+            Do.Speak(text, id) => "speak {id} {text}",
+            Do.Hush => String("hush"),
+        })
+    }
+    return out
+}
+
+fn last_told(l: Live) -> Json {
+    if l.to_app.len() == 0 { return Json.Null }
+    return l.to_app[l.to_app.len() - 1].copy()
+}
+
+fn above(j: Json, least: f64) -> bool {
+    return match j {
+        Json.Float(x) => x > least,
+        _ => false,
+    }
+}
+
+// Live mode started, the room heard for a moment, and a turn said: "hello there".
+fn talked() -> Live {
+    var l = Live.new()
+    l.start(settings_with("live", true), String("a_1"), String("Juniper"), String("c_1"), 1000)
+    l.audio(tone(300, 0.0), 24000, 1)
+    l.audio(tone(400, 0.3), 24000, 1)
+    l.audio(tone(600, 0.0), 24000, 1)
+    l.dictation(json(#"{"t":"core.dictation","state":"done","text":"hello there"}"#))
+    return l
+}
+
+@test
+fn loudness_is_measured() {
+    let quiet = samples_of(tone(20, 0.0), 0)
+    let loud = samples_of(tone(20, 0.5), 0)
+    assert(db_of(quiet) < -70.0 and db_of(loud) > -10.0 and db_of(List<i16>()) == -100.0)
+    assert(level_of(-80.0) == 0.0 and level_of(0.0) == 1.0 and level_of(-35.0) == 0.5)
+}
+
+@test
+fn replies_are_cut_into_sentences() {
+    var b = Block { message: String("m"), index: 0, pending: String("Sure. The build passed on main, in two minutes. Any"), seen: String(), code: false }
+    assert(cut(mut b, false) == [String("Sure. The build passed on main, in two minutes.")] and b.pending == " Any")
+    // A list's number isn't a sentence's end, and a short one waits for more.
+    var list = Block { message: String("m"), index: 0, pending: String("1. Fix it. Ok"), seen: String(), code: false }
+    assert(cut(mut list, false) == [String("1. Fix it.")])
+    var short = Block { message: String("m"), index: 0, pending: String("Yes. No"), seen: String(), code: false }
+    assert(cut(mut short, false).len() == 0)
+    // Whole lines go, but not code.
+    var code = Block { message: String("m"), index: 0, pending: String("Run this:\n```\nmake\n```\nDone"), seen: String(), code: false }
+    assert(cut(mut code, false) == [String("Run this:")] and code.pending == "Done" and not code.code)
+    assert(cut(mut code, true) == [String("Done")] and code.pending.len() == 0)
+}
+
+@test
+fn a_turn_is_heard_and_sent_after_a_pause() {
+    var l = Live.new()
+    l.start(settings_with("live", true), String("a_1"), String("Juniper"), String("c_1"), 1000)
+    assert(asked(mut l) == [String("hush")] and str_at(last_told(l), "state") == some(String("listening")))
+    // The room alone is no turn.
+    l.audio(tone(300, 0.0), 24000, 1)
+    assert(asked(mut l).len() == 0 and not above(at(last_told(l), "level"), 0.1))
+    // Speech starts one, with what came just before it.
+    l.audio(tone(400, 0.3), 24000, 1)
+    assert(asked(mut l) == [String("listen"), String("hear"), String("hear")])
+    assert(above(at(last_told(l), "level"), 0.5))
+    l.dictation(json(#"{"t":"core.dictation","state":"listening","text":"hello"}"#))
+    assert(str_at(last_told(l), "words") == some(String("hello")))
+    // Quiet for less than the pause goes on hearing; for the pause, it ends.
+    l.audio(tone(300, 0.0), 24000, 1)
+    assert(asked(mut l) == [String("hear")])
+    l.audio(tone(300, 0.0), 24000, 1)
+    assert(asked(mut l) == [String("hear"), String("stop")])
+    l.dictation(json(#"{"t":"core.dictation","state":"done","text":" hello there "}"#))
+    assert("{l.sends[0]}" == #"{"t":"send","cid":"live_1000_1","conversation":"c_1","text":"hello there"}"#)
+    assert(str_at(last_told(l), "state") == some(String("thinking")))
+}
+
+@test
+fn a_reply_is_spoken_sentence_by_sentence() {
+    var l = talked()
+    _ = asked(mut l)
+    l.event(json(#"{"kind":"run.started","run":"r_1","conversation":"c_1","message":"m_2"}"#), 2000)
+    l.delta(String("m_2"), 0, String("text"), false, String("Sure, it **passed**. And"), 2000)
+    // A subagent's words and thoughts aren't said.
+    l.delta(String("m_2"), 1, String("text"), true, String("Not this. "), 2000)
+    l.delta(String("m_2"), 0, String("thought"), false, String("Nor this. "), 2000)
+    assert(asked(mut l) == [String("speak live:1.2 Sure, it passed.")])
+    assert(str_at(last_told(l), "state") == some(String("thinking")))
+    l.delta(String("m_2"), 0, String("text"), false, String(" then the deploy went out. More"), 2100)
+    assert(asked(mut l).len() == 0)
+    // Its speech comes and plays, with its words' times and its levels.
+    l.spoke(json(#"{"t":"core.speak","id":"live:1.2","file":"s1.wav"}"#), wav_of(1000), String(), 2200)
+    let play = at(last_told(l), "play")
+    assert(str_at(last_told(l), "state") == some(String("speaking")) and str_at(play.copy(), "file") == some(String("s1.wav")))
+    assert("{at(play.copy(), "words")}" == #"["Sure,","it","passed."]"# and at(play.copy(), "ms") == Json.Int(1000))
+    if let Json.Array(levels) = at(play.copy(), "levels") { assert(levels.len() == 50) } else { panic("no levels") }
+    if let Json.Array(times) = at(play, "at") { assert(times[0] == Json.Int(0) and times[1] == Json.Int(350)) } else { panic("no times") }
+    // The next is written while it plays, and plays once it ends.
+    assert(asked(mut l) == [String("speak live:1.3 And then the deploy went out.")])
+    l.spoke(json(#"{"t":"core.speak","id":"live:1.3","file":"s2.wav"}"#), wav_of(500), String(), 2300)
+    assert(l.due_ms(2300) == some(901i64))
+    l.tick(3250)
+    assert(str_at(at(last_told(l), "play"), "file") == some(String("s2.wav")))
+    // The reply ends: the rest is said, then it listens again.
+    l.event(json(#"{"kind":"message.created","message":{"id":"m_2","role":"agent","blocks":[{"kind":"text","text":"Sure, it **passed**. And then the deploy went out. More to come"},{"kind":"text","text":"sub","parent":"x"}]}}"#), 3300)
+    l.event(json(#"{"kind":"run.finished","run":"r_1","status":"done"}"#), 3300)
+    assert(asked(mut l) == [String("speak live:1.4 More to come")])
+    l.spoke(json(#"{"t":"core.speak","id":"live:1.4","file":"s3.wav"}"#), wav_of(300), String(), 3400)
+    l.tick(3800)
+    assert(str_at(at(last_told(l), "play"), "file") == some(String("s3.wav")))
+    l.tick(4200)
+    assert(str_at(last_told(l), "state") == some(String("listening")) and l.due_ms(4200) == none)
+}
+
+@test
+fn talking_over_a_reply_stops_it() {
+    var l = talked()
+    l.event(json(#"{"kind":"run.started","run":"r_1","conversation":"c_1","message":"m_2"}"#), 2000)
+    l.delta(String("m_2"), 0, String("text"), false, String("This is a long answer. And"), 2000)
+    _ = asked(mut l)
+    l.spoke(json(#"{"t":"core.speak","id":"live:1.2","file":"s1.wav"}"#), wav_of(3000), String(), 2100)
+    l.sends = List<Json>()
+    // A cough is no barge-in, but speech that lasts is.
+    l.audio(tone(100, 0.3), 24000, 1)
+    l.audio(tone(100, 0.0), 24000, 1)
+    assert(asked(mut l).len() == 0 and l.sends.len() == 0)
+    l.audio(tone(400, 0.3), 24000, 1)
+    assert(asked(mut l) == [String("hush"), String("listen"), String("hear"), String("hear")])
+    assert("{l.sends[0]}" == #"{"t":"cancel","run":"r_1"}"#)
+    var stopped = false
+    for f in l.to_app {
+        if bool_at(f.copy(), "stop") == some(true) { stopped = true }
+    }
+    assert(stopped and str_at(last_told(l), "state") == some(String("listening")))
+    // What was being written for the stopped reply is dropped when it comes.
+    l.spoke(json(#"{"t":"core.speak","id":"live:1.3","file":"s2.wav"}"#), wav_of(500), String(), 2600)
+    assert(l.playing == none)
+}
+
+@test
+fn with_barge_in_off_the_reply_goes_on() {
+    var l = Live.new()
+    l.start(settings_with("always", false), String("a_1"), String("Juniper"), String("c_1"), 1000)
+    l.audio(tone(300, 0.0), 24000, 1)
+    l.event(json(#"{"kind":"run.started","run":"r_1","conversation":"c_1","message":"m_2"}"#), 2000)
+    l.delta(String("m_2"), 0, String("text"), false, String("This is a long answer. And"), 2000)
+    _ = asked(mut l)
+    l.spoke(json(#"{"t":"core.speak","id":"live:1.1","file":"s1.wav"}"#), wav_of(3000), String(), 2100)
+    l.audio(tone(600, 0.3), 24000, 1)
+    assert(asked(mut l).len() == 0 and l.sends.len() == 0 and l.playing != none)
+}
+
+@test
+fn muting_ends_the_turn_and_stops_hearing() {
+    var l = Live.new()
+    l.start(settings_with("live", true), String("a_1"), String("Juniper"), String("c_1"), 1000)
+    l.audio(tone(300, 0.0), 24000, 1)
+    l.audio(tone(200, 0.3), 24000, 1)
+    _ = asked(mut l)
+    l.mute(true)
+    assert(asked(mut l) == [String("stop")] and bool_at(last_told(l), "muted") == some(true))
+    l.audio(tone(400, 0.3), 24000, 1)
+    assert(asked(mut l).len() == 0)
+}
+
+@test
+fn without_engines_the_settings_open() {
+    var l = Live.new()
+    l.start(engines.settings(Json.Null), String("a_1"), String("Juniper"), String("c_1"), 1000)
+    assert(not l.on and str_at(last_told(l), "state") == some(String("no_engine")) and str_at(last_told(l), "kind") == some(String("dictation")))
+    // Never read aloud needs no speech engine: the reply's words show instead.
+    var never = Live.new()
+    never.start(engines.settings(json(#"{"dictation":{"engine":"groq"},"speech":{"read_aloud":"never"}}"#)), String("a_1"), String("Juniper"), String("c_1"), 1000)
+    assert(never.on)
+    never.event(json(#"{"kind":"run.started","run":"r_1","conversation":"c_1","message":"m_2"}"#), 2000)
+    never.delta(String("m_2"), 0, String("text"), false, String("It **passed**. Yes"), 2000)
+    never.event(json(#"{"kind":"message.created","message":{"id":"m_2","role":"agent","blocks":[{"kind":"text","text":"It **passed**. Yes."}]}}"#), 2100)
+    assert(asked(mut never) == [String("hush")] and str_at(last_told(never), "words") == some(String("It passed. Yes.")))
+}
+
+@test
+fn ending_drops_the_turn() {
+    var l = Live.new()
+    l.start(settings_with("live", true), String("a_1"), String("Juniper"), String("c_1"), 1000)
+    l.audio(tone(300, 0.0), 24000, 1)
+    l.audio(tone(200, 0.3), 24000, 1)
+    _ = asked(mut l)
+    l.end()
+    assert(asked(mut l) == [String("stop")] and str_at(last_told(l), "state") == some(String("ended")) and l.owns_ear())
+    l.dictation(json(#"{"t":"core.dictation","state":"done","text":"never sent"}"#))
+    assert(l.sends.len() == 0 and not l.owns_ear())
+}

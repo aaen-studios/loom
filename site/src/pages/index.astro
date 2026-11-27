@@ -113,14 +113,16 @@ const tiles = [
 	{ name: 'Composio', mark: composioMark, connected: true },
 ];
 
-// Settings › Voice as the app draws it (PLAN.md, "Voice"): Dictation and Speech beside the title,
-// as Spools has Find and Installed, each its engines as tiles in black and white, an ink tile with
-// its maker's logo in its ink (shared/voice/, as the app draws it), its name, one quiet line and
-// Use, Add key or Change key; the one in use outlined in ink with a check in a ring and In use; then
-// its rows. Deepgram Nova-3 dictates and OpenAI speaks, with Marin at 1×, and replies aren't read
-// aloud. The models on the device have Download, then a thin bar with its percent and Cancel while
-// it downloads, then Delete and Use (voice_ui.rs, tile_state); Kokoro, whose authors have no logo,
-// has Lucide's laptop. Parakeet is downloading, and carries on when the panel comes into view.
+// Settings › Voice as the app draws it (PLAN.md, "Voice"): Dictation, Speech and Live beside the
+// title, as Spools has Find and Installed, Dictation and Speech each its engines as tiles in black
+// and white, an ink tile with its maker's logo in its ink (shared/voice/, as the app draws it), its
+// name, one quiet line and Use, Add key or Change key; the one in use outlined in ink with a check
+// in a ring and In use; then its rows. Live has only its rows. Deepgram Nova-3 dictates and OpenAI
+// speaks, with Marin at 1×, and replies aren't read aloud. Ctrl+Shift+Space is Live's, so
+// Dictation's shortcut is Off; picking it on one tab sets the other's to Off. The models on the
+// device have Download, then a thin bar with its percent and Cancel while it downloads, then Delete
+// and Use (voice_ui.rs, tile_state); Kokoro, whose authors have no logo, has Lucide's laptop.
+// Parakeet is downloading, and carries on when the panel comes into view.
 const LAPTOP =
 	'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 5a2 2 0 0 1 2 2v8.526a2 2 0 0 0 .212.897l1.068 2.127a1 1 0 0 1-.9 1.45H3.62a1 1 0 0 1-.9-1.45l1.068-2.127A2 2 0 0 0 4 15.526V7a2 2 0 0 1 2-2z"></path><path d="M20.054 15.987H3.946"></path></svg>';
 type Engine = { id: string; name: string; line: string; mark: string; key: boolean; on: boolean; model?: 'absent' | 'ready' | number };
@@ -147,6 +149,7 @@ const VOICE: { id: string; name: string; engines: Engine[] }[] = [
 			{ id: 'kokoro', name: 'Kokoro', line: 'English and Chinese, 350 MB', mark: LAPTOP, key: true, on: false, model: 'absent' },
 		],
 	},
+	{ id: 'live', name: 'Live', engines: [] },
 ];
 const MODEL_BUTTON = { absent: 'Download', downloading: 'Cancel', ready: 'Delete' };
 const modelState = (e: Engine) => (typeof e.model === 'number' ? 'downloading' : (e.model ?? 'absent'));
@@ -156,6 +159,7 @@ const VOICES = ['Alloy', 'Ash', 'Ballad', 'Cedar', 'Coral', 'Echo', 'Fable', 'Ma
 const SHORTCUTS = ['Ctrl+Shift+Space', 'Off'];
 const SPEEDS = ['0.8×', '0.9×', '1×', '1.1×', '1.2×'];
 const READ_ALOUD = ['Never', 'Only in live', 'Always'];
+const PAUSES = ['After 0.5 s', 'After 0.8 s', 'After 1.2 s'];
 // Lucide's icons: check, chevron-down, play, eye and eye-off.
 const CHECK = 'M20 6 9 17l-5-5';
 const CHEVRON = 'm6 9 6 6 6-6';
@@ -525,9 +529,9 @@ const faq = {
 	<section class="feature" aria-labelledby="f-voice">
 		<div class="wrap split">
 			<div class="copy" data-reveal>
-				<h2 id="f-voice">Dictation, and replies read aloud</h2>
+				<h2 id="f-voice">Dictation, replies read aloud, and live mode</h2>
 				<p>
-					The composer's mic writes your words as you say them, with ElevenLabs Scribe, Deepgram, OpenAI or Groq, and replies can be read aloud with ElevenLabs, Fish Audio or OpenAI. Or download Parakeet, Whisper or Kokoro and run them on your computer, with no key. A service's key is kept sealed on your instance, so one key works on every device of yours, and an agent can set it up for you.
+					The composer's mic writes your words as you say them, with ElevenLabs Scribe, Deepgram, OpenAI or Groq, and replies can be read aloud with ElevenLabs, Fish Audio or OpenAI. Or download Parakeet, Whisper or Kokoro and run them on your computer, with no key. Live mode is talking with an agent: what you say goes once you stop, the reply is spoken as it's written, and talking over it stops it. A service's key is kept sealed on your instance, so one key works on every device of yours, and an agent can set it up for you.
 				</p>
 			</div>
 			<div class="visual" data-reveal>
@@ -547,6 +551,7 @@ const faq = {
 					{
 						VOICE.map((t, i) => (
 							<div class="voice-pane" data-voice-pane={t.id} role="tabpanel" aria-label={t.name} hidden={i !== 0}>
+								{t.engines.length > 0 && (
 								<div class="voice-tiles">
 									{t.engines.map((e) => (
 										<div
@@ -609,6 +614,7 @@ const faq = {
 										</div>
 									))}
 								</div>
+								)}
 								<div class="box voice-rows">
 									{t.id === 'dictation' ? (
 										<>
@@ -636,9 +642,9 @@ const faq = {
 												<span class="row-text">
 													<span class="row-title">Shortcut</span>
 												</span>
-												<span class="segments" data-choice>
-													{SHORTCUTS.map((s, j) => (
-														<button type="button" class:list={['segment', { on: j === 0 }]}>
+												<span class="segments" data-choice data-shortcut>
+													{SHORTCUTS.map((s) => (
+														<button type="button" class:list={['segment', { on: s === 'Off' }]}>
 															{s}
 														</button>
 													))}
@@ -653,7 +659,7 @@ const faq = {
 												</button>
 											</div>
 										</>
-									) : (
+									) : t.id === 'speech' ? (
 										<>
 											<div class="row">
 												<span class="row-text">
@@ -705,6 +711,49 @@ const faq = {
 														</button>
 													))}
 												</span>
+											</div>
+										</>
+									) : (
+										<>
+											<div class="row">
+												<span class="row-text">
+													<span class="row-title">Shortcut</span>
+												</span>
+												<span class="segments" data-choice data-shortcut>
+													{SHORTCUTS.map((s) => (
+														<button type="button" class:list={['segment', { on: s !== 'Off' }]}>
+															{s}
+														</button>
+													))}
+												</span>
+											</div>
+											<div class="row">
+												<span class="row-text">
+													<span class="row-title">Talk over a reply to stop it</span>
+												</span>
+												<button type="button" class="switch" role="switch" aria-checked="true" aria-label="Talk over a reply to stop it" data-switch>
+													<span class="knob" />
+												</button>
+											</div>
+											<div class="row">
+												<span class="row-text">
+													<span class="row-title">Send when I stop talking</span>
+												</span>
+												<span class="segments" data-choice>
+													{PAUSES.map((s) => (
+														<button type="button" class:list={['segment', { on: s === 'After 0.8 s' }]}>
+															{s}
+														</button>
+													))}
+												</span>
+											</div>
+											<div class="row">
+												<span class="row-text">
+													<span class="row-title">Show what's said</span>
+												</span>
+												<button type="button" class="switch" role="switch" aria-checked="true" aria-label="Show what's said" data-switch>
+													<span class="knob" />
+												</button>
 											</div>
 										</>
 									)}
@@ -1656,13 +1705,13 @@ const faq = {
 		}
 	}
 
-	/* Settings › Voice, as the app draws it (PLAN.md, "Voice"): Dictation and Speech beside the
-	   title, the engines as tiles in black and white, as Spools' Find draws its tiles, and the
-	   tab's rows under them. */
+	/* Settings › Voice, as the app draws it (PLAN.md, "Voice"): Dictation, Speech and Live beside
+	   the title, the engines as tiles in black and white, as Spools' Find draws its tiles, and the
+	   tab's rows under them; Live has only its rows. */
 	.voice {
 		gap: var(--space-l);
 	}
-	:where(.voice) button {
+	:where(.voice button) {
 		font: inherit;
 		color: inherit;
 		background: none;
@@ -2298,7 +2347,7 @@ const faq = {
 		}
 	});
 
-	// Voice: the tabs switch between Dictation and Speech; Use moves In use to its tile; Add key
+	// Voice: the tabs switch between Dictation, Speech and Live; Use moves In use to its tile; Add key
 	// and Change key open the masked key field, whose eye shows it and whose Save keeps it, so the
 	// tile offers Use; the menus pick a language or a voice; the choices and the switch set
 	// themselves.
@@ -2462,9 +2511,17 @@ const faq = {
 			if (e.key === 'Escape') closeMenus();
 		});
 
+		// A shortcut is one row's at a time: Ctrl+Shift+Space picked on Dictation or Live sets the
+		// other's to Off.
+		const shortcuts = [...voice.querySelectorAll<HTMLElement>('[data-shortcut]')];
+		const pickOff = (choice: HTMLElement) => choice.querySelectorAll('.segment').forEach((o) => o.classList.toggle('on', o.textContent?.trim() === 'Off'));
 		for (const choice of voice.querySelectorAll<HTMLElement>('[data-choice]')) {
 			const segments = [...choice.querySelectorAll<HTMLElement>('.segment')];
-			for (const s of segments) s.addEventListener('click', () => segments.forEach((o) => o.classList.toggle('on', o === s)));
+			for (const s of segments)
+				s.addEventListener('click', () => {
+					segments.forEach((o) => o.classList.toggle('on', o === s));
+					if (choice.hasAttribute('data-shortcut') && s.textContent?.trim() !== 'Off') for (const other of shortcuts) if (other !== choice) pickOff(other);
+				});
 		}
 		voice.querySelectorAll<HTMLElement>('[data-switch]').forEach((sw) =>
 			sw.addEventListener('click', () => sw.setAttribute('aria-checked', String(sw.getAttribute('aria-checked') !== 'true'))),

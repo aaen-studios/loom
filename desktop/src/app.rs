@@ -60,6 +60,8 @@ mod draft_view;
 mod form_drafts;
 #[path = "list_page.rs"]
 mod list_page;
+#[path = "live_ui.rs"]
+mod live_ui;
 #[path = "routine_off_view.rs"]
 mod routine_off_view;
 #[path = "routines.rs"]
@@ -625,6 +627,11 @@ pub struct Loom {
     mic: Option<crate::voice::Mic>,
     voice_key: Option<Entity<InputState>>,
     dictate_held: bool,
+    /// Live mode: the mic while it listens, whether the perf build's made-up frames
+    /// drive it (`LOOM_LIVE`), and the clock its thread waves by.
+    live_mic: Option<crate::voice::Mic>,
+    live_sample: bool,
+    live_t0: Instant,
     /// Whether the chat is drawn again each second while a draft's Undo counts down.
     draft_ticking: bool,
     queue_in: Entity<InputState>,
@@ -1530,6 +1537,7 @@ ACTA_KEY=secret:ACTA_KEY",
                         loom.send(answer);
                     }
                     loom.pump_mic();
+                    loom.pump_live_mic();
                     loom.pump_door();
                     if loom.pump_away() {
                         cx.notify();
@@ -1815,6 +1823,9 @@ ACTA_KEY=secret:ACTA_KEY",
             mic: None,
             voice_key: None,
             dictate_held: false,
+            live_mic: None,
+            live_sample: false,
+            live_t0: Instant::now(),
             draft_ticking: false,
             queue_in,
             aside_in,
@@ -11823,8 +11834,10 @@ ACTA_KEY=secret:ACTA_KEY",
                                 .child(self.composer_textarea(cx)),
                         )
                         .when_some(emoji_button, |d, b| d.child(b))
-                        // Dictation: loom's own, into the composer at the caret.
+                        // Dictation: loom's own, into the composer at the caret; and live
+                        // mode beside it.
                         .child(self.composer_mic(cx))
+                        .child(self.composer_live(cx))
                         .child(
                             div()
                                 .id("send")
@@ -27033,8 +27046,9 @@ impl Render for Loom {
         if let Some(folder) = self.model.made_folder.take() {
             self.start_renaming(folder, window, cx);
         }
-        // Dictation's words, and what else voice asked for.
+        // Dictation's words, and what else voice asked for, and live mode's.
         self.take_voice(window, cx);
+        self.take_live(cx);
         let signed_out = self.model.conn == Some(Conn::SignedOut);
         // The opening weave plays once the app knows it's signed in. Signed out, the
         // welcome comes in on its own instead.
@@ -27203,10 +27217,22 @@ impl Render for Loom {
                     cx.stop_propagation();
                 }
             }))
-            // Ctrl+Shift+Space dictates, wherever the focus is, as Settings › Voice has it:
-            // it starts and stops, or with Hold to talk, records while it's held.
+            // Ctrl+Shift+Space starts and ends live mode, or dictates, wherever the focus
+            // is, as Settings › Voice has it: dictation starts and stops, or with Hold to
+            // talk, records while it's held.
             .capture_key_down(cx.listener(|this, e: &KeyDownEvent, window, cx| {
-                if !this.prefs.dictation_shortcut || !voice_ui::is_shortcut(&e.keystroke) {
+                if !voice_ui::is_shortcut(&e.keystroke) {
+                    return;
+                }
+                // Live mode has it, unless dictation does (Settings › Voice, Live).
+                if this.prefs.live_shortcut || this.model.talk.on {
+                    cx.stop_propagation();
+                    if !e.is_held {
+                        this.toggle_live(cx);
+                    }
+                    return;
+                }
+                if !this.prefs.dictation_shortcut {
                     return;
                 }
                 cx.stop_propagation();
@@ -27309,11 +27335,14 @@ impl Render for Loom {
                 .child(motion_ticker());
         }
         // The main area is the chat, unless an agent is being made.
+        // Live mode takes the chat's place, its header too, while it runs.
+        let live = self.live_shown();
         let main = match self.screen {
             Screen::NewAgent => self.new_agent(cx),
             Screen::Chat if self.model.agents.is_empty() && self.model.synced => {
                 self.first_agent(cx)
             }
+            _ if live => self.live_view(cx),
             _ => crate::perf::step("chat", || self.chat(window, cx)),
         };
         self.sync_panel(window, cx);
@@ -27331,6 +27360,11 @@ impl Render for Loom {
         // control that opens the sidebar after them, its icon where the knot is in the
         // whole sidebar, and then the header.
         let room = self.header_room(ww, railed, window);
+        let head = if live {
+            self.live_header()
+        } else {
+            self.header(room, window, cx)
+        };
         let header = if railed && self.lights {
             div()
                 .flex_1()
@@ -27340,9 +27374,9 @@ impl Render for Loom {
                 .items_center()
                 .pl(px(LIGHTS_PAD))
                 .child(self.bar_button(true, cx))
-                .child(self.header(room, window, cx).pl(px(space::XS)))
+                .child(head.pl(px(space::XS)))
         } else {
-            self.header(room, window, cx)
+            head
         };
         // Drawn last, over the sheet that takes the pointer while it's open.
         // From a right-click in the sidebar, it opens at the pointer instead.

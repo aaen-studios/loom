@@ -1815,6 +1815,8 @@ final class Model {
     var voice = VoiceState()
     var voiceCardSending: Set<String> = []
     var voiceCardErrors: [String: String] = [:]
+    /// Live mode, as the core last said it (Live.swift).
+    var liveMode = LiveState()
     /// What's picked on the choices and toggles of forms not sent yet, by
     /// `message/card/field`; the forms whose answers went and haven't come back, by their
     /// send's cid, with their `message/card`; and what the instance said to ones it
@@ -2171,7 +2173,7 @@ final class Model {
 
     /// Takes a frame from the core.
     func take(_ f: JSON) {
-        if emoji.take(f) || voiceFrame(f) { return }
+        if emoji.take(f) || voiceFrame(f) || liveFrame(f) { return }
         switch f["t"].text {
         case "core.conn":
             let state = f["state"].text

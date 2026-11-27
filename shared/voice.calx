@@ -9,10 +9,13 @@ module shared.voice
 //
 //     {"dictation": {"engine": "deepgram", "language": ""},
 //      "speech": {"engine": "openai", "voice": "marin", "voice_name": "Marin",
-//                 "speed": 1.0, "read_aloud": "never"}}
+//                 "speed": 1.0, "read_aloud": "never"},
+//      "live": {"barge_in": true, "pause": 0.8, "captions": true}}
 //
 // An engine is `""` until one is picked, a language `""` detects it, and `read_aloud` is
-// `never`, `live` or `always`.
+// `never`, `live` or `always`. Live mode (core/live.calx) stops a reply the person talks
+// over (`barge_in`), sends what they said once they've been quiet for `pause` seconds,
+// and shows the words being said (`captions`).
 //
 // Each service's key is the person's secret `voice.SERVICE` on the instance, which only
 // their devices open (`voice.start`), never an agent.
@@ -20,7 +23,7 @@ import std.bytes
 import std.http.{Form, Header}
 import std.json.{Json, parse}
 import std.url
-import shared.obj.{Obj, at, merge, str_at}
+import shared.obj.{Obj, at, bool_at, merge, str_at}
 
 /// A dictation engine, or a speech one. `streams` says whether the words come as
 /// they're said; one that doesn't writes them once the person stops. `on_device` is a
@@ -141,6 +144,10 @@ pub const SPEEDS: [f64; 5] = [0.8, 0.9, 1.0, 1.1, 1.2]
 /// the chat in front of the person.
 pub const READ_ALOUD: [str; 3] = ["never", "live", "always"]
 
+/// How long the person is quiet in live mode before what they said is sent, in
+/// seconds, as the Send when I stop talking row offers it.
+pub const PAUSES: [f64; 3] = [0.5, 0.8, 1.2]
+
 /// OpenAI's built-in voices, as its speech API names them.
 pub const OPENAI_VOICES: [str; 13] = ["marin", "cedar", "alloy", "ash", "ballad", "coral", "echo", "fable", "nova", "onyx", "sage", "shimmer", "verse"]
 
@@ -193,11 +200,38 @@ pub fn nearest_speed(s: f64) -> f64 {
     return best
 }
 
+/// The nearest of the pauses to `p`.
+pub fn nearest_pause(p: f64) -> f64 {
+    var best = 0.8
+    for v in PAUSES {
+        if (v - p).abs() < (best - p).abs() { best = v }
+    }
+    return best
+}
+
+/// Live mode's settings in `j`, whole: a reply stops when the person talks over it,
+/// what they said goes after 0.8 s of quiet, and the words show, unless `j` says
+/// otherwise.
+pub fn live_settings(j: Json) -> Json {
+    let barge = bool_of(at(j.copy(), "barge_in")) ?? true
+    let captions = bool_of(at(j.copy(), "captions")) ?? true
+    let pause = nearest_pause(number(at(j, "pause")) ?? 0.8)
+    return Obj.new().b("barge_in", barge).j("pause", Json.Float(pause)).b("captions", captions).done()
+}
+
+fn bool_of(j: Json) -> bool? {
+    return match j {
+        Json.Bool(b) => some(b),
+        _ => none,
+    }
+}
+
 /// The settings in `j`, whole, with the defaults for what it doesn't have: no engine
-/// picked, the language detected, normal speed and replies never read aloud. What
-/// isn't one of the choices is the default.
+/// picked, the language detected, normal speed, replies never read aloud, and live
+/// mode's own. What isn't one of the choices is the default.
 pub fn settings(j: Json) -> Json {
     let d = at(j.copy(), "dictation")
+    let live = live_settings(at(j.copy(), "live"))
     let s = at(j, "speech")
     var dictation_engine = str_at(d.copy(), "engine") ?? String()
     if engine(String("dictation"), dictation_engine.copy()) == none { dictation_engine = String() }
@@ -209,7 +243,7 @@ pub fn settings(j: Json) -> Json {
     if not reads(read.copy()) { read = String("never") }
     let dictation = Obj.new().s("engine", dictation_engine).s("language", language).done()
     let spoken = Obj.new().s("engine", speech_engine).s("voice", str_at(s.copy(), "voice") ?? String()).s("voice_name", str_at(s.copy(), "voice_name") ?? String()).j("speed", Json.Float(nearest_speed(number(at(s.copy(), "speed")) ?? 1.0))).s("read_aloud", read).done()
-    return Obj.new().j("dictation", dictation).j("speech", spoken).done()
+    return Obj.new().j("dictation", dictation).j("speech", spoken).j("live", live).done()
 }
 
 /// `old` with the changes in `args` (`dictation` and `speech`, each with what changes),
@@ -227,6 +261,10 @@ pub fn apply(old: Json, args: Json) -> Json ! String {
     if let l = str_at(dc, "language") {
         if language_name(l.copy()) == none { fail "There's no language {l} to dictate in. Give an ISO 639-1 code, such as en or no, or \"\" to detect it." }
         d = merge_str(d, "language", l)
+    }
+    let live = match apply_live(at(next.copy(), "live"), at(args.copy(), "live")) {
+        ok(l) => l,
+        err(why) => fail why,
     }
     let sc = at(args, "speech")
     if let e = str_at(sc.copy(), "engine") {
@@ -263,8 +301,26 @@ pub fn apply(old: Json, args: Json) -> Json ! String {
         if not reads(r.copy()) { fail "read_aloud is never, live or always." }
         s = merge_str(s, "read_aloud", r)
     }
-    next = Obj.new().j("dictation", d).j("speech", s).done()
+    next = Obj.new().j("dictation", d).j("speech", s).j("live", live).done()
     return settings(next)
+}
+
+/// Live mode's settings `old` with the changes in `args`: `barge_in` and `captions`,
+/// each true or false, and `pause`, one of the pauses.
+fn apply_live(old: Json, args: Json) -> Json ! String {
+    var next = live_settings(old)
+    for k in ["barge_in", "captions"] {
+        if let given = args.get(String(k)) {
+            let b = bool_of(given) else fail "{k} is true or false."
+            next = merge(next, Obj.new().b(k, b).done())
+        }
+    }
+    if let given = args.get(String("pause")) {
+        let p = number(given) else fail "pause is a number of seconds: 0.5, 0.8 or 1.2."
+        if p < 0.2 or p > 3.0 { fail "pause is 0.5, 0.8 or 1.2 seconds." }
+        next = merge(next, Obj.new().j("pause", Json.Float(nearest_pause(p))).done())
+    }
+    return next
 }
 
 /// A word with its first letter in capitals: OpenAI's `marin` is shown as Marin.
@@ -317,11 +373,13 @@ pub fn listed(kept: Json, have: List<String>) -> Json {
     for (c, n) in LANGUAGES { languages.push(Obj.new().s("code", String(c)).s("name", String(n)).done()) }
     var speeds = List<Json>()
     for v in SPEEDS { speeds.push(Json.Float(v)) }
+    var pauses = List<Json>()
+    for v in PAUSES { pauses.push(Json.Float(v)) }
     var keys = Obj.new()
     for svc in SERVICES { keys = keys.b(svc, have.contains(String(svc))) }
     let dictation_tiles = tiles(String("dictation"), have.copy(), str_at(at(s.copy(), "dictation"), "engine") ?? String())
     let speech_tiles = tiles(String("speech"), have, str_at(at(s.copy(), "speech"), "engine") ?? String())
-    return Obj.new().j("settings", s).j("engines", Obj.new().j("dictation", dictation_tiles).j("speech", speech_tiles).done()).j("languages", Json.Array(languages)).j("speeds", Json.Array(speeds)).j("read_aloud", Json.Array([Json.Str(String("never")), Json.Str(String("live")), Json.Str(String("always"))])).j("keys", keys.done()).done()
+    return Obj.new().j("settings", s).j("engines", Obj.new().j("dictation", dictation_tiles).j("speech", speech_tiles).done()).j("languages", Json.Array(languages)).j("speeds", Json.Array(speeds)).j("pauses", Json.Array(pauses)).j("read_aloud", Json.Array([Json.Str(String("never")), Json.Str(String("live")), Json.Str(String("always"))])).j("keys", keys.done()).done()
 }
 
 // --- The services ---
@@ -705,7 +763,7 @@ pub fn to_wav(pcm: List<u8>) -> List<u8> {
 @test
 fn settings_start_with_nothing_picked() {
     let s = settings(Json.Null)
-    assert("{s}" == #"{"dictation":{"engine":"","language":""},"speech":{"engine":"","voice":"","voice_name":"","speed":1.0,"read_aloud":"never"}}"#)
+    assert("{s}" == #"{"dictation":{"engine":"","language":""},"speech":{"engine":"","voice":"","voice_name":"","speed":1.0,"read_aloud":"never"},"live":{"barge_in":true,"pause":0.8,"captions":true}}"#)
     // What isn't one of the choices is the default.
     let odd = settings(parse(#"{"dictation":{"engine":"siri","language":"xx"},"speech":{"engine":"openai","speed":1.13,"read_aloud":"sometimes"}}"#)!)
     assert(str_at(at(odd.copy(), "dictation"), "engine") == some(String("")) and str_at(at(odd.copy(), "speech"), "read_aloud") == some(String("never")))
@@ -715,7 +773,7 @@ fn settings_start_with_nothing_picked() {
 @test
 fn changes_are_checked() {
     let s = apply(Json.Null, parse(#"{"dictation":{"engine":"deepgram","language":"no"},"speech":{"engine":"openai","voice":"Cedar","speed":0.9,"read_aloud":"always"}}"#)!)!
-    assert("{s}" == #"{"dictation":{"engine":"deepgram","language":"no"},"speech":{"engine":"openai","voice":"cedar","voice_name":"Cedar","speed":0.9,"read_aloud":"always"}}"#)
+    assert("{s}" == #"{"dictation":{"engine":"deepgram","language":"no"},"speech":{"engine":"openai","voice":"cedar","voice_name":"Cedar","speed":0.9,"read_aloud":"always"},"live":{"barge_in":true,"pause":0.8,"captions":true}}"#)
     assert(match apply(Json.Null, parse(#"{"dictation":{"engine":"siri"}}"#)!) { ok(_) => false, err(_) => true })
     assert(match apply(Json.Null, parse(#"{"dictation":{"language":"klingon"}}"#)!) { ok(_) => false, err(_) => true })
     assert(match apply(s.copy(), parse(#"{"speech":{"voice":"robot"}}"#)!) { ok(_) => false, err(_) => true })
@@ -835,4 +893,15 @@ fn each_engine_has_its_makers_mark() {
         assert(svg.starts_with("<svg ") and svg.contains("fill=\"currentColor\"") and not svg.contains("#"))
     }
     assert(mark_svg(String("nvidia")) != none and mark_svg(String("siri")) == none)
+}
+
+@test
+fn live_settings_are_checked() {
+    let s = apply(Json.Null, parse(#"{"live":{"barge_in":false,"pause":1.1}}"#)!)!
+    assert("{at(s.copy(), "live")}" == #"{"barge_in":false,"pause":1.2,"captions":true}"#)
+    assert(match apply(s.copy(), parse(#"{"live":{"captions":"yes"}}"#)!) { ok(_) => false, err(_) => true })
+    assert(match apply(s.copy(), parse(#"{"live":{"pause":9}}"#)!) { ok(_) => false, err(_) => true })
+    // A change to speech keeps live as it was.
+    let kept = apply(s, parse(#"{"speech":{"read_aloud":"live"}}"#)!)!
+    assert(bool_at(at(kept, "live"), "barge_in") == some(false))
 }
