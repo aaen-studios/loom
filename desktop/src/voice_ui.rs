@@ -20,10 +20,10 @@ pub(super) fn is_shortcut(k: &Keystroke) -> bool {
     k.modifiers.control && k.modifiers.shift && !k.modifiers.alt && k.key == "space"
 }
 
-/// The engine's icon on its ink square: Cloud for a service, Laptop for a model on the
-/// device.
+/// The engine's maker's mark on its ink square, in the ink on it, as Spools draws an
+/// entry's; where it has none, Cloud for a service and Laptop for a model on the device.
 fn engine_mark(p: Palette, t: &Tile) -> Div {
-    div()
+    let square = div()
         .size(px(MARK))
         .flex_none()
         .flex()
@@ -31,15 +31,23 @@ fn engine_mark(p: Palette, t: &Tile) -> Div {
         .justify_center()
         .rounded(px(radius::ROW))
         .bg(p.button)
-        .text_color(p.button_ink)
-        .child(
+        .text_color(p.button_ink);
+    match &t.icon_svg {
+        Some(mark) => square.child(
+            svg()
+                .path(crate::runtime_svg(&format!("voice/{}.svg", t.mark), mark))
+                .size(px((MARK * 0.56).round()))
+                .text_color(p.button_ink),
+        ),
+        None => square.child(
             Icon::new(if t.icon == "laptop" {
                 Ico::Laptop
             } else {
                 Ico::Cloud
             })
             .small(),
-        )
+        ),
+    }
 }
 
 /// "In use", with a check in a ring, in ink.

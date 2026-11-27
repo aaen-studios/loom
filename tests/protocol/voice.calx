@@ -237,7 +237,13 @@ fn run(i: Instance, fake: String) ! Error {
     // --- Nothing set up ---
     let first = value_of(try app.cmd("v_1", "voice.get", Obj.new().done()))
     try check(str_at(at(at(at(first.copy(), "voice"), "settings"), "dictation"), "engine") == some(String("")) and "{at(at(first.copy(), "voice"), "keys")}" == #"{"elevenlabs":false,"deepgram":false,"openai":false,"groq":false,"fish":false}"#, "voice.get starts with no engine and no keys")
-    try check(items(at(at(at(first, "voice"), "engines"), "dictation")).len() == 4, "with the four dictation engines' tiles")
+    let dictation_tiles = items(at(at(at(first, "voice"), "engines"), "dictation"))
+    try check(dictation_tiles.len() == 4, "with the four dictation engines' tiles")
+    var marked = true
+    for t in dictation_tiles {
+        if not (str_at(t.copy(), "icon_svg") ?? String()).contains("currentColor") or str_at(t, "mark") == none { marked = false }
+    }
+    try check(marked, "each with its maker's mark in currentColor, and the mark's name")
     let (none_set, none_sounds) = try app.dictate(1)
     try check(last_state(none_set) == "no_engine" and none_sounds.len() == 0, "with no engine, the mic is told to open Settings › Voice, with no sound")
 

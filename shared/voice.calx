@@ -24,7 +24,8 @@ import shared.obj.{Obj, at, merge, str_at}
 
 /// A dictation engine, or a speech one. `streams` says whether the words come as
 /// they're said; one that doesn't writes them once the person stops. `on_device` is a
-/// model the device runs itself (LOO-439), which needs no key.
+/// model the device runs itself (LOO-439), which needs no key. `mark` is its maker's
+/// logo, a file in voice/ without its .svg (mark_svg), or "" for none.
 pub struct Engine {
     pub id: str
     pub kind: str    // dictation or speech
@@ -32,17 +33,46 @@ pub struct Engine {
     pub line: str    // the tile's one quiet line
     pub streams: bool
     pub on_device: bool
+    pub mark: str
+}
+
+// The makers' marks (voice/README.md), built into the program as their files are.
+const ELEVENLABS: [u8; 143] = embed("voice/elevenlabs.svg")
+const DEEPGRAM: [u8; 410] = embed("voice/deepgram.svg")
+const OPENAI: [u8; 2387] = embed("voice/openai.svg")
+const GROQ: [u8; 188] = embed("voice/groq.svg")
+const FISH_AUDIO: [u8; 2303] = embed("voice/fish-audio.svg")
+const NVIDIA: [u8; 870] = embed("voice/nvidia.svg")
+
+/// The SVG of the mark `name` names (`elevenlabs`, a file in voice/), or none.
+pub fn mark_svg(name: String) -> String? {
+    let text = if name == "elevenlabs" {
+        String.from_utf8(ELEVENLABS[..])
+    } else if name == "deepgram" {
+        String.from_utf8(DEEPGRAM[..])
+    } else if name == "openai" {
+        String.from_utf8(OPENAI[..])
+    } else if name == "groq" {
+        String.from_utf8(GROQ[..])
+    } else if name == "fish-audio" {
+        String.from_utf8(FISH_AUDIO[..])
+    } else if name == "nvidia" {
+        String.from_utf8(NVIDIA[..])
+    } else {
+        return none
+    }
+    return some((text ?? String()).trim().copy())
 }
 
 /// The engines, in the order their tiles show.
 pub const ENGINES: [Engine; 7] = [
-    Engine { id: "elevenlabs", kind: "dictation", name: "ElevenLabs Scribe", line: "Words as you say them", streams: true, on_device: false },
-    Engine { id: "deepgram", kind: "dictation", name: "Deepgram Nova-3", line: "Words as you say them", streams: true, on_device: false },
-    Engine { id: "openai", kind: "dictation", name: "OpenAI", line: "gpt-4o-transcribe, words as you say them", streams: true, on_device: false },
-    Engine { id: "groq", kind: "dictation", name: "Groq", line: "Whisper large v3, writes once you stop", streams: false, on_device: false },
-    Engine { id: "elevenlabs", kind: "speech", name: "ElevenLabs", line: "Flash v2.5, your voices and the library's", streams: false, on_device: false },
-    Engine { id: "fish", kind: "speech", name: "Fish Audio", line: "S2.1 Pro, the voice library", streams: false, on_device: false },
-    Engine { id: "openai", kind: "speech", name: "OpenAI", line: "gpt-4o-mini-tts, 13 voices", streams: false, on_device: false },
+    Engine { id: "elevenlabs", kind: "dictation", name: "ElevenLabs Scribe", line: "Words as you say them", streams: true, on_device: false, mark: "elevenlabs" },
+    Engine { id: "deepgram", kind: "dictation", name: "Deepgram Nova-3", line: "Words as you say them", streams: true, on_device: false, mark: "deepgram" },
+    Engine { id: "openai", kind: "dictation", name: "OpenAI", line: "gpt-4o-transcribe, words as you say them", streams: true, on_device: false, mark: "openai" },
+    Engine { id: "groq", kind: "dictation", name: "Groq", line: "Whisper large v3, writes once you stop", streams: false, on_device: false, mark: "groq" },
+    Engine { id: "elevenlabs", kind: "speech", name: "ElevenLabs", line: "Flash v2.5, your voices and the library's", streams: false, on_device: false, mark: "elevenlabs" },
+    Engine { id: "fish", kind: "speech", name: "Fish Audio", line: "S2.1 Pro, the voice library", streams: false, on_device: false, mark: "fish-audio" },
+    Engine { id: "openai", kind: "speech", name: "OpenAI", line: "gpt-4o-mini-tts, 13 voices", streams: false, on_device: false, mark: "openai" },
 ]
 
 /// The services a key is kept for, each the person's secret `voice.SERVICE`.
@@ -205,13 +235,17 @@ pub fn openai_voice(name: String) -> bool {
 }
 
 /// The engines of `kind` as their tiles show them, with whether the person has the
-/// key each needs (`have`, by service) and which is in use.
+/// key each needs (`have`, by service) and which is in use. One with a mark has its SVG
+/// (`icon_svg`) and its name (`mark`), which the iPhone has its copy by; `icon` is what
+/// one without draws.
 pub fn tiles(kind: String, have: List<String>, in_use: String) -> Json {
     var out = List<Json>()
     for e in ENGINES {
         if e.kind != kind { continue }
         let keyed = e.on_device or have.contains(String(e.id))
-        out.push(Obj.new().s("id", String(e.id)).s("name", String(e.name)).s("line", String(e.line)).s("icon", String(if e.on_device { "laptop" } else { "cloud" })).b("streams", e.streams).b("key", not e.on_device).b("have", keyed).b("in_use", in_use == e.id).done())
+        let svg = mark_svg(String(e.mark))
+        let mark = if svg != none { some(String(e.mark)) } else { none }
+        out.push(Obj.new().s("id", String(e.id)).s("name", String(e.name)).s("line", String(e.line)).s("icon", String(if e.on_device { "laptop" } else { "cloud" })).maybe("icon_svg", svg).maybe("mark", mark).b("streams", e.streams).b("key", not e.on_device).b("have", keyed).b("in_use", in_use == e.id).done())
     }
     return Json.Array(out)
 }
@@ -599,8 +633,12 @@ fn changes_are_checked() {
 @test
 fn tiles_say_what_each_engine_is() {
     let t = tiles(String("dictation"), [String("groq")], String("groq"))
-    assert("{t}".starts_with(#"[{"id":"elevenlabs","name":"ElevenLabs Scribe","line":"Words as you say them","icon":"cloud","streams":true,"key":true,"have":false,"in_use":false}"#))
-    assert("{t}".contains(#"{"id":"groq","name":"Groq","line":"Whisper large v3, writes once you stop","icon":"cloud","streams":false,"key":true,"have":true,"in_use":true}"#))
+    assert("{t}".starts_with(#"[{"id":"elevenlabs","name":"ElevenLabs Scribe","line":"Words as you say them","icon":"cloud","icon_svg":"<svg "#))
+    assert("{t}".contains(#""mark":"elevenlabs","streams":true,"key":true,"have":false,"in_use":false}"#))
+    assert("{t}".contains(#""mark":"groq","streams":false,"key":true,"have":true,"in_use":true}"#))
+    if let Json.Array(each) = t {
+        assert(str_at(each[3].copy(), "icon_svg") == mark_svg(String("groq")))
+    }
     let l = listed(Json.Null, [String("openai")])
     assert("{at(l.copy(), "keys")}" == #"{"elevenlabs":false,"deepgram":false,"openai":true,"groq":false,"fish":false}"#)
     assert("{at(at(l, "engines"), "speech")}".contains(#"{"id":"openai","name":"OpenAI","line":"gpt-4o-mini-tts, 13 voices"#))
@@ -669,4 +707,13 @@ fn audio_comes_to_24k_mono() {
 @test
 fn a_reply_is_said_as_words() {
     assert(speakable(String("# Done\n\nI fixed **the build** in [CI](https://x.y/z).\n```\ncode\n```\n- one\n- two")) == "Done I fixed the build in CI. one two")
+}
+
+@test
+fn each_engine_has_its_makers_mark() {
+    for e in ENGINES {
+        let svg = mark_svg(String(e.mark)) ?? String()
+        assert(svg.starts_with("<svg ") and svg.contains("fill=\"currentColor\"") and not svg.contains("#"))
+    }
+    assert(mark_svg(String("nvidia")) != none and mark_svg(String("siri")) == none)
 }

@@ -13,7 +13,7 @@ import Testing
         "engines": [
             "dictation": [
                 ["id": "elevenlabs", "name": "ElevenLabs Scribe", "line": "Words as you say them", "icon": "cloud", "streams": true, "key": true, "have": false, "in_use": false],
-                ["id": "deepgram", "name": "Deepgram Nova-3", "line": "Words as you say them", "icon": "cloud", "streams": true, "key": true, "have": true, "in_use": true],
+                ["id": "deepgram", "name": "Deepgram Nova-3", "line": "Words as you say them", "icon": "cloud", "icon_svg": "<svg/>", "mark": "deepgram", "streams": true, "key": true, "have": true, "in_use": true],
                 ["id": "groq", "name": "Groq", "line": "Whisper large v3, writes once you stop", "icon": "cloud", "streams": false, "key": true, "have": true, "in_use": false],
             ],
             "speech": [
@@ -56,6 +56,7 @@ import Testing
         m.take(["t": "result", "id": "app.voice_get", "ok": true, "value": ["voice": Self.listed]])
         #expect(m.voice.dictation.map(\.button) == [.addKey, .changeKey, .use])
         #expect(m.voice.dictation.map(\.inUse) == [false, true, false])
+        #expect(m.voice.dictation.map(\.mark) == [nil, "deepgram", nil])
         // A model on the device needs no key: Use, and nothing once it's in use.
         let onDevice = VoiceTile(["id": "whisper", "name": "Whisper", "line": "On this phone", "icon": "laptop", "key": false, "have": true, "in_use": false])
         #expect(onDevice.button == .use)

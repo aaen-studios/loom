@@ -16,8 +16,12 @@ struct VoiceTile: Equatable, Sendable, Identifiable {
     var id: String
     var name: String
     var line: String
-    /// `cloud` for a service, `laptop` for a model on the device.
+    /// `cloud` for a service, `laptop` for a model on the device, drawn where it has no
+    /// mark.
     var icon: String
+    /// Its maker's mark, by the name the app has its copy by, as scripts/ios.calx bundles
+    /// shared/voice's (`voice-deepgram`), or none.
+    var mark: String?
     var streams: Bool
     /// Whether it needs a key, and whether the person has it.
     var key: Bool
@@ -29,6 +33,7 @@ struct VoiceTile: Equatable, Sendable, Identifiable {
         name = j["name"].text
         line = j["line"].text
         icon = j["icon"].string ?? "cloud"
+        mark = j["mark"].text.isEmpty ? nil : j["mark"].text
         streams = j["streams"].bool ?? false
         key = j["key"].bool ?? true
         have = j["have"].bool ?? false

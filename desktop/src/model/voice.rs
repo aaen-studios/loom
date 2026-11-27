@@ -36,8 +36,12 @@ pub struct Tile {
     pub id: String,
     pub name: String,
     pub line: String,
-    /// `cloud` for a service, `laptop` for a model on the device.
+    /// `cloud` for a service, `laptop` for a model on the device, drawn where it has no
+    /// mark.
     pub icon: String,
+    /// Its maker's logo, one colour in `currentColor` (shared/voice/), and the name of it.
+    pub icon_svg: Option<String>,
+    pub mark: String,
     pub streams: bool,
     /// Whether it needs a key, and whether the person has it.
     pub key: bool,
@@ -53,6 +57,12 @@ impl Tile {
             name: s(v, "name"),
             line: s(v, "line"),
             icon: s(v, "icon"),
+            icon_svg: v
+                .get("icon_svg")
+                .and_then(Value::as_str)
+                .filter(|m| !m.is_empty())
+                .map(str::to_string),
+            mark: s(v, "mark"),
             streams: b("streams"),
             key: b("key"),
             have: b("have"),
@@ -484,7 +494,7 @@ mod tests {
             "engines": {
                 "dictation": [
                     {"id": "elevenlabs", "name": "ElevenLabs Scribe", "line": "Words as you say them", "icon": "cloud", "streams": true, "key": true, "have": false, "in_use": false},
-                    {"id": "deepgram", "name": "Deepgram Nova-3", "line": "Words as you say them", "icon": "cloud", "streams": true, "key": true, "have": true, "in_use": true},
+                    {"id": "deepgram", "name": "Deepgram Nova-3", "line": "Words as you say them", "icon": "cloud", "icon_svg": "<svg id=\"deepgram\"/>", "mark": "deepgram", "streams": true, "key": true, "have": true, "in_use": true},
                     {"id": "groq", "name": "Groq", "line": "Whisper large v3, writes once you stop", "icon": "cloud", "streams": false, "key": true, "have": true, "in_use": false}
                 ],
                 "speech": [{"id": "openai", "name": "OpenAI", "line": "gpt-4o-mini-tts, 13 voices", "icon": "cloud", "streams": false, "key": true, "have": true, "in_use": true}]
@@ -501,6 +511,13 @@ mod tests {
         ));
         assert!(v.came && v.dictation.len() == 3 && v.speech.len() == 1);
         assert_eq!(v.engine(Tab::Dictation), "deepgram");
+        // A tile with its maker's mark has it; one without draws its icon.
+        assert_eq!(
+            v.dictation[1].icon_svg.as_deref(),
+            Some("<svg id=\"deepgram\"/>")
+        );
+        assert_eq!(v.dictation[1].mark, "deepgram");
+        assert_eq!(v.dictation[0].icon_svg, None);
         assert_eq!(v.language_name(), "Norwegian");
         assert_eq!(v.voice_name(), "Cedar");
         assert_eq!(speed_label(v.speed()), "1.1×");

@@ -32,7 +32,9 @@ struct SampleVoice {
     /// The engine's tile, as `voice.get` gives it.
     func tile(_ kind: String, _ id: String) -> JSON {
         guard let e = Self.engines.first(where: { $0.kind == kind && $0.id == id }) else { return .null }
-        return ["id": JSON(e.id), "name": JSON(e.name), "line": JSON(e.line), "icon": "cloud", "streams": JSON(e.streams),
+        // Its maker's mark, as the app has its copy (`voice-deepgram`, from shared/voice).
+        let mark = e.id == "fish" ? "fish-audio" : e.id
+        return ["id": JSON(e.id), "name": JSON(e.name), "line": JSON(e.line), "icon": "cloud", "icon_svg": "<svg/>", "mark": JSON(mark), "streams": JSON(e.streams),
                 "key": true, "have": JSON(keys.contains(e.id)), "in_use": JSON(settings[kind]["engine"].text == e.id)]
     }
 
@@ -158,7 +160,7 @@ extension Sample {
         ["id": "msg_19", "conversation": "c_2", "role": "agent", "agent": "a_2", "run": "run_18", "at": 1795187230000,
          "blocks": [["kind": "card", "card": [
              "id": "voice_tc_18", "type": "voice_setup", "title": "Set up speech", "call": "tc_18", "kind": "speech", "agent": "a_2",
-             "engine": ["id": "fish", "name": "Fish Audio", "line": "S2.1 Pro, the voice library", "icon": "cloud", "streams": false, "key": true, "have": false, "in_use": false],
+             "engine": ["id": "fish", "name": "Fish Audio", "line": "S2.1 Pro, the voice library", "icon": "cloud", "icon_svg": "<svg/>", "mark": "fish-audio", "streams": false, "key": true, "have": false, "in_use": false],
              "settings": ["engine": "fish", "voice": "v_1", "voice_name": "Narrator", "speed": .number(0.9), "read_aloud": "always"],
              "service": "fish", "state": "asking", "said": ""]]]],
     ]

@@ -180,7 +180,7 @@ struct VoiceView: View {
     }
 }
 
-/// An engine's tile, in black and white: its icon on a tile in ink, its name and one quiet
+/// An engine's tile, in black and white: its maker's mark on a tile in ink, its name and one quiet
 /// line, and its button, or none on a card. The engine in use is outlined in ink, with a
 /// check and In use.
 struct VoiceTileView: View {
@@ -195,9 +195,20 @@ struct VoiceTileView: View {
                 .fill(P.button)
                 .frame(width: Tokens.Control.iconLarge, height: Tokens.Control.iconLarge)
                 .overlay {
-                    Image(systemName: tile.icon == "laptop" ? "laptopcomputer" : "cloud")
-                        .font(.system(size: 15, weight: .medium))
-                        .foregroundStyle(P.buttonInk)
+                    // Its maker's mark in the ink on it, as Spools draws an entry's; else
+                    // the cloud or the laptop.
+                    if let glyph = tile.mark.flatMap({ UIImage(named: "voice-\($0)") }) {
+                        Image(uiImage: glyph)
+                            .renderingMode(.template)
+                            .resizable()
+                            .scaledToFit()
+                            .frame(width: (Tokens.Control.iconLarge * 0.56).rounded(), height: (Tokens.Control.iconLarge * 0.56).rounded())
+                            .foregroundStyle(P.buttonInk)
+                    } else {
+                        Image(systemName: tile.icon == "laptop" ? "laptopcomputer" : "cloud")
+                            .font(.system(size: 15, weight: .medium))
+                            .foregroundStyle(P.buttonInk)
+                    }
                 }
                 .accessibilityHidden(true)
             VStack(alignment: .leading, spacing: 2) {

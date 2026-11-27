@@ -14,6 +14,11 @@ import notionMark from '../../../server/catalog/notion.svg?raw';
 import linearMark from '../../../server/catalog/linear.svg?raw';
 import composioMark from '../../../server/catalog/composio.svg?raw';
 import t3Mark from '../../../server/catalog/t3.svg?raw';
+import elevenlabsMark from '../../../shared/voice/elevenlabs.svg?raw';
+import deepgramMark from '../../../shared/voice/deepgram.svg?raw';
+import openaiMark from '../../../shared/voice/openai.svg?raw';
+import groqMark from '../../../shared/voice/groq.svg?raw';
+import fishAudioMark from '../../../shared/voice/fish-audio.svg?raw';
 
 // The Brains page as the app draws it (desktop/src/app.rs, programs_page): one column, Your brains
 // with a row for each brain, its tile, name, version and settings, and Claude Agent open in place
@@ -109,28 +114,29 @@ const tiles = [
 
 // Settings › Voice as the app draws it (PLAN.md, "Voice"): Dictation and Speech beside the title,
 // as Spools has Find and Installed, each its engines as tiles in black and white, an ink tile with
-// Lucide's cloud for a service, its name, one quiet line and Use, Add key or Change key; the one in
-// use outlined in ink with a check in a ring and In use; then its rows. Deepgram Nova-3 dictates and
-// OpenAI speaks, with Marin at 1×, and replies aren't read aloud.
-type Engine = { id: string; name: string; line: string; key: boolean; on: boolean };
+// its maker's logo in its ink (shared/voice/, as the app draws it), its name, one quiet line and
+// Use, Add key or Change key; the one in use outlined in ink with a check in a ring and In use; then
+// its rows. Deepgram Nova-3 dictates and OpenAI speaks, with Marin at 1×, and replies aren't read
+// aloud.
+type Engine = { id: string; name: string; line: string; mark: string; key: boolean; on: boolean };
 const VOICE: { id: string; name: string; engines: Engine[] }[] = [
 	{
 		id: 'dictation',
 		name: 'Dictation',
 		engines: [
-			{ id: 'elevenlabs-scribe', name: 'ElevenLabs Scribe', line: 'Words as you say them', key: false, on: false },
-			{ id: 'deepgram', name: 'Deepgram Nova-3', line: 'Words as you say them', key: true, on: true },
-			{ id: 'openai-transcribe', name: 'OpenAI', line: 'gpt-4o-transcribe, words as you say them', key: false, on: false },
-			{ id: 'groq', name: 'Groq', line: 'Whisper large v3, writes once you stop', key: false, on: false },
+			{ id: 'elevenlabs-scribe', name: 'ElevenLabs Scribe', line: 'Words as you say them', mark: elevenlabsMark, key: false, on: false },
+			{ id: 'deepgram', name: 'Deepgram Nova-3', line: 'Words as you say them', mark: deepgramMark, key: true, on: true },
+			{ id: 'openai-transcribe', name: 'OpenAI', line: 'gpt-4o-transcribe, words as you say them', mark: openaiMark, key: false, on: false },
+			{ id: 'groq', name: 'Groq', line: 'Whisper large v3, writes once you stop', mark: groqMark, key: false, on: false },
 		],
 	},
 	{
 		id: 'speech',
 		name: 'Speech',
 		engines: [
-			{ id: 'elevenlabs', name: 'ElevenLabs', line: "Flash v2.5, your voices and the library's", key: false, on: false },
-			{ id: 'fish', name: 'Fish Audio', line: 'S2.1 Pro, the voice library', key: false, on: false },
-			{ id: 'openai-tts', name: 'OpenAI', line: 'gpt-4o-mini-tts, 13 voices', key: true, on: true },
+			{ id: 'elevenlabs', name: 'ElevenLabs', line: "Flash v2.5, your voices and the library's", mark: elevenlabsMark, key: false, on: false },
+			{ id: 'fish', name: 'Fish Audio', line: 'S2.1 Pro, the voice library', mark: fishAudioMark, key: false, on: false },
+			{ id: 'openai-tts', name: 'OpenAI', line: 'gpt-4o-mini-tts, 13 voices', mark: openaiMark, key: true, on: true },
 		],
 	},
 ];
@@ -140,8 +146,7 @@ const VOICES = ['Alloy', 'Ash', 'Ballad', 'Cedar', 'Coral', 'Echo', 'Fable', 'Ma
 const SHORTCUTS = ['Ctrl+Shift+Space', 'Off'];
 const SPEEDS = ['0.8×', '0.9×', '1×', '1.1×', '1.2×'];
 const READ_ALOUD = ['Never', 'Only in live', 'Always'];
-// Lucide's icons: cloud, check, chevron-down, play, eye and eye-off.
-const CLOUD = 'M17.5 19H9a7 7 0 1 1 6.71-9h1.79a4.5 4.5 0 1 1 0 9Z';
+// Lucide's icons: check, chevron-down, play, eye and eye-off.
 const CHECK = 'M20 6 9 17l-5-5';
 const CHEVRON = 'm6 9 6 6 6-6';
 const EYE =
@@ -535,11 +540,7 @@ const faq = {
 								<div class="voice-tiles">
 									{t.engines.map((e) => (
 										<div class:list={['voice-tile', { on: e.on }]} data-engine={e.id} data-key={e.key ? '' : undefined}>
-											<span class="voice-mark">
-												<svg class="i" viewBox="0 0 24 24" aria-hidden="true">
-													<path d={CLOUD} />
-												</svg>
-											</span>
+											<span class="voice-mark" aria-hidden="true" set:html={e.mark} />
 											<span class="voice-text">
 												<span class="voice-name">{e.name}</span>
 												<span class="voice-line">{e.line}</span>
@@ -1686,9 +1687,10 @@ const faq = {
 	.voice-tile.on {
 		border-color: var(--ink);
 	}
-	/* Its service on a small tile in ink, black in light and white in dark. */
+	/* Its maker's logo on a small tile in ink, black in light and white in dark. */
 	.voice-mark {
 		display: flex;
+		flex: none;
 		align-items: center;
 		justify-content: center;
 		width: var(--control-icon);
@@ -1697,9 +1699,9 @@ const faq = {
 		background: var(--button);
 		color: var(--button-ink);
 	}
-	.voice-mark .i {
-		width: 16px;
-		height: 16px;
+	.voice-mark :global(svg) {
+		width: 56%;
+		height: 56%;
 	}
 	.voice-text {
 		min-width: 0;
