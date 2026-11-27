@@ -421,6 +421,27 @@ const ACTA = actaMark.replace('role="img"', 'aria-hidden="true"');
 					<svg data-thread data-color="mint" width="14" height="10" class="reply-thread head"></svg>
 					<div class="body">
 						<div class="who">Moss</div>
+						<!-- Its steps (app.rs, fold and step_row): while it works, the step going now in
+						     plain words, shimmering, with its number; once it's done, how many it took,
+						     which opens to what each did with its tool's name quiet on the right, and a
+						     step opens to its call. -->
+						<div class="steps" data-steps>
+							<button type="button" class="steps-line" aria-expanded="false" data-steps-line>
+								<span class="steps-words" data-steps-words>Took 2 steps</span>
+								<span class="steps-count" data-steps-count></span>
+								<span class="steps-chev" aria-hidden="true">›</span>
+							</button>
+							<div class="steps-list" data-steps-list hidden>
+								<div class="step" data-doing="Searching the shop's code for “Contiune”">
+									<button type="button" class="step-line"><span class="step-did">Searched the shop's code for “Contiune”</span><span class="step-ok">✓</span><span class="step-name">Grep</span></button>
+									<div class="step-call" hidden><span class="prompt">›_</span>rg -n Contiune src<span class="step-ok">✓</span></div>
+								</div>
+								<div class="step" data-doing="Starting a T3 thread in shop">
+									<button type="button" class="step-line"><span class="step-did">Started a T3 thread in shop</span><span class="step-ok">✓</span><span class="step-name">t3_thread_launch</span></button>
+									<div class="step-call" hidden><span class="prompt">›_</span>Start a T3 thread<span class="step-ok">✓</span></div>
+								</div>
+							</div>
+						</div>
 						<div class="said"><p>I started a T3 thread for it.</p></div>
 						<div class="t3 done">
 							<div class="t3-head">
@@ -1398,6 +1419,108 @@ const ACTA = actaMark.replace('role="img"', 'aria-hidden="true"');
 		font-size: var(--size-small);
 		font-weight: var(--weight-medium);
 		line-height: 1.4;
+	}
+	/* A reply's steps: one line, 22px as the app's (app.rs, STEP_ROW). While the turn works
+	   it's the step going now, a band of light running over its words, and its number; once
+	   it's done, how many it took, which opens to a line a step. */
+	.steps-line,
+	.step-line {
+		display: flex;
+		align-items: center;
+		gap: 8px;
+		height: 22px;
+		max-width: 100%;
+		padding: 0;
+		border: 0;
+		background: none;
+		font: inherit;
+		font-size: var(--size-small);
+		color: var(--ink-2);
+		text-align: left;
+		cursor: pointer;
+	}
+	.steps-line:hover,
+	.step-line:hover {
+		color: var(--ink);
+	}
+	.steps-words,
+	.step-did {
+		min-width: 0;
+		overflow: hidden;
+		white-space: nowrap;
+		text-overflow: ellipsis;
+	}
+	.steps-count,
+	.steps-chev {
+		flex: none;
+		color: var(--ink-3);
+	}
+	.steps-count:empty,
+	.steps.working .steps-chev {
+		display: none;
+	}
+	.steps-line[aria-expanded='true'] .steps-chev {
+		transform: rotate(90deg);
+	}
+	.steps.working .steps-line {
+		cursor: default;
+	}
+	.steps.working .steps-words {
+		background: linear-gradient(90deg, var(--ink-2) 40%, var(--ink) 50%, var(--ink-2) 60%) 100% 0 / 250% 100%;
+		-webkit-background-clip: text;
+		background-clip: text;
+		color: transparent;
+		animation: shine 1.8s linear infinite;
+	}
+	@keyframes shine {
+		to {
+			background-position: 0 0;
+		}
+	}
+	@media (prefers-reduced-motion: reduce) {
+		.steps.working .steps-words {
+			animation: none;
+			background: none;
+			color: var(--ink-2);
+		}
+	}
+	.steps-list {
+		display: flex;
+		flex-direction: column;
+		gap: 4px;
+		margin-top: 4px;
+		padding-left: 12px;
+		border-left: 1px solid var(--line-strong);
+	}
+	.step-line {
+		width: 100%;
+	}
+	.step-ok {
+		flex: none;
+		color: var(--ok);
+	}
+	.step-name {
+		flex: none;
+		margin-left: auto;
+		font-family: var(--mono);
+		font-size: var(--size-caption);
+		color: var(--ink-3);
+	}
+	.step-call {
+		display: flex;
+		align-items: center;
+		gap: 8px;
+		padding: 2px 0 4px 12px;
+		font-family: var(--mono);
+		font-size: var(--size-small);
+		color: var(--ink-2);
+	}
+	.step-call .prompt {
+		color: var(--ink-3);
+	}
+	.steps-list[hidden],
+	.step-call[hidden] {
+		display: none;
 	}
 	/* The answer: a grey bubble, never the agent's colour, which is the person's. Its corner
 	   by the thread is squared off as a speech bubble's tail. */

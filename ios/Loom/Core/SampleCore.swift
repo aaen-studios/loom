@@ -649,7 +649,7 @@ final class SampleCore: CoreLink, @unchecked Sendable {
             t += 0.12
         }
         later(t + 0.3) { [self] in
-            event("tool.started", ["run": JSON(run), "call": JSON(call), "block": 1, "tool": "execute", "title": "Check the last run on main", "input": ["command": "gh run list --branch main --limit 1"]])
+            event("tool.started", ["run": JSON(run), "call": JSON(call), "block": 1, "tool": "execute", "title": "Check the last run on main", "name": "Bash", "doing": "Checking the last run on main", "did": "Checked the last run on main", "input": ["command": "gh run list --branch main --limit 1"]])
             event("approval.needed", ["run": JSON(run), "call": JSON(call), "tool": "execute", "title": "Run a command", "detail": "gh run list --branch main --limit 1", "can_always": true])
         }
     }
@@ -1018,10 +1018,10 @@ enum Sample {
     }
 
     static let tools: [JSON] = [
-        ["call": "tc_1", "run": "run_1", "tool": "execute", "title": "List the PRs merged since v0.2", "status": "done"],
-        ["call": "tc_40", "run": "run_41", "tool": "read", "title": "Look at balcony.png", "status": "done"],
-        ["call": "tc_41", "run": "run_41", "tool": "execute", "title": "Measure the colour near the stem", "status": "done"],
-        ["call": "tc_30", "run": "run_30", "tool": "edit", "title": "Edit notes/2026-11.md"],
+        ["call": "tc_1", "run": "run_1", "tool": "execute", "title": "List the PRs merged since v0.2", "status": "done", "name": "Bash", "doing": "Listing the PRs merged since v0.2", "did": "Listed the PRs merged since v0.2"],
+        ["call": "tc_40", "run": "run_41", "tool": "read", "title": "Look at balcony.png", "status": "done", "name": "Read", "doing": "Looking at balcony.png", "did": "Looked at balcony.png"],
+        ["call": "tc_41", "run": "run_41", "tool": "execute", "title": "Measure the colour near the stem", "status": "done", "name": "Bash", "doing": "Measuring the colour near the stem", "did": "Measured the colour near the stem"],
+        ["call": "tc_30", "run": "run_30", "tool": "edit", "title": "Edit notes/2026-11.md", "name": "Edit", "doing": "Editing notes/2026-11.md", "did": "Edited notes/2026-11.md"],
     ]
 
     /// Questions as `core.get` gives them, each with what its card shows (core/asks.calx).
