@@ -108,7 +108,13 @@ struct ThreadCardView: View {
         }
         .padding(.horizontal, Tokens.Space.l)
         .frame(height: Tokens.Control.buttonSmall)
-        .background(b.ink ? P.ink : Color.clear)
+        // A flat-bottomed strip whose top follows the card's corners exactly: a bare
+        // `.background(colour)` here came out rounded at its bottom corners too.
+        .background {
+            UnevenRoundedRectangle(topLeadingRadius: Tokens.Radius.bubble, bottomLeadingRadius: 0, bottomTrailingRadius: 0,
+                                   topTrailingRadius: Tokens.Radius.bubble, style: .continuous)
+                .fill(b.ink ? P.ink : Color.clear)
+        }
         .overlay(alignment: .bottom) { Rectangle().fill(b.ink ? P.ink : P.line).frame(height: 1) }
     }
 
