@@ -493,7 +493,9 @@ pub fn outcome(card: Json) -> String {
         return "Your person rejected your {what}{named} ({card_id}). It wasn't sent. Their note: {note}"
     }
     if state == "failed" {
-        return "Your {what}{named} to {to} ({card_id}) couldn't be sent: {str_at(card.copy(), "why") ?? String()} Your person can try again from its card; don't send it yourself."
+        let why = (str_at(card.copy(), "why") ?? String()).trim().copy()
+        let stop = if why.ends_with(".") or why.ends_with("!") or why.ends_with("?") { "" } else { "." }
+        return "Your {what}{named} to {to} ({card_id}) couldn't be sent: {why}{stop} Your person can try again from its card; don't send it yourself."
     }
     if bool_at_or(card.copy(), "edited") {
         var lines = List<String>()
@@ -688,6 +690,7 @@ fn says_what_came_of_it() {
     assert(outcome(in_state(card.copy(), "rejected", 0, 0, String(), String("Too formal."))).ends_with("Their note: Too formal."))
     assert(outcome(in_state(card.copy(), "rejected", 0, 0, String(), String())).contains("without a note"))
     assert(outcome(in_state(card.copy(), "failed", 0, 0, String("Quota."), String())).contains("couldn't be sent: Quota."))
+    assert(outcome(in_state(card.copy(), "failed", 0, 0, String("Bad address"), String())).contains("couldn't be sent: Bad address. Your person"))
     let sending = in_state(card.copy(), "sending", 5, 10, String(), String())
     assert(ms_at(sending.copy(), "until") == 10 and ms_at(in_state(sending, "sent", 5, 0, String(), String()), "until") == 0)
     assert(refusal(String("draft"), String("send")) == "" and refusal(String("sent"), String("send")).len() > 0)

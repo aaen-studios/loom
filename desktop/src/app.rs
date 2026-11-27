@@ -54,6 +54,8 @@ mod t3_view;
 #[path = "emoji_ui.rs"]
 mod emoji_ui;
 use emoji_ui::{Greeting, RowKey};
+#[path = "draft_view.rs"]
+mod draft_view;
 #[path = "form_drafts.rs"]
 mod form_drafts;
 #[path = "list_page.rs"]
@@ -614,6 +616,8 @@ pub struct Loom {
     /// and for each field of a card asking for a secret, by its call and the field's
     /// place, with its Save as name beside it ("bc_7/0" and "bc_7/0/save").
     card_secrets: Rc<HashMap<String, Entity<InputState>>>,
+    /// Whether the chat is drawn again each second while a draft's Undo counts down.
+    draft_ticking: bool,
     queue_in: Entity<InputState>,
     /// A side question being written.
     aside_in: Entity<InputState>,
@@ -1781,6 +1785,7 @@ ACTA_KEY=secret:ACTA_KEY",
             asks_hidden: HashSet::new(),
             links_looked: false,
             card_secrets: Rc::default(),
+            draft_ticking: false,
             queue_in,
             aside_in,
             queue_editing: None,
@@ -11166,6 +11171,10 @@ ACTA_KEY=secret:ACTA_KEY",
         let rows = self.rows.clone();
         let flow = self.flow.clone();
         let secrets = self.card_secrets(&rows, window, cx);
+        // A draft sent from here or elsewhere counts its Undo down.
+        if !self.draft_ticking && rows.iter().any(|r| matches!(r, Row::Message(m) if m.blocks.iter().any(|b| matches!(b.card.as_ref().map(|c| &c.body), Some(model::CardBody::Draft(d)) if d.state == "sending" && d.until > model::now_ms())))) {
+            self.draft_tick(cx);
+        }
         let agent = self
             .model
             .selected
@@ -22128,6 +22137,7 @@ fn card_view(
         CardBody::McpAdd { .. } => mcp_add_card(p, card, key, name, tint, scale, secrets, this),
         CardBody::SecretAsk { .. } => secret_ask_card(p, card, key, tint, scale, secrets, this),
         CardBody::Form { .. } => form_card(p, card, key, tint, show, secrets, this),
+        CardBody::Draft(_) => draft_view::card(p, card, key, scale, this),
         _ => shown_card(p, card, tint, scale),
     }
 }
@@ -23074,6 +23084,7 @@ fn shown_card(p: Palette, card: &model::Card, tint: Hsla, scale: f32) -> Div {
         | CardBody::McpAdd { .. }
         | CardBody::SecretAsk { .. }
         | CardBody::RoutineOff { .. }
+        | CardBody::Draft(_)
         | CardBody::Form { .. } => {}
     }
     // A table has columns to fit, and takes the reply's room.
