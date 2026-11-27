@@ -49,6 +49,9 @@ const VERCEL: [u8; 121] = embed("catalog/vercel.svg")
 const CLOUDFLARE: [u8; 1163] = embed("catalog/cloudflare.svg")
 const HOME_ASSISTANT: [u8; 662] = embed("catalog/home-assistant.svg")
 const T3: [u8; 869] = embed("catalog/t3.svg")
+// Marks of services a draft is sent through (server/drafts.calx), which no entry has.
+const GMAIL: [u8; 328] = embed("catalog/gmail.svg")
+const DISCORD: [u8; 1361] = embed("catalog/discord.svg")
 
 // The SVG of the mark an entry's `logo` names, or none.
 pub fn logo_svg(name: String) -> String? {
@@ -68,6 +71,10 @@ pub fn logo_svg(name: String) -> String? {
         String.from_utf8(HOME_ASSISTANT[..])
     } else if name == "t3.svg" {
         String.from_utf8(T3[..])
+    } else if name == "gmail.svg" {
+        String.from_utf8(GMAIL[..])
+    } else if name == "discord.svg" {
+        String.from_utf8(DISCORD[..])
     } else {
         return none
     }

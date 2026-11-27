@@ -707,6 +707,26 @@ impl Store {
         _ = try self.db.execute(String("DELETE FROM meta WHERE key = ?"), [t(key)])
     }
 
+    // Drafts waiting for their time to be sent (PLAN.md, "Drafts"), kept as
+    // `draft_due/USER/MESSAGE/CARD` with when: each person, reply, card and time.
+    pub fn drafts_due(self) -> List<(String, String, String, i64)> ! Error {
+        var out = List<(String, String, String, i64)>()
+        for r in try self.db.query(String("SELECT key, value FROM meta WHERE substr(key, 1, 10) = 'draft_due/'")) {
+            let parts = text(r[0].copy())[10..].split("/")
+            if parts.len() != 3 { continue }
+            out.push((parts[0].copy(), parts[1].copy(), parts[2].copy(), i64.parse(text(r[1].copy())) ?? 0))
+        }
+        return out
+    }
+
+    pub fn set_draft_due(self, user: String, message: String, card: String, at: i64) ! Error {
+        try self.set_meta("draft_due/{user}/{message}/{card}", "{at}")
+    }
+
+    pub fn clear_draft_due(self, user: String, message: String, card: String) ! Error {
+        try self.delete_meta("draft_due/{user}/{message}/{card}")
+    }
+
     // The renames of `user`'s MCP servers the instance keeps for chats running
     // from before them (`mcp_renamed/USER/WAS`): each name a server had, and
     // the one it was renamed to.

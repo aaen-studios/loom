@@ -1,0 +1,215 @@
+module tests.protocol.drafts
+
+// Draft cards (PLAN.md, "Drafts"): the fake agent drafts an email with
+// draft_message, which puts a card at the end of its reply and sends nothing.
+// Send, with the person's edits, waits Undo's few seconds; Undo takes it back,
+// and a send that's left goes through the person's MCP server (the fake MCP
+// server's send_email, which writes what it got to a file), the card says
+// Sent, and the agent is woken with what went out. Reject wakes it with the
+// note; one the tool refuses says why and goes again on Try again; Send later
+// goes at its time. The agent can't answer a card itself, and a tool that
+// isn't one that sends can't be drafted. In Code Mode, a script's call to the
+// send tool goes on a draft card instead, unless a rule allows the tool.
+//
+//     calx tests/protocol/drafts.calx
+import std.fs
+import std.json.{Json}
+import std.process.{exit}
+import std.thread.{sleep}
+import shared.obj.{Obj, at, int_at, str_at}
+import shared.client.{Session, reply_text}
+import server.store.{now}
+import tests.kit.{Instance, calx, check}
+
+const LONG: u32 = 600000
+
+fn reply_in(app: mut Session, conversation: String) -> Json ! Error {
+    loop {
+        let created = try app.until("event", "message.created", LONG)
+        let m = at(created, "message")
+        if str_at(m.copy(), "role") == some(String("agent")) and str_at(m.copy(), "conversation") == some(conversation.copy()) { return m }
+    }
+}
+
+fn send(app: Session, conversation: String, cid: String, text: String) ! Error {
+    try app.send(Obj.new().s("t", String("send")).s("cid", cid).s("conversation", conversation).s("text", text).done())
+}
+
+// The draft card a reply ends with.
+fn draft_in(message: Json) -> Json {
+    var found = Json.Null
+    if let Json.Array(blocks) = at(message, "blocks") {
+        for b in blocks {
+            let c = at(b, "card")
+            if str_at(c.copy(), "type") == some(String("draft")) { found = c }
+        }
+    }
+    return found
+}
+
+// The draft `card` once it's in `state`, from message.updated among the frames
+// from `mark` on, or those still to come.
+fn card_now(app: mut Session, mark: usize, card: String, state: str) -> Json ! Error {
+    var k = mark
+    loop {
+        while k < app.frames.len() {
+            let f = app.frames[k].copy()
+            k += 1
+            if str_at(f.copy(), "t") != some(String("event")) or str_at(f.copy(), "kind") != some(String("message.updated")) { continue }
+            let c = draft_in(at(f, "message"))
+            if str_at(c.copy(), "id") == some(card.copy()) and str_at(c.copy(), "state") == some(String(state)) { return c }
+        }
+        _ = try app.until("event", "message.updated", 120000)
+    }
+}
+
+fn answer(app: mut Session, id: str, message: String, card: String, what: str, extra: own Obj) -> Json ! Error {
+    return try app.cmd(id, "draft.answer", extra.s("message", message).s("card", card).s("answer", String(what)).done())
+}
+
+fn ok_of(r: Json) -> bool {
+    return at(r, "ok") == Json.Bool(true)
+}
+
+fn code_of(r: Json) -> String {
+    return str_at(at(r, "error"), "code") ?? String()
+}
+
+fn sent_lines(path: String) -> List<String> {
+    let text = match fs.read_text(path) {
+        ok(some(t)) => t,
+        _ => String(),
+    }
+    var out = List<String>()
+    for l in text.lines() {
+        if l.trim().len() > 0 { out.push(l.copy()) }
+    }
+    return out
+}
+
+fn draft_call(to: str, subject: str, body: str) -> String {
+    let arguments = Obj.new().s("to", String(to)).s("subject", String(subject)).s("body", String(body)).done()
+    let call = Obj.new().s("server", String("mail")).s("tool", String("send_email")).j("arguments", arguments).s("thread", String("Partnership")).s("answers", String("Can we meet on Thursday?")).done()
+    return "/mcpkeep draft_message {call}"
+}
+
+fn run(i: Instance, sent: String) ! Error {
+    var app = try Session.connect(i.base.copy(), i.token.copy(), 0)
+    let made = try app.cmd("q_1", "agent.create", Obj.new().s("name", String("Writer")).s("acp_agent", String("fake")).s("instructions", String("Test.")).s("permission", String("auto")).done())
+    let agent = str_at(at(at(made, "value"), "agent"), "id") ?? String()
+    let chat = str_at(at(try app.cmd("q_2", "conversation.create", Obj.new().s("agent", agent.copy()).done()), "value"), "conversation") ?? String()
+    let server = try fs.absolute(String("tests/fake_mcp/main.calx"))
+    let spec = Obj.new().s("name", String("mail")).s("command", calx()).j("args", Json.Array([Json.Str(server)])).j("env", Obj.new().s("FAKE_SENT", sent.copy()).done()).done()
+    try check(ok_of(try app.cmd("q_3", "mcp.put", spec)), "the person has a mail server")
+
+    // --- A draft, Send with an edit, Undo, Send ---
+    try send(app, chat.copy(), String("m_1"), draft_call("hello@example.com", "Re: Partnership", "Hi Mira,\nThursday works."))
+    let drafted = try reply_in(mut app, chat.copy())
+    let message = str_at(drafted.copy(), "id") ?? String()
+    try check(reply_text(drafted.copy()).contains("draft_message: It's a draft card, draft_1, at the end of your reply, and nothing has gone out."), "draft_message says it's a card, and nothing went out")
+    let card = draft_in(drafted)
+    try check(str_at(card.copy(), "title") == some(String("Draft email")) and str_at(card.copy(), "state") == some(String("draft")) and str_at(card.copy(), "thread") == some(String("Partnership")) and str_at(card.copy(), "answers") == some(String("Can we meet on Thursday?")), "the reply ends with the draft's card, with the thread it's in and the message it answers")
+    try check("{at(card.copy(), "rows")}" == #"[{"key":"from","label":"From","value":"mail","edit":false},{"key":"to","label":"To","value":"hello@example.com","edit":true},{"key":"subject","label":"Subject","value":"Re: Partnership","edit":true}]"# and str_at(card.copy(), "body") == some(String("Hi Mira,\nThursday works.")), "its rows and body are what goes out")
+    try check(sent_lines(sent.copy()).len() == 0, "nothing is sent before the person says so")
+    let card_id = str_at(card, "id") ?? String()
+    var mark = app.frames.len()
+    let sending = try answer(mut app, "q_4", message.copy(), card_id.copy(), "send", Obj.new().j("edits", Obj.new().s("body", String("Hi Mira,\nFriday works.")).s("cc", String("ola@example.com")).done()))
+    let going = at(at(sending, "value"), "card")
+    try check(str_at(going.copy(), "state") == some(String("sending")) and int_at(going.copy(), "until") != none and str_at(going, "body") == some(String("Hi Mira,\nFriday works.")), "Send takes the edits and waits for Undo's seconds")
+    try check(ok_of(try answer(mut app, "q_5", message.copy(), card_id.copy(), "undo", Obj.new())), "Undo is taken while it waits")
+    _ = try card_now(mut app, mark, card_id.copy(), "draft")
+    unsafe { sleep(6000000000) }
+    try check(sent_lines(sent.copy()).len() == 0, "and nothing goes once it's taken back")
+    mark = app.frames.len()
+    try check(ok_of(try answer(mut app, "q_6", message.copy(), card_id.copy(), "send", Obj.new())), "Send again")
+    let done = try card_now(mut app, mark, card_id.copy(), "sent")
+    try check(int_at(done.copy(), "at") != none and at(done, "edited") == Json.Bool(true), "the card says Sent, with the time, and that it was edited")
+    let lines = sent_lines(sent.copy())
+    try check(lines.len() == 1 and lines[0] == #"{"to":"hello@example.com","subject":"Re: Partnership","body":"Hi Mira,\nFriday works.","cc":"ola@example.com"}"#, "the person's MCP server got the email as edited, once")
+    let woken = reply_text(try reply_in(mut app, chat.copy()))
+    try check(woken.contains("Your person edited your draft email (draft_1) and sent it. What went out:") and woken.contains("Cc: ola@example.com") and woken.contains("Friday works."), "the agent is woken with what went out")
+    try check(code_of(try answer(mut app, "q_7", message.copy(), card_id.copy(), "send", Obj.new())) == "not_now", "a sent draft can't be sent again")
+
+    // --- Reject, with a note ---
+    try send(app, chat.copy(), String("m_2"), draft_call("hello@example.com", "Hi", "Hello."))
+    let second = try reply_in(mut app, chat.copy())
+    let second_id = str_at(draft_in(second.copy()), "id") ?? String()
+    let rejected = try answer(mut app, "q_8", str_at(second, "id") ?? String(), second_id.copy(), "reject", Obj.new().s("note", String("Too formal.")))
+    try check(str_at(at(at(rejected, "value"), "card"), "state") == some(String("rejected")), "Reject is taken")
+    let told = reply_text(try reply_in(mut app, chat.copy()))
+    try check(told.contains("Your person rejected your draft email “Hi” ({second_id}). It wasn't sent. Their note: Too formal."), "the agent is woken with the note")
+    try check(sent_lines(sent.copy()).len() == 1, "and nothing more went out")
+
+    // --- One the tool refuses, then Try again ---
+    try send(app, chat.copy(), String("m_3"), draft_call("bounce@example.com", "Hi", "Hello."))
+    let third = try reply_in(mut app, chat.copy())
+    let third_message = str_at(third.copy(), "id") ?? String()
+    let third_id = str_at(draft_in(third), "id") ?? String()
+    mark = app.frames.len()
+    try check(ok_of(try answer(mut app, "q_9", third_message.copy(), third_id.copy(), "send", Obj.new())), "Send is taken")
+    let failed = try card_now(mut app, mark, third_id.copy(), "failed")
+    try check(str_at(failed, "why") == some(String("Mailbox not found")), "the card says why it couldn't be sent")
+    try check(reply_text(try reply_in(mut app, chat.copy())).contains("couldn't be sent: Mailbox not found"), "and the agent hears it")
+    mark = app.frames.len()
+    try check(ok_of(try answer(mut app, "q_10", third_message.copy(), third_id.copy(), "retry", Obj.new())), "Try again is taken")
+    _ = try card_now(mut app, mark, third_id.copy(), "failed")
+    _ = try reply_in(mut app, chat.copy())
+
+    // --- Send later ---
+    try send(app, chat.copy(), String("m_4"), draft_call("later@example.com", "Later", "In a moment."))
+    let fourth = try reply_in(mut app, chat.copy())
+    let fourth_message = str_at(fourth.copy(), "id") ?? String()
+    let fourth_id = str_at(draft_in(fourth), "id") ?? String()
+    try check(code_of(try answer(mut app, "q_11", fourth_message.copy(), fourth_id.copy(), "undo", Obj.new())) == "not_now", "Undo on a draft that isn't going is refused")
+    let past = try answer(mut app, "q_12", fourth_message.copy(), fourth_id.copy(), "later", Obj.new().i("at", 1000))
+    try check(code_of(past) == "bad_request", "Send later in the past is refused")
+    mark = app.frames.len()
+    let later = try answer(mut app, "q_13", fourth_message.copy(), fourth_id.copy(), "later", Obj.new().i("at", now() + 3000))
+    try check(str_at(at(at(later, "value"), "card"), "state") == some(String("later")), "Send later is taken")
+    _ = try card_now(mut app, mark, fourth_id.copy(), "sent")
+    try check(sent_lines(sent.copy()).len() == 2, "and it goes at its time")
+    _ = try reply_in(mut app, chat.copy())
+
+    // --- Not an agent's, and not any tool ---
+    let by_agent = reply_text(try say_raw(mut app, chat.copy(), "m_5", "/mcpkeep run_command {Obj.new().s("name", String("draft.answer")).j("args", Obj.new().s("message", message.copy()).s("card", card_id.copy()).s("answer", String("send")).done()).done()}"))
+    try check(by_agent.contains("Only your person sends, edits or rejects a draft"), "an agent can't answer a draft itself")
+    let not_one = reply_text(try say_raw(mut app, chat.copy(), "m_6", "/mcpkeep draft_message {Obj.new().s("server", String("mail")).s("tool", String("echo")).j("arguments", Obj.new().s("text", String("x")).done()).done()}"))
+    try check(not_one.contains("echo isn't a tool loom knows sends an email or a message"), "a tool that doesn't send can't be drafted")
+
+    // --- Code Mode: a script's send goes on a card ---
+    try check(ok_of(try app.cmd("q_14", "agent.update", Obj.new().s("agent", agent.copy()).j("mcp", Json.Array([Json.Str(String("mail"))])).done())), "the agent has the mail server")
+    let script = Obj.new().s("code", String(#"return await mcp.mail.send_email({to: "script@example.com", subject: "From a script", body: "Hello."});"#)).done()
+    let ran = try say_raw(mut app, chat.copy(), "m_7", "/mcpkeep run_code {script}")
+    let ran_text = reply_text(ran.copy())
+    if ran_text.contains("Deno couldn't be fetched") or ran_text.contains("Deno has no build") {
+        println("skip  a script's send going on a card: {ran_text}")
+    } else {
+        try check(ran_text.contains("Not sent: loom put it on a draft card"), "a script's call to the send tool isn't sent")
+        let scripted = draft_in(ran)
+        try check("{at(scripted, "rows")}".contains("script@example.com") and sent_lines(sent.copy()).len() == 2, "it's a draft card on the reply instead")
+        try check(ok_of(try app.cmd("q_15", "rule.put", Obj.new().s("then", String("allow")).s("tool", String("mail.send_email")).done())), "the person always allows the tool")
+        let allowed = reply_text(try say_raw(mut app, chat.copy(), "m_8", "/mcpkeep run_code {script}"))
+        try check(allowed.contains("Sent.") and sent_lines(sent.copy()).len() == 3, "then the script sends it itself")
+    }
+    app.close()
+}
+
+fn say_raw(app: mut Session, conversation: String, cid: str, text: String) -> Json ! Error {
+    try send(app, conversation.copy(), String(cid), text)
+    return try reply_in(mut app, conversation)
+}
+
+fn main() ! Error {
+    let inst = try Instance.start()
+    let sent = "{inst.data}/sent.jsonl"
+    let failure: String? = match run(inst.copy(), sent) {
+        ok => none,
+        err(e) => some("{e}"),
+    }
+    inst.stop()
+    if let f = failure {
+        eprintln("\n{f}")
+        exit(1)
+    }
+    println("\ndrafts: all good")
+}
