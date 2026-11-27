@@ -323,9 +323,10 @@ export function play(app: HTMLElement) {
 	document.addEventListener('pointerdown', (e) => {
 		if (picked && !picked.contains(e.target as Node)) unpick();
 	});
-	// A message's ⋯ by its corner opens its menu: Reply, Copy, Pin or Unpin and, after a line,
-	// Delete, which goes at once and leaves a quiet mark where it was (PLAN.md, "Deleting a
-	// message"; app.rs, ctx_menu, deleted_mark).
+	// A message's ⋯ by its corner opens its menu: Reply, Copy, Pin or Unpin, Branch from here,
+	// Make a card… and, after a line, Delete, which goes at once and leaves a quiet mark where it
+	// was (PLAN.md, "Deleting a message"; app.rs, ctx_menu, deleted_mark). Branch from here and
+	// Make a card… only close it here.
 	let menu: HTMLElement | null = null;
 	const unmenu = () => {
 		menu?.remove();
@@ -358,11 +359,14 @@ export function play(app: HTMLElement) {
 					if (item.dataset.act === 'reply') replyTo(row);
 					else if (item.dataset.act === 'copy') navigator.clipboard?.writeText(wordsOf(row)).catch(() => {});
 					else if (item.dataset.act === 'pin') pin(row, !pinned.has(row));
-					else remove(row);
+					else if (item.dataset.act === 'delete') remove(row);
 					unmenu();
 				});
 			}
 			app.append(menu);
+			// Kept inside the window, as the app's menus are.
+			const low = at.height - menu.offsetHeight - 8;
+			if (e.clientY - at.top + 6 > low) menu.style.top = `${Math.max(8, low)}px`;
 		});
 	}
 	document.addEventListener('pointerdown', (e) => {

@@ -36,7 +36,7 @@ Choose **+ New** at the end of the sidebar's list, then **New agent**. An agent 
 
 - **Brain**: its model and effort, permission mode, what a message while it answers does, and its backup program.
 - **Knows**: its memories, skills, tables and files, each counted, its MCP servers, and Code Mode ([In the chat](chat.md#how-an-agent-uses-its-tools)).
-- **Does**: its activity, its routines, and the tokens it used today and this month. **Following**, under them, has the Acta boards, cards and T3 threads it follows ([In the chat](chat.md#following-acta-and-t3)).
+- **Does**: its activity, its routines with what they cost a day together, a line under them for each that spends a lot for nothing ("Inbox watch  5.4M tokens a day, mostly quiet"), which opens it, and the tokens it used today and this month. **Following**, under them, has the Acta boards, cards and T3 threads it follows ([In the chat](chat.md#following-acta-and-t3)).
 - **Runs**: whether it's isolated, and its network ([Permissions](permissions.md#isolated-agents)), then the versions of its instructions, to go back to one.
 - **This chat**: the program the chat runs on ([Moving a chat to another program](chat.md#moving-a-chat-to-another-program)), and **Start fresh**.
 
@@ -59,6 +59,8 @@ Agents made before the defaults keep the permission mode they were made with unt
 ## MCP servers and secrets
 
 Set up MCP servers once, on the **MCP servers** page, and pick which each agent gets on its edit page. A setting can name one of your secrets, such as `ACTA_KEY=secret:ACTA_KEY`, which loom fills in only for the agent's process. Secrets are yours alone, sealed like program settings, and kept on the **Secrets** page.
+
+**Spools**, in Settings, has Acta and T3 Code first, then MCP servers by category, and its search finds the MCP Registry's servers too, marked Community. Each shows what it can do, its tools marked as reading or changing something, where it runs and how it signs in. **Connect** signs in or asks for its key, then asks which agents get it. **Installed** lists your servers and how each stands, with **Reconnect**, **Disconnect** and **Remove**. **Spools…** in the + menu and **Add from Spools** on an agent's edit page open it too.
 
 In Code Mode, loom connects to the agent's MCP servers for it, and the agent reaches their tools through its scripts. With Code Mode off, the agent connects to them itself.
 
