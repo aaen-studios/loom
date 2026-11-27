@@ -296,6 +296,90 @@ pub fn missing(id: String, board: String, at_ms: i64) -> Json {
     return Obj.new().s("id", id).s("board", board).b("missing", true).i("at", at_ms).done()
 }
 
+// The most cards one get_tasks call asks for, as Acta takes them.
+pub const BULK_MOST: usize = 200
+
+/// Cards to look up, `(id, board)` each, as one list of ids per board, in the
+/// order each board first came, cut into lists of BULK_MOST at most.
+pub fn by_board(cards: List<(String, String)>) -> List<(String, List<String>)> {
+    var boards = List<String>()
+    var lists = List<List<String>>()
+    for (id, board) in cards {
+        var at_k = boards.len()
+        for k in 0..boards.len() {
+            if at_k == boards.len() and boards[k] == board and (lists[k].contains(id.copy()) or lists[k].len() < BULK_MOST) { at_k = k }
+        }
+        if at_k == boards.len() {
+            boards.push(board.copy())
+            lists.push(List<String>())
+        }
+        if not lists[at_k].contains(id.copy()) { lists[at_k].push(id.copy()) }
+    }
+    var out = List<(String, List<String>)>()
+    for k in 0..boards.len() { out.push((boards[k].copy(), lists[k].copy())) }
+    return out
+}
+
+/// Each of `ids` as get_tasks answered for `board`: the card, or missing when
+/// Acta didn't give it back.
+pub fn cards_of(answer: Json, ids: List<String>, board: String, name: String, at_ms: i64) -> List<(String, Json)> {
+    var tasks = List<Json>()
+    if let Json.Array(xs) = at(answer, "tasks") { tasks = xs.copy() }
+    var out = List<(String, Json)>()
+    for id in ids {
+        var card = missing(id.copy(), board.copy(), at_ms)
+        for t in tasks {
+            if str_at(t.copy(), "id") == some(id.copy()) { card = card_of(t.copy(), board.copy(), name.copy(), at_ms) }
+        }
+        out.push((id.copy(), card))
+    }
+    return out
+}
+
+/// Whether a get_tasks call failed because the person's Acta doesn't have it yet,
+/// from the call's error or what the tool said.
+pub fn no_bulk(error: String, said: String?) -> bool {
+    let text = "{error} {said.copy() ?? String()}".to_lower_root()
+    return text.contains("get_tasks") and (text.contains("not found") or text.contains("unknown"))
+}
+
+@test
+fn asks_each_board_once() {
+    var cards = List<(String, String)>()
+    for n in 1..=203 { cards.push(("LOO-{n}", String("aaen-studios/loom"))) }
+    cards.push((String("CAL-3"), String("aaen-studios/calcite")))
+    cards.push((String("LOO-2"), String("aaen-studios/loom")))
+    let asks = by_board(cards)
+    assert(asks.len() == 3)
+    let (b0, i0) = asks[0].copy()
+    let (b1, i1) = asks[1].copy()
+    let (b2, i2) = asks[2].copy()
+    assert(b0 == "aaen-studios/loom" and i0.len() == 200 and i0[0] == "LOO-1")
+    assert(b1 == "aaen-studios/loom" and i1.len() == 3 and i1[2] == "LOO-203")
+    assert(b2 == "aaen-studios/calcite" and i2.len() == 1)
+}
+
+@test
+fn reads_many_cards_at_once() {
+    let answer = parse(#"{"board":"aaen-studios/loom","tasks":[{"id":"LOO-2","title":"Two","status":"done","subtasks":[{"id":"s1","title":"x","done":true}]},{"id":"LOO-1","title":"One","status":"todo"}],"missing":["LOO-9"]}"#)!
+    let cards = cards_of(answer, [String("LOO-1"), String("LOO-2"), String("LOO-9")], String("aaen-studios/loom"), String("loom"), 5)
+    assert(cards.len() == 3)
+    let (id0, c0) = cards[0].copy()
+    let (_, c1) = cards[1].copy()
+    let (_, c2) = cards[2].copy()
+    assert(id0 == "LOO-1" and str_at(c0, "title") == some(String("One")))
+    assert("{c1}" == #"{"id":"LOO-2","board":"aaen-studios/loom","board_name":"loom","title":"Two","status":"done","url":"https://acta.aaenz.no/aaen-studios/loom#LOO-2","subtasks":1,"subtasks_done":1,"at":5}"#)
+    assert(at(c2, "missing") == Json.Bool(true))
+}
+
+@test
+fn knows_an_acta_without_get_tasks() {
+    assert(no_bulk(String("MCP error -32602: Tool get_tasks not found"), none))
+    assert(no_bulk(String(), some(String("Unknown tool: get_tasks"))))
+    assert(not no_bulk(String("timed out"), none))
+    assert(not no_bulk(String(), some(String("There’s no board “x” in aaen."))))
+}
+
 @test
 fn finds_card_ids_and_links() {
     let text = "LOO-206 is nearly done, see https://acta.aaenz.no/aaen-studios/calcite#CAL-338. Not `LOO-9`, UTF-8 or HTTP-2 here, nor loo-342-acta, LOO-3-b, x-LOO-4, LOO-05.\n```\nLOO-7\n```\n(LOO-351) and https://acta.aaenz.no/aaen-studios/loom?view=list&task=LOO-344 and LOO-206 again"

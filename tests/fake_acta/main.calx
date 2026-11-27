@@ -4,10 +4,11 @@ module tests.fake_acta.main
 // watches (PLAN.md, "Cards in messages", "Acta beside the chat" and "Watching
 // outside events") without the real one: an MCP server over HTTP at /api/mcp
 // that answers 401 to a request without `Authorization: Bearer acta-key`, with
-// eight of Acta's tools, as Acta answers them:
+// nine of Acta's tools, as Acta answers them:
 //
 //     list_boards     two boards, aaen-studios/loom (LOO) and aaen-studios/calcite (CAL)
 //     get_task        LOO-206 (with a pull request), LOO-207, LOO-351 and CAL-338, each with its activity; any other is the tool's error
+//     get_tasks       many of a board's cards at once, and those it doesn't have as missing
 //     get_board       a board's labels and people
 //     list_tasks      a board's tasks, open ones unless status says, by query and label
 //     update_task     a card's status, and its subtasks ticked or not
@@ -23,8 +24,11 @@ module tests.fake_acta.main
 //
 // It listens on 127.0.0.1 and prints `fake acta: http://127.0.0.1:PORT` once it
 // does. For tests: GET /test/calls gives how many times each tool was called,
-// and get_task and t3_thread_wait for each card and thread;
-// /test/status?task=ID&status=S&by=NAME moves a card, which its activity says;
+// and get_task and t3_thread_wait for each card and thread, and get_tasks for
+// each board and card; /test/many?n=N adds cards LOO-500 on, as many as N;
+// /test/fail?board=B makes calls for board B fail, as Acta down would, and
+// none with no board; /test/no_bulk?on=1 answers get_tasks as an Acta without
+// it does, and on=0 as it was; /test/status?task=ID&status=S&by=NAME moves a card, which its activity says;
 // /test/activity?task=ID&text=TEXT&by=NAME adds other activity;
 // /test/t3/start?thread=ID&title=T starts a run on a thread, making it if
 // there's none; and /test/t3/finish?thread=ID&status=S&text=T ends its run.
@@ -54,6 +58,8 @@ struct Fake {
     last_ms: i64
     threads: LinkedMap<String, T3Thread>
     next: i64    // the number of the next card create_tasks makes
+    failing: String    // a board whose calls fail, as Acta down would
+    no_bulk: bool    // get_tasks answers as an Acta without it does
 }
 
 // The labels each board has.
@@ -236,6 +242,28 @@ impl Fake {
             }
             return tool_error("There's no task {id} on that board.")
         }
+        if name == "get_tasks" {
+            if self.no_bulk { return tool_error("Tool get_tasks not found") }
+            let board = str_of(args.copy(), "board")
+            self.count("get_tasks {board}")
+            var found = List<Json>()
+            var missing = List<Json>()
+            if let Json.Array(ids) = args.get(String("tasks")) ?? Json.Null {
+                for j in ids {
+                    let id = j.as_str() ?? String()
+                    self.count("get_tasks {id}")
+                    var on = false
+                    if let t = self.tasks.find(id.copy()) {
+                        if str_of(t.copy(), "url").contains("/{board}#") {
+                            found.push(t.copy())
+                            on = true
+                        }
+                    }
+                    if not on { missing.push(Json.Str(id.copy())) }
+                }
+            }
+            return answer(object([("board", Json.Str(board)), ("tasks", Json.Array(found)), ("missing", Json.Array(missing))]))
+        }
         if name == "add_comment" {
             let id = str_of(args.copy(), "task")
             var on = false
@@ -409,13 +437,14 @@ impl Fake {
         if (m.get(String("id")) ?? Json.Null) == Json.Null { return Response.new(202, String("application/json"), List<u8>()) }
         if method == "initialize" { return mcp_result(m, object([("protocolVersion", text("2025-06-18")), ("capabilities", object([("tools", object(List<(str, Json)>()))])), ("serverInfo", object([("name", text(if t3 { "t3" } else { "acta" })), ("version", text("1"))]))])) }
         if method == "tools/list" {
-            let tools = if t3 { Json.Array([tool("t3_thread_launch"), tool("t3_thread_wait"), tool("t3_thread_read")]) } else { Json.Array([tool("list_boards"), tool("get_task"), tool("get_board"), tool("list_tasks"), tool("update_task"), tool("create_tasks"), tool("list_activity"), tool("add_comment")]) }
+            let tools = if t3 { Json.Array([tool("t3_thread_launch"), tool("t3_thread_wait"), tool("t3_thread_read")]) } else { Json.Array([tool("list_boards"), tool("get_task"), tool("get_tasks"), tool("get_board"), tool("list_tasks"), tool("update_task"), tool("create_tasks"), tool("list_activity"), tool("add_comment")]) }
             return mcp_result(m, object([("tools", tools)]))
         }
         if method == "tools/call" {
             let params = m.get(String("params")) ?? Json.Null
             let name = str_of(params.copy(), "name")
             let args = params.get(String("arguments")) ?? Json.Null
+            if not t3 and self.failing.len() > 0 and str_of(args.copy(), "board") == self.failing { return Response.error(500) }
             let result = if t3 { self.t3_call(name, args) } else { self.call(name, args) }
             return mcp_result(m, result)
         }
@@ -446,6 +475,24 @@ impl Fake {
                 }
             }
             if moved { self.happened(id, "moved it to {label(status)}", param(q, "by", "Elliot")) }
+            return json(200, object(List<(str, Json)>()))
+        }
+        if req.path == "/test/many" {
+            let n = i64.parse(param(q.copy(), "n", "0")) ?? 0
+            for k in 0..n {
+                let id = "LOO-{500 + k}"
+                let title = "Card {500 + k}"
+                let t = task("LOO-500", "aaen-studios/loom", "Card", "todo", "s", List<str>(), "", List<bool>())
+                self.tasks.insert(id.copy(), with(with(with(t, "id", Json.Str(id.copy())), "title", Json.Str(title)), "url", Json.Str("https://acta.aaenz.no/aaen-studios/loom#{id}")))
+            }
+            return json(200, object(List<(str, Json)>()))
+        }
+        if req.path == "/test/fail" {
+            self.failing = param(q, "board", "")
+            return json(200, object(List<(str, Json)>()))
+        }
+        if req.path == "/test/no_bulk" {
+            self.no_bulk = param(q, "on", "1") == "1"
             return json(200, object(List<(str, Json)>()))
         }
         if req.path == "/test/activity" {
@@ -485,7 +532,7 @@ fn main() ! Error {
     tasks.insert(String("LOO-207"), task("LOO-207", "aaen-studios/loom", "Group chats in the sidebar", "todo", "s", ["desktop", "Feature"], "", List<bool>()))
     tasks.insert(String("LOO-351"), task("LOO-351", "aaen-studios/loom", "Leaving a group chat takes two clicks", "done", "s", List<str>(), "", List<bool>()))
     tasks.insert(String("CAL-338"), task("CAL-338", "aaen-studios/calcite", "Smooth chunk loading", "review", "l", ["engine", "perf"], "Chunks load without a hitch.", [true]))
-    var fake = Fake { tasks: tasks, calls: LinkedMap<String, i64>(), activity: List<Json>(), last_ms: 0, threads: LinkedMap<String, T3Thread>(), next: 400 }
+    var fake = Fake { tasks: tasks, calls: LinkedMap<String, i64>(), activity: List<Json>(), last_ms: 0, threads: LinkedMap<String, T3Thread>(), next: 400, failing: String(), no_bulk: false }
     println("fake acta: {base}")
     io.flush()
     loop {
