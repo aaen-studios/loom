@@ -10,6 +10,8 @@ struct SampleKept {
     /// Each card's status and its subtasks, as the person moved and ticked them.
     var status: [String: String] = [:]
     var ticked: [String: Bool] = [:]
+    /// The comments the person made on LOO-342.
+    var comments: [JSON] = []
     /// Builder's chat follows the loom board and a T3 thread, whose lines it has; Scribe's
     /// a card and a board it can't see any more; Daily the loom board; and a routine
     /// runs when a loom card moves to Done.
@@ -50,6 +52,10 @@ extension SampleCore {
             if let s = a["status"].string { kept.status[id] = s }
             if let sub = a["subtask"].string { kept.ticked[sub] = a["done"].bool ?? false }
             later(0.2) { [self] in answer(f, ["card": detail(id)]) }
+        case "card.comment":
+            let id = a["id"].text
+            kept.comments.append(["id": JSON("c_\(kept.comments.count + 3)"), "by": "Elliot", "at": JSON(ISO8601DateFormatter().string(from: Date())), "body": a["body"]])
+            later(0.3) { [self] in answer(f, ["card": detail(id)]) }
         case "card.create":
             let id = "LOO-\(kept.nextCard)"
             kept.nextCard += 1
@@ -145,7 +151,13 @@ extension SampleCore {
         o["description"] = t["description"]
         o["priority"] = t["priority"]
         o["checklist"] = .array((Sample.subtasks[id] ?? []).map { ["id": JSON($0.id), "title": JSON($0.title), "done": JSON(kept.ticked[$0.id] ?? $0.done)] })
-        o["comments"] = id == "LOO-342" ? Sample.comments : []
+        o["comments"] = id == "LOO-342" ? .array(Sample.comments.array + kept.comments) : []
+        o["activity"] = id == "LOO-342" ? Sample.activity : []
+        if id == "LOO-342" {
+            o["pull_request"] = ["number": "349", "title": "Card pills on the phone", "state": "open", "checks": "success", "url": "https://github.com/aaen-studios/loom/pull/349"]
+            o["branch"] = "loo-342-card-pills"
+        }
+        o["can_comment"] = true
         return .object(o)
     }
 
@@ -279,6 +291,14 @@ extension Sample {
     static let comments: JSON = [
         ["by": "Ola", "at": "2026-11-24T16:20:00Z", "body": "The pill reads well in a long reply."],
         ["by": "Elliot", "at": "2026-11-25T09:05:00Z", "body": "Make a card goes in the message's menu on the phone."],
+    ]
+
+    /// LOO-342's activity, oldest first.
+    static let activity: JSON = [
+        ["by": "Elliot", "at": "2026-11-23T10:00:00Z", "text": "created the task"],
+        ["by": "Elliot", "at": "2026-11-24T08:30:00Z", "text": "moved it to In progress"],
+        ["by": "Ola", "at": "2026-11-24T16:20:00Z", "text": "commented"],
+        ["by": "Elliot", "at": "2026-11-25T09:05:00Z", "text": "commented"],
     ]
 
     /// The person's MCP servers, as `mcp.list` gives them.

@@ -4,15 +4,16 @@ module tests.fake_acta.main
 // watches (PLAN.md, "Cards in messages", "Acta beside the chat" and "Watching
 // outside events") without the real one: an MCP server over HTTP at /api/mcp
 // that answers 401 to a request without `Authorization: Bearer acta-key`, with
-// seven of Acta's tools, as Acta answers them:
+// eight of Acta's tools, as Acta answers them:
 //
 //     list_boards     two boards, aaen-studios/loom (LOO) and aaen-studios/calcite (CAL)
-//     get_task        LOO-206, LOO-207, LOO-351 and CAL-338; any other is the tool's error
+//     get_task        LOO-206 (with a pull request), LOO-207, LOO-351 and CAL-338, each with its activity; any other is the tool's error
 //     get_board       a board's labels and people
 //     list_tasks      a board's tasks, open ones unless status says, by query and label
 //     update_task     a card's status, and its subtasks ticked or not
 //     create_tasks    new cards, numbered from 400 with the board's prefix; a label not on the board is the tool's error
 //     list_activity   a board's activity since a time, newest first, in Acta's words
+//     add_comment     a comment on a card, by Elliot, which its activity says
 //
 // Beside it, a fake T3 at /t3/mcp, which wants `Bearer t3-key`, with three of
 // T3's tools: t3_thread_launch starts a thread, running; t3_thread_wait
@@ -223,9 +224,34 @@ impl Fake {
             let id = str_of(args.copy(), "task")
             self.count("get_task {id}")
             if let t = self.tasks.find(id.copy()) {
-                if (str_of(t.copy(), "url")).contains("/{str_of(args, "board")}#") { return answer(t.copy()) }
+                if (str_of(t.copy(), "url")).contains("/{str_of(args, "board")}#") {
+                    // Its activity, oldest first, as Acta gives it.
+                    var activity = List<Json>()
+                    for a in self.activity {
+                        if str_of(a.copy(), "task") != id { continue }
+                        activity.push(object([("by", a.get(String("by")) ?? Json.Null), ("via", a.get(String("via")) ?? Json.Null), ("at", a.get(String("at")) ?? Json.Null), ("text", a.get(String("text")) ?? Json.Null)]))
+                    }
+                    return answer(with(t.copy(), "activity", Json.Array(activity)))
+                }
             }
             return tool_error("There's no task {id} on that board.")
+        }
+        if name == "add_comment" {
+            let id = str_of(args.copy(), "task")
+            var on = false
+            if let t = self.tasks.find(id.copy()) { on = str_of(t.copy(), "url").contains("/{str_of(args.copy(), "board")}#") }
+            if not on { return tool_error("There's no task {id} on that board.") }
+            let at = self.stamp()
+            var cid = String()
+            if let t = mut self.tasks.find(id.copy()) {
+                var comments = List<Json>()
+                if let Json.Array(had) = t.get(String("comments")) ?? Json.Null { comments = had.copy() }
+                cid = "c{comments.len()}"
+                comments.push(object([("id", Json.Str(cid.copy())), ("by", text("Elliot")), ("via", text("loom")), ("at", Json.Str(at)), ("body", Json.Str(str_of(args, "body")))]))
+                t = with(t.copy(), "comments", Json.Array(comments))
+            }
+            self.happened(id.copy(), String("commented"), String("Elliot"))
+            return answer(object([("comment", Json.Str(cid)), ("task", Json.Str(id))]))
         }
         if name == "list_activity" {
             let board = str_of(args.copy(), "board")
@@ -383,7 +409,7 @@ impl Fake {
         if (m.get(String("id")) ?? Json.Null) == Json.Null { return Response.new(202, String("application/json"), List<u8>()) }
         if method == "initialize" { return mcp_result(m, object([("protocolVersion", text("2025-06-18")), ("capabilities", object([("tools", object(List<(str, Json)>()))])), ("serverInfo", object([("name", text(if t3 { "t3" } else { "acta" })), ("version", text("1"))]))])) }
         if method == "tools/list" {
-            let tools = if t3 { Json.Array([tool("t3_thread_launch"), tool("t3_thread_wait"), tool("t3_thread_read")]) } else { Json.Array([tool("list_boards"), tool("get_task"), tool("get_board"), tool("list_tasks"), tool("update_task"), tool("create_tasks"), tool("list_activity")]) }
+            let tools = if t3 { Json.Array([tool("t3_thread_launch"), tool("t3_thread_wait"), tool("t3_thread_read")]) } else { Json.Array([tool("list_boards"), tool("get_task"), tool("get_board"), tool("list_tasks"), tool("update_task"), tool("create_tasks"), tool("list_activity"), tool("add_comment")]) }
             return mcp_result(m, object([("tools", tools)]))
         }
         if method == "tools/call" {
@@ -454,7 +480,8 @@ fn main() ! Error {
     for (by, body) in [("Elliot", "Started on the rings."), ("Elliot", "Rings drawn, numbers next."), ("Claude Code", "Numbers show on hover."), ("Elliot", "Looks right. The 90% colour is next.")] {
         comments.push(object([("id", Json.Str("c{comments.len()}")), ("by", text(by)), ("at", text("2026-11-25T10:00:00Z")), ("body", text(body))]))
     }
-    tasks.insert(String("LOO-206"), with(usage, "comments", Json.Array(comments)))
+    let pr = object([("kind", text("pull_request")), ("ref", text("349")), ("title", text("Usage rings")), ("state", text("open")), ("checks", text("success")), ("url", text("https://github.com/aaen-studios/loom/pull/349"))])
+    tasks.insert(String("LOO-206"), with(with(usage, "comments", Json.Array(comments)), "github", Json.Array([pr])))
     tasks.insert(String("LOO-207"), task("LOO-207", "aaen-studios/loom", "Group chats in the sidebar", "todo", "s", ["desktop", "Feature"], "", List<bool>()))
     tasks.insert(String("LOO-351"), task("LOO-351", "aaen-studios/loom", "Leaving a group chat takes two clicks", "done", "s", List<str>(), "", List<bool>()))
     tasks.insert(String("CAL-338"), task("CAL-338", "aaen-studios/calcite", "Smooth chunk loading", "review", "l", ["engine", "perf"], "Chunks load without a hitch.", [true]))

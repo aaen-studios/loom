@@ -425,7 +425,11 @@ struct ChatView: View {
             DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) {
                 let model = session.model
                 if let id = value("-jump") { model.jumpTo = id }
-                if let id = value("-card") { session.send(model.openCard(board: "aaen-studios/loom", id: id)) }
+                if let id = value("-card") {
+                    session.send(model.openCard(board: "aaen-studios/loom", id: id))
+                    // `-cardTab comments` or `activity` shows that tab of its preview.
+                    if let tab = value("-cardTab").flatMap(CardTab.init(rawValue:)) { model.acta.sheet?.tab = tab }
+                }
                 if let id = value("-make"), let m = model.messages.first(where: { $0.id == id }) { session.send(model.startCard(message: m.id, text: m.text)) }
                 if args.contains("-board") { for f in model.openBoard() { session.send(f) } }
                 if args.contains("-t3start") { session.send(model.openT3Form()) }
@@ -1067,6 +1071,16 @@ struct Reply: View {
             }
         case .tools where pin != nil, .fold where pin != nil:
             EmptyView()
+        case .tools(let run) where onTheWay:
+            // Among the steps, a line a call of what it did.
+            VStack(alignment: .leading, spacing: 0) {
+                ForEach(run, id: \.self) { i in
+                    let key = "step/\(message.id)/\(i)"
+                    StepRow(tool: session.model.tool(message.blocks[i].call), live: message.live, open: openThoughts.contains(key)) {
+                        if openThoughts.contains(key) { openThoughts.remove(key) } else { openThoughts.insert(key) }
+                    }
+                }
+            }
         case .tools(let run):
             VStack(alignment: .leading, spacing: Tokens.Space.xs + 2) {
                 ForEach(run, id: \.self) { i in
@@ -1078,7 +1092,7 @@ struct Reply: View {
         case .pictures(let run):
             PictureFan(files: run.compactMap { message.blocks[$0].file })
         case .fold(let words, let working, let steps):
-            Steps(words: words, working: working, open: openThoughts.contains(foldKey), canOpen: !steps.isEmpty) {
+            Steps(words: words, working: working, count: stepCount(steps), open: openThoughts.contains(foldKey), canOpen: !steps.isEmpty) {
                 if openThoughts.contains(foldKey) { openThoughts.remove(foldKey) } else { openThoughts.insert(foldKey) }
             } steps: {
                 ForEach(Array(steps.enumerated()), id: \.offset) { _, step in
@@ -1125,37 +1139,48 @@ struct Reply: View {
     }
 }
 
-/// A turn's steps under one quiet line: the step it's on while it works, how many once
-/// it's done. Tapped, it opens to show them in the order they came.
+/// The height of a reply's steps lines, each step's too.
+private let stepRow: CGFloat = 22
+
+/// A turn's steps under one quiet line: while it works, the step it's on in plain words,
+/// shimmering, with its number; once it's done, how many it took. Tapped, it opens to
+/// show them in the order they came.
 struct Steps<Content: View>: View {
     var words: String
     var working: Bool
+    var count: Int
     var open: Bool
     var canOpen: Bool
     var toggle: () -> Void
     @ViewBuilder var steps: Content
 
     var body: some View {
-        VStack(alignment: .leading, spacing: Tokens.Space.s) {
+        VStack(alignment: .leading, spacing: Tokens.Space.xs) {
             Button(action: toggle) {
-                HStack(spacing: 4) {
-                    if canOpen {
-                        Image(systemName: "chevron.right")
-                            .font(.system(size: 9, weight: .semibold))
-                            .rotationEffect(.degrees(open && canOpen ? 90 : 0))
+                HStack(spacing: Tokens.Space.s) {
+                    if working {
+                        Shimmer(text: words.hasSuffix("…") ? words : words.trimmingCharacters(in: CharacterSet(charactersIn: ".:")) + "…")
+                        if canOpen { Text("step \(count)").foregroundStyle(P.ink3) }
+                    } else {
+                        Text(words)
+                            .lineLimit(1)
+                            .foregroundStyle(P.ink2)
+                        if canOpen {
+                            Image(systemName: "chevron.right")
+                                .font(.system(size: 9, weight: .semibold))
+                                .rotationEffect(.degrees(open ? 90 : 0))
+                                .foregroundStyle(P.ink3)
+                        }
                     }
-                    Text(working && !words.hasSuffix("…") ? words + "…" : words)
-                        .lineLimit(1)
-                        .truncationMode(.tail)
                 }
                 .font(Fonts.small)
-                .foregroundStyle(P.ink3)
+                .frame(minHeight: stepRow)
                 .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
             .disabled(!canOpen)
             if open && canOpen {
-                VStack(alignment: .leading, spacing: Tokens.Space.s) {
+                VStack(alignment: .leading, spacing: Tokens.Space.xs) {
                     steps
                 }
                 .padding(.leading, Tokens.Space.m)
@@ -1163,6 +1188,72 @@ struct Steps<Content: View>: View {
             }
         }
         .animation(.easeOut(duration: 0.15), value: open)
+    }
+}
+
+/// Words with a band of light running over them, left to right, as the step a turn is on
+/// shows. Still where the person asks for less motion.
+struct Shimmer: View {
+    var text: String
+    @Environment(\.accessibilityReduceMotion) private var still
+
+    var body: some View {
+        let words = Text(text).lineLimit(1).truncationMode(.tail)
+        if still {
+            words.foregroundStyle(P.ink2)
+        } else {
+            TimelineView(.animation(minimumInterval: 1 / 30)) { time in
+                let k = time.date.timeIntervalSinceReferenceDate.truncatingRemainder(dividingBy: 1.8) / 1.8
+                words.foregroundStyle(P.ink2)
+                    .overlay {
+                        words.foregroundStyle(P.ink)
+                            .mask {
+                                GeometryReader { g in
+                                    LinearGradient(colors: [.clear, .black, .clear], startPoint: .leading, endPoint: .trailing)
+                                        .frame(width: 48)
+                                        .offset(x: CGFloat(k) * (g.size.width + 96) - 48)
+                                }
+                            }
+                    }
+            }
+        }
+    }
+}
+
+/// A call among a turn's steps, in a line: what it did in plain words and how it went, with
+/// its tool's name quiet on the right. Tapped, it opens to the call as the chat draws it.
+struct StepRow: View {
+    var tool: Tool?
+    var live: Bool
+    var open: Bool
+    var toggle: () -> Void
+
+    private var running: Bool { tool != nil && tool?.status == nil && live }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: Tokens.Space.xs) {
+            Button(action: toggle) {
+                HStack(spacing: Tokens.Space.s) {
+                    Text(running ? "\(tool?.doingWords ?? "Using a tool")…" : tool?.didWords ?? "Used a tool")
+                        .lineLimit(1)
+                        .truncationMode(.tail)
+                        .foregroundStyle(P.ink2)
+                    ToolMark(tool: tool, live: live)
+                    Spacer(minLength: Tokens.Space.s)
+                    if let name = tool?.name, !name.isEmpty {
+                        Text(name).font(Fonts.code).foregroundStyle(P.ink3).lineLimit(1)
+                    }
+                }
+                .font(Fonts.small)
+                .frame(minHeight: stepRow)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            if open {
+                ToolLine(tool: tool, live: live).padding(.leading, Tokens.Space.m)
+            }
+        }
+        .accessibilityElement(children: .combine)
     }
 }
 
@@ -1214,13 +1305,18 @@ struct ToolLine: View {
                 .foregroundStyle(P.ink2)
                 .lineLimit(1)
                 .truncationMode(.middle)
-            status
+            ToolMark(tool: tool, live: live)
         }
         .accessibilityElement(children: .combine)
     }
+}
 
-    @ViewBuilder
-    private var status: some View {
+/// How a tool call went, as its line marks it.
+struct ToolMark: View {
+    var tool: Tool?
+    var live: Bool
+
+    var body: some View {
         switch tool?.status {
         case "done": Image(systemName: "checkmark").font(.system(size: 10, weight: .semibold)).foregroundStyle(P.ok)
         case "failed": Image(systemName: "xmark").font(.system(size: 10, weight: .semibold)).foregroundStyle(P.bad)

@@ -74,6 +74,7 @@ pub struct Subtask {
 /// One of a card's comments.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Comment {
+    pub id: String,
     pub by: String,
     /// When, as Acta gives it (RFC 3339).
     pub at: String,
@@ -81,8 +82,97 @@ pub struct Comment {
     pub body: String,
 }
 
+impl Comment {
+    /// Its writer's initial, for its avatar: "E".
+    pub fn initial(&self) -> String {
+        initial(&self.by)
+    }
+}
+
+/// A name's initial, for an avatar: "E", or "?" for none.
+pub fn initial(name: &str) -> String {
+    name.trim()
+        .chars()
+        .next()
+        .map(|c| c.to_uppercase().collect())
+        .unwrap_or_else(|| "?".into())
+}
+
+/// One line of a card's activity: who did what, and when.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Activity {
+    pub by: String,
+    pub at: String,
+    /// In Acta's words: "moved it to Done".
+    pub text: String,
+}
+
+/// A card's pull request, as Acta has it from GitHub.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct PullRequest {
+    pub number: String,
+    pub title: String,
+    /// open, draft, merged or closed.
+    pub state: String,
+    /// GitHub's: success, failure, pending and the rest, or "" for none.
+    pub checks: String,
+    pub url: String,
+}
+
+/// How a pull request's checks show: what they say, and in which tone.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Tone {
+    Ok,
+    Bad,
+    Quiet,
+}
+
+impl PullRequest {
+    /// Its checks in words: "✓ checks", "✕ checks", "checks" while they run, or with
+    /// none how it stands ("Merged").
+    pub fn checks_words(&self) -> (String, Tone) {
+        match self.checks.as_str() {
+            "success" | "neutral" | "skipped" => ("✓ checks".into(), Tone::Ok),
+            "failure" | "timed_out" | "cancelled" | "action_required" | "error" => {
+                ("✕ checks".into(), Tone::Bad)
+            }
+            "" => {
+                let state = match self.state.as_str() {
+                    "open" => "Open",
+                    "draft" => "Draft",
+                    "merged" => "Merged",
+                    "closed" => "Closed",
+                    _ => "",
+                };
+                (state.into(), Tone::Quiet)
+            }
+            _ => ("checks".into(), Tone::Quiet),
+        }
+    }
+}
+
+/// How many of a priority's three bars are filled: none without one.
+pub fn priority_bars(priority: &str) -> u8 {
+    match priority {
+        "low" => 1,
+        "medium" => 2,
+        "high" | "urgent" => 3,
+        _ => 0,
+    }
+}
+
+/// The side preview's tabs.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum CardTab {
+    #[default]
+    Details,
+    Comments,
+    Activity,
+}
+
 /// A card as its side preview shows it (`card.get`): as a pill has it, with its whole
-/// description, its priority, its subtasks and its last three comments.
+/// description, its priority, its subtasks, its comments, its activity, its pull
+/// request and branch, and whether the person may comment.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct CardDetail {
     pub card: ActaCard,
@@ -90,6 +180,11 @@ pub struct CardDetail {
     pub priority: String,
     pub checklist: Vec<Subtask>,
     pub comments: Vec<Comment>,
+    pub activity: Vec<Activity>,
+    pub pull_request: Option<PullRequest>,
+    /// The branch to work in, on a board linked to GitHub.
+    pub branch: String,
+    pub can_comment: bool,
 }
 
 impl CardDetail {
@@ -115,12 +210,65 @@ impl CardDetail {
             comments: list("comments")
                 .iter()
                 .map(|c| Comment {
+                    id: s(c, "id"),
                     by: s(c, "by"),
                     at: s(c, "at"),
                     body: s(c, "body"),
                 })
                 .collect(),
+            activity: list("activity")
+                .iter()
+                .map(|a| Activity {
+                    by: s(a, "by"),
+                    at: s(a, "at"),
+                    text: s(a, "text"),
+                })
+                .collect(),
+            pull_request: v
+                .get("pull_request")
+                .filter(|p| p.is_object())
+                .map(|p| PullRequest {
+                    number: s(p, "number"),
+                    title: s(p, "title"),
+                    state: s(p, "state"),
+                    checks: s(p, "checks"),
+                    url: s(p, "url"),
+                }),
+            branch: s(v, "branch"),
+            can_comment: v
+                .get("can_comment")
+                .and_then(Value::as_bool)
+                .unwrap_or(false),
         }
+    }
+
+    /// The Comments tab's name: "Comments · 4", or "Comments" with none.
+    pub fn comments_tab(&self) -> String {
+        match self.comments.len() {
+            0 => "Comments".into(),
+            n => format!("Comments · {n}"),
+        }
+    }
+
+    /// "Subtasks · 1 of 3".
+    pub fn subtasks_line(&self) -> String {
+        let done = self.checklist.iter().filter(|t| t.done).count();
+        format!("Subtasks · {done} of {}", self.checklist.len())
+    }
+
+    /// The task of a T3 thread made from it: its id and title, its link, and the
+    /// branch to work in when Acta gives one.
+    pub fn thread_task(&self) -> String {
+        let mut out = format!(
+            "{}: {}\n{}",
+            self.card.id,
+            self.card.title,
+            self.card.link()
+        );
+        if !self.branch.is_empty() {
+            out.push_str(&format!("\nWork in the branch {}.", self.branch));
+        }
+        out
     }
 
     /// While it's looked up: what a pill knew of it.
@@ -221,6 +369,13 @@ pub struct CardPanel {
     pub error: Option<String>,
     /// The menu under its status chip is open.
     pub status_menu: bool,
+    /// The head's ⋯ menu is open.
+    pub more_menu: bool,
+    pub tab: CardTab,
+    /// A comment is on its way: Comment does nothing until it's answered.
+    pub commenting: bool,
+    /// A comment went through, and its box empties (`take_commented`).
+    commented: bool,
     /// What it was before a change on its way, to go back to if Acta refuses it.
     before: Option<CardDetail>,
     /// The newest watch line about it in the chat shown when it was last looked up
@@ -278,6 +433,7 @@ impl BoardView {
 enum Ask {
     Card { board: String, id: String },
     Move { board: String, id: String },
+    Comment { board: String, id: String },
     Create,
     Board,
     Tasks { board: String, done: bool },
@@ -519,7 +675,49 @@ impl Model {
     pub fn toggle_status_menu(&mut self) {
         if let Some(c) = self.card_panel() {
             c.status_menu = !c.status_menu;
+            c.more_menu = false;
         }
+    }
+
+    /// Opens or shuts the side preview's ⋯ menu.
+    pub fn toggle_card_menu(&mut self) {
+        if let Some(c) = self.card_panel() {
+            c.more_menu = !c.more_menu;
+            c.status_menu = false;
+        }
+    }
+
+    /// Shows one of the side preview's tabs.
+    pub fn card_tab(&mut self, tab: CardTab) {
+        if let Some(c) = self.card_panel() {
+            c.tab = tab;
+        }
+    }
+
+    /// Comments on the card shown, with `body` as typed, as the person (`card.comment`).
+    /// None with no words, where they can't comment, or while one is on its way.
+    pub fn comment_card(&mut self, body: &str) -> Option<Value> {
+        let body = body.trim();
+        let c = self.card_panel()?;
+        let can = c.detail.as_ref().is_some_and(|d| d.can_comment);
+        if body.is_empty() || !can || c.commenting {
+            return None;
+        }
+        c.commenting = true;
+        c.error = None;
+        let (board, id) = (c.board.clone(), c.id.clone());
+        Some(self.panel_cmd(
+            "card.comment",
+            json!({"board": board, "id": id, "body": body}),
+            Ask::Comment { board, id },
+        ))
+    }
+
+    /// Whether a comment just went through, so its box empties. Asked once.
+    pub fn take_commented(&mut self) -> bool {
+        self.card_panel()
+            .map(|c| std::mem::take(&mut c.commented))
+            .unwrap_or(false)
     }
 
     /// Moves the card in the side preview to `status`: shown at once, and back as it
@@ -843,7 +1041,10 @@ impl Model {
     /// before it closes the panel. Gives whether one was open.
     pub fn shut_acta_menu(&mut self) -> bool {
         match self.acta.panel.as_mut() {
-            Some(Panel::Card(c)) if c.status_menu => c.status_menu = false,
+            Some(Panel::Card(c)) if c.status_menu || c.more_menu => {
+                c.status_menu = false;
+                c.more_menu = false;
+            }
             Some(Panel::Make(f)) if f.board_menu => f.board_menu = false,
             Some(Panel::Board(b)) if b.board_menu => b.board_menu = false,
             _ => return false,
@@ -944,6 +1145,28 @@ impl Model {
                         let mut all = tasks;
                         all.append(&mut b.tasks);
                         b.tasks = all;
+                    }
+                }
+            }
+            Ask::Comment { board, id } => {
+                let card = value
+                    .get("card")
+                    .filter(|_| error.is_none())
+                    .map(CardDetail::of);
+                if let Some(d) = &card {
+                    self.patch_pills(&d.card);
+                }
+                if let Some(c) = self.card_panel().filter(|c| c.board == board && c.id == id) {
+                    c.commenting = false;
+                    match card {
+                        Some(d) => {
+                            c.detail = Some(d);
+                            c.commented = true;
+                            c.error = None;
+                        }
+                        None => {
+                            c.error = Some(error.unwrap_or_else(|| "Acta didn't answer.".into()))
+                        }
                     }
                 }
             }
@@ -1220,6 +1443,105 @@ mod tests {
             panic!()
         };
         assert_eq!(c.detail.as_ref().unwrap().card.subtasks_done, 2);
+    }
+
+    fn card_shown(m: &Model) -> CardPanel {
+        match &m.acta.panel {
+            Some(Panel::Card(c)) => *c.clone(),
+            _ => panic!("no card shown"),
+        }
+    }
+
+    #[test]
+    fn the_side_preview_has_tabs_a_pull_request_and_comments() {
+        let mut m = acta_model();
+        let get = m.open_card("aaen-studios/loom", "LOO-206");
+        let detail = json!({"card": {"id": "LOO-206", "board": "aaen-studios/loom", "title": "Usage", "status": "todo", "url": "https://acta.aaenz.no/aaen-studios/loom#LOO-206", "priority": "medium",
+            "checklist": [{"id": "s1", "title": "a", "done": true}, {"id": "s2", "title": "b", "done": false}, {"id": "s3", "title": "c", "done": false}],
+            "comments": [{"id": "c1", "by": "elliot", "at": "2026-11-25T10:00:00Z", "body": "Hi"}],
+            "activity": [{"by": "Elliot", "at": "2026-11-24T09:00:00Z", "text": "created the task"}],
+            "pull_request": {"number": "349", "title": "Usage rings", "state": "open", "checks": "success", "url": "https://github.com/a/b/pull/349"},
+            "branch": "loo-206-usage", "can_comment": true}});
+        answer(&mut m, &get, json!({"value": detail}));
+        let d = card_shown(&m).detail.unwrap();
+        assert_eq!(d.comments_tab(), "Comments · 1");
+        assert_eq!(d.subtasks_line(), "Subtasks · 1 of 3");
+        assert_eq!(d.comments[0].initial(), "E");
+        assert_eq!(d.activity[0].text, "created the task");
+        assert_eq!(priority_bars(&d.priority), 2);
+        let pr = d.pull_request.clone().unwrap();
+        assert_eq!(pr.checks_words(), ("✓ checks".to_string(), Tone::Ok));
+        assert_eq!(
+            d.thread_task(),
+            "LOO-206: Usage\nhttps://acta.aaenz.no/aaen-studios/loom#LOO-206\nWork in the branch loo-206-usage."
+        );
+
+        // The tabs and the ⋯ menu, which Esc shuts.
+        assert_eq!(card_shown(&m).tab, CardTab::Details);
+        m.card_tab(CardTab::Comments);
+        m.toggle_card_menu();
+        assert!(card_shown(&m).more_menu);
+        m.toggle_status_menu();
+        assert!(!card_shown(&m).more_menu && card_shown(&m).status_menu);
+        assert!(m.shut_acta_menu());
+        assert!(!card_shown(&m).status_menu && card_shown(&m).tab == CardTab::Comments);
+
+        // A comment: none with no words, none twice while it's on its way, and its
+        // box empties once Acta has it.
+        assert!(m.comment_card("   ").is_none());
+        let sent = m.comment_card(" Same on the iPhone. ").unwrap();
+        assert_eq!(sent["name"], "card.comment");
+        assert_eq!(
+            sent["args"],
+            json!({"board": "aaen-studios/loom", "id": "LOO-206", "body": "Same on the iPhone."})
+        );
+        assert!(m.comment_card("again").is_none());
+        answer(
+            &mut m,
+            &sent,
+            json!({"error": {"code": "mcp_failed", "message": "This key can only read."}}),
+        );
+        assert_eq!(
+            card_shown(&m).error.as_deref(),
+            Some("This key can only read.")
+        );
+        assert!(!m.take_commented());
+        let again = m.comment_card("Same on the iPhone.").unwrap();
+        let mut now = detail.clone();
+        now["card"]["comments"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!({"id": "c2", "by": "Elliot", "at": "2026-11-27T10:00:00Z", "body": "Same on the iPhone."}));
+        answer(&mut m, &again, json!({"value": now}));
+        let c = card_shown(&m);
+        assert!(!c.commenting && c.error.is_none());
+        assert_eq!(c.detail.unwrap().comments.len(), 2);
+        assert!(m.take_commented() && !m.take_commented());
+
+        // Where the person's Acta only reads, no comment goes.
+        let get = m.open_card("aaen-studios/loom", "LOO-206");
+        let mut read_only = detail;
+        read_only["card"]["can_comment"] = json!(false);
+        answer(&mut m, &get, json!({"value": read_only}));
+        assert!(m.comment_card("Hi").is_none());
+    }
+
+    #[test]
+    fn a_pull_request_says_how_its_checks_stand() {
+        let pr = |checks: &str, state: &str| PullRequest {
+            checks: checks.into(),
+            state: state.into(),
+            ..Default::default()
+        };
+        assert_eq!(pr("failure", "open").checks_words().1, Tone::Bad);
+        assert_eq!(
+            pr("pending", "open").checks_words(),
+            ("checks".to_string(), Tone::Quiet)
+        );
+        assert_eq!(pr("", "merged").checks_words().0, "Merged");
+        assert_eq!(priority_bars("urgent"), 3);
+        assert_eq!(priority_bars("none"), 0);
+        assert_eq!(initial(""), "?");
     }
 
     #[test]

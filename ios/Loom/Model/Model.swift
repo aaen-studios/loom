@@ -1078,6 +1078,34 @@ struct Tool: Equatable, Sendable {
     var block: Int?
     /// The subagent call it sits inside, as tool.started says.
     var parent: String? = nil
+    /// Its step in plain words, as the instance put it (server/steps.calx): the tool's
+    /// name, what it's doing and what it did. Empty from an instance before them.
+    var name = ""
+    var doing = ""
+    var did = ""
+    /// Its words came from all the agent said just before it, which the steps leave out.
+    var said = false
+
+    /// What it's doing, or its title from an instance before the words.
+    var doingWords: String { !doing.isEmpty ? doing : title.isEmpty ? "Using a tool" : title }
+    /// What it did, or its title from an instance before the words.
+    var didWords: String { !did.isEmpty ? did : title.isEmpty ? "Used a tool" : title }
+}
+
+/// A done turn's fold line: how many steps it took.
+func tookSteps(_ n: Int) -> String {
+    n == 1 ? "Took 1 step" : "Took \(n) steps"
+}
+
+/// How many steps a fold holds: each block of its parts.
+func stepCount(_ parts: [Part]) -> Int {
+    parts.reduce(0) { n, p in
+        switch p {
+        case .words(let run), .tools(let run), .pictures(let run): return n + run.count
+        case .block: return n + 1
+        case .fold(_, _, let inner): return n + stepCount(inner)
+        }
+    }
 }
 
 /// A reply still being written: its run's tool calls among the blocks the deltas built,
@@ -1160,13 +1188,20 @@ func parts(_ m: Message, tools: [Tool]) -> [Part] {
         }
     }
     let kept = all.filter(stays)
-    let steps = all.filter { !stays($0) }
+    // Words the call after them says as its step (`Tool.said`) aren't a step of their own.
+    func worded(_ i: Int) -> Bool {
+        guard m.blocks[i].kind == "text" else { return false }
+        let next = m.blocks[(i + 1)...].first { $0.kind != "thought" && $0.parent == m.blocks[i].parent }
+        guard let next, next.kind == "tool" else { return false }
+        return tools.first { $0.call == next.call }?.said ?? false
+    }
+    let steps = all.filter { !stays($0) && !worded($0) }
     if m.live {
         return layOut(m, kept) + [.fold(words: workingWords(m, tools: tools), working: true, parts: layOut(m, steps))]
     }
     var out: [Part] = []
     if !steps.isEmpty {
-        out.append(.fold(words: steps.count == 1 ? "1 step" : "\(steps.count) steps", working: false, parts: layOut(m, steps)))
+        out.append(.fold(words: tookSteps(steps.count), working: false, parts: layOut(m, steps)))
     }
     return out + layOut(m, kept)
 }
@@ -1336,8 +1371,7 @@ private func workingWords(_ m: Message, tools: [Tool]) -> String {
                 return line.count > 160 ? "\(line.prefix(160))…" : line
             }
         case "tool":
-            let title = tools.first { $0.call == b.call }?.title ?? ""
-            return "\(title.isEmpty ? "Using a tool" : title)…"
+            return "\(tools.first { $0.call == b.call }?.doingWords ?? "Using a tool")…"
         case "thought":
             return "Thinking…"
         default:
@@ -2053,7 +2087,7 @@ final class Model {
             return mood(agent.id) == .failed ? "Couldn't finish" : programTitle(agent.program)
         }
         if let t = tools.last(where: { $0.run == r.id && $0.status == nil }) {
-            return t.title
+            return t.doing.isEmpty ? t.title : t.doing
         }
         return "Thinking"
     }
@@ -2493,7 +2527,7 @@ final class Model {
             routedLive = Dictionary(items.compactMap { r in Routed.of(r).map { (r["message"].text, $0) } }, uniquingKeysWith: { a, _ in a })
         case .tools:
             tools = items.map {
-                Tool(call: $0["call"].text, run: $0["run"].text, title: $0["title"].text, status: $0["status"].string, block: $0["block"].int, parent: $0["parent"].string)
+                Tool(call: $0["call"].text, run: $0["run"].text, title: $0["title"].text, status: $0["status"].string, block: $0["block"].int, parent: $0["parent"].string, name: $0["name"].text, doing: $0["doing"].text, did: $0["did"].text, said: $0["said"].bool ?? false)
             }
         case .approvals:
             approvals = items.map { a in

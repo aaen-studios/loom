@@ -4893,7 +4893,8 @@ pub enum Part {
     Pictures(Vec<usize>),
     /// The turn's steps, folded under one quiet line that opens to show them. While the
     /// turn runs (`working`), the line is the step it's on and changes as it goes, and
-    /// it's there even with no steps to open yet. Once it's done, it says how many.
+    /// it's there even with no steps to open yet, with how many there have been (`count`).
+    /// Once it's done, it says how many it took.
     Fold {
         words: String,
         working: bool,
@@ -5272,6 +5273,45 @@ pub fn tool_title(call: Option<&String>, tools: &Tools) -> String {
         .unwrap_or_else(|| "Using a tool".to_string())
 }
 
+/// What a tool call is doing, in plain words, as the instance put it, or its title from
+/// an instance before it did.
+pub fn tool_doing(call: Option<&String>, tools: &Tools) -> String {
+    match call.and_then(|c| tools.get(c)) {
+        Some(t) if !t.doing.is_empty() => t.doing.clone(),
+        _ => tool_title(call, tools),
+    }
+}
+
+/// What a tool call did, in plain words, as the instance put it, or its title from an
+/// instance before it did.
+pub fn tool_did(call: Option<&String>, tools: &Tools) -> String {
+    match call.and_then(|c| tools.get(c)) {
+        Some(t) if !t.did.is_empty() => t.did.clone(),
+        _ => tool_title(call, tools),
+    }
+}
+
+/// How many steps a fold holds: each block of its parts.
+pub fn step_count(parts: &[Part]) -> usize {
+    parts
+        .iter()
+        .map(|p| match p {
+            Part::Bubbles(run) | Part::Tools(run) | Part::Pictures(run) => run.len(),
+            Part::Fold { parts, .. } => step_count(parts),
+            Part::Block(_) | Part::Quiet(_) => 1,
+        })
+        .sum()
+}
+
+/// A done turn's fold line: how many steps it took.
+pub fn took(n: usize) -> String {
+    if n == 1 {
+        "Took 1 step".to_string()
+    } else {
+        format!("Took {n} steps")
+    }
+}
+
 /// How a tool call went, as its line marks it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Went {
@@ -5337,11 +5377,18 @@ pub fn parts(m: &Message, tools: &Tools, shows: Shows) -> Vec<Part> {
         match used {
             0 => out,
             1 => {
-                let b = m.blocks.iter().enumerate().find(top).map(|(_, b)| b);
-                vec![Part::Quiet(format!(
-                    "Used {}",
-                    tool_title(b.and_then(|b| b.call.as_ref()), tools)
-                ))]
+                let call = m
+                    .blocks
+                    .iter()
+                    .enumerate()
+                    .find(top)
+                    .and_then(|(_, b)| b.call.as_ref());
+                // What it did, in plain words, or its title from an instance before them.
+                let words = match call.and_then(|c| tools.get(c)) {
+                    Some(t) if !t.did.is_empty() => t.did.clone(),
+                    _ => format!("Used {}", tool_title(call, tools)),
+                };
+                vec![Part::Quiet(words)]
             }
             many => vec![Part::Quiet(format!("Used {many} tools"))],
         }
@@ -5362,7 +5409,21 @@ pub fn parts(m: &Message, tools: &Tools, shows: Shows) -> Vec<Part> {
         _ => true,
     };
     let kept: Vec<usize> = all.iter().copied().filter(|&i| stays(i)).collect();
-    let steps: Vec<usize> = all.iter().copied().filter(|&i| !stays(i)).collect();
+    // Words the call after them says as its step (`Tool::said`) aren't a step of their own.
+    let worded = |i: usize| {
+        m.blocks[i].kind == "text"
+            && m.blocks[i + 1..]
+                .iter()
+                .find(|b| b.kind != "thought" && b.parent == m.blocks[i].parent)
+                .and_then(|b| b.call.as_ref().filter(|_| b.kind == "tool"))
+                .and_then(|c| tools.get(c))
+                .is_some_and(|t| t.said)
+    };
+    let steps: Vec<usize> = all
+        .iter()
+        .copied()
+        .filter(|&i| !stays(i) && !worded(i))
+        .collect();
     let mut out = Vec::new();
     if m.live {
         out.extend(lay_out(m, &kept));
@@ -5375,11 +5436,7 @@ pub fn parts(m: &Message, tools: &Tools, shows: Shows) -> Vec<Part> {
     }
     if !steps.is_empty() {
         out.push(Part::Fold {
-            words: if steps.len() == 1 {
-                "1 step".to_string()
-            } else {
-                format!("{} steps", steps.len())
-            },
+            words: took(steps.len()),
             working: false,
             parts: lay_out(m, &steps),
         });
@@ -5499,7 +5556,7 @@ fn working_words(m: &Message, tools: &Tools) -> String {
                     };
                 }
             }
-            "tool" => return format!("{}…", tool_title(b.call.as_ref(), tools)),
+            "tool" => return format!("{}…", tool_doing(b.call.as_ref(), tools)),
             "thought" => return "Thinking…".to_string(),
             _ => {}
         }
@@ -5726,7 +5783,7 @@ fn place_tools<'a>(blocks: &mut Vec<Block>, tools: impl Iterator<Item = &'a Tool
     }
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Default)]
 pub struct Tool {
     pub call: String,
     pub run: String,
@@ -5737,6 +5794,13 @@ pub struct Tool {
     pub block: Option<usize>,
     /// The subagent call it sits inside, as tool.started says.
     pub parent: Option<String>,
+    /// Its step in plain words, as the instance put it (server/steps.calx): the tool's
+    /// name, what it's doing and what it did. Empty from an instance before them.
+    pub name: String,
+    pub doing: String,
+    pub did: String,
+    /// Its words came from all the agent said just before it, which the steps leave out.
+    pub said: bool,
 }
 
 /// The tool calls, in order, and found by call: a reply's tool blocks look theirs up
@@ -9570,6 +9634,10 @@ impl Model {
                         status: t.get("status").and_then(Value::as_str).map(str::to_string),
                         block: t.get("block").and_then(Value::as_u64).map(|b| b as usize),
                         parent: t.get("parent").and_then(Value::as_str).map(str::to_string),
+                        name: s(t, "name"),
+                        doing: s(t, "doing"),
+                        did: s(t, "did"),
+                        said: t.get("said").and_then(Value::as_bool).unwrap_or(false),
                     })
                     .collect();
                 // A tool call in another chat asks again too: the chat keeps what it
@@ -10069,7 +10137,12 @@ impl Model {
             .rev()
             .find(|t| t.run == r.id && t.status.is_none())
         {
-            return t.title.clone();
+            // In plain words where the instance gave them.
+            return if t.doing.is_empty() {
+                t.title.clone()
+            } else {
+                t.doing.clone()
+            };
         }
         "Thinking".into()
     }
@@ -13576,6 +13649,7 @@ mod tests {
             status: Some("done".into()),
             block: None,
             parent: None,
+            ..Tool::default()
         };
         Tools::new(vec![tool("tc_1", "Search the web"), tool("tc_2", "ls")])
     }
@@ -13615,7 +13689,7 @@ mod tests {
         assert_eq!(
             parts(&m, &tools(), QUIET),
             vec![
-                fold("2 steps", false, vec![Part::Bubbles(vec![0, 3])]),
+                fold("Took 2 steps", false, vec![Part::Bubbles(vec![0, 3])]),
                 Part::Bubbles(vec![5]),
             ]
         );
@@ -13624,7 +13698,7 @@ mod tests {
             parts(&m, &tools(), EVERYTHING),
             vec![
                 fold(
-                    "5 steps",
+                    "Took 5 steps",
                     false,
                     vec![
                         Part::Bubbles(vec![0]),
@@ -13645,7 +13719,7 @@ mod tests {
         assert_eq!(
             parts(&old, &tools(), QUIET),
             vec![
-                fold("1 step", false, vec![Part::Bubbles(vec![0])]),
+                fold("Took 1 step", false, vec![Part::Bubbles(vec![0])]),
                 Part::Bubbles(vec![2]),
             ]
         );
@@ -13719,7 +13793,7 @@ mod tests {
         assert_eq!(
             parts(&m, &tools(), EVERYTHING),
             vec![
-                fold("1 step", false, vec![Part::Tools(vec![1])]),
+                fold("Took 1 step", false, vec![Part::Tools(vec![1])]),
                 Part::Bubbles(vec![0]),
             ]
         );
@@ -13763,7 +13837,7 @@ mod tests {
         assert_eq!(
             parts(&m, &tools(), QUIET),
             vec![
-                fold("1 step", false, vec![Part::Bubbles(vec![0])]),
+                fold("Took 1 step", false, vec![Part::Bubbles(vec![0])]),
                 Part::Block(1),
                 Part::Bubbles(vec![3, 5]),
             ]
@@ -13804,8 +13878,65 @@ mod tests {
         );
         assert_eq!(
             parts(&two, &tools(), EVERYTHING),
-            vec![fold("2 steps", false, vec![Part::Tools(vec![0, 1])])]
+            vec![fold("Took 2 steps", false, vec![Part::Tools(vec![0, 1])])]
         );
+    }
+
+    #[test]
+    fn steps_say_what_they_do_in_plain_words() {
+        let worded = Tools::new(vec![Tool {
+            call: "tc_1".into(),
+            run: "run_1".into(),
+            title: "Run on aaen-vps: tailscale serve --https=8444".into(),
+            name: "run_command".into(),
+            doing: "Turning on HTTPS for port 8444".into(),
+            did: "Turned on HTTPS for port 8444".into(),
+            ..Tool::default()
+        }]);
+        // While it runs, the line is what the call is doing, not its command.
+        let running = turn(&["text:Done reading.", "tool:tc_1"], true, "");
+        assert_eq!(
+            parts(&running, &worded, EVERYTHING),
+            vec![fold(
+                "Turning on HTTPS for port 8444…",
+                true,
+                vec![Part::Bubbles(vec![0]), Part::Tools(vec![1])]
+            )]
+        );
+        assert_eq!(
+            step_count(&[Part::Bubbles(vec![0]), Part::Tools(vec![1, 2])]),
+            3
+        );
+        // Words the call's step was made of are the step, not one more.
+        let said = Tools::new(vec![Tool {
+            said: true,
+            ..worded[0].clone()
+        }]);
+        let done = turn(
+            &[
+                "text:Let me turn on HTTPS for port 8444.",
+                "tool:tc_1",
+                "text:Done.",
+            ],
+            false,
+            "done",
+        );
+        assert_eq!(
+            parts(&done, &said, EVERYTHING),
+            vec![
+                fold("Took 1 step", false, vec![Part::Tools(vec![1])]),
+                Part::Bubbles(vec![2]),
+            ]
+        );
+        // Done with only hidden calls, it says what the one did.
+        let one = turn(&["tool:tc_1"], false, "done");
+        assert_eq!(
+            parts(&one, &worded, QUIET),
+            vec![Part::Quiet("Turned on HTTPS for port 8444".into())]
+        );
+        // A call from an instance before the words keeps its title.
+        assert_eq!(tool_doing(Some(&"tc_2".into()), &tools()), "ls");
+        assert_eq!(took(1), "Took 1 step");
     }
 
     #[test]
@@ -14723,6 +14854,7 @@ mod tests {
             status: Some("running".into()),
             block: None,
             parent: None,
+            ..Tool::default()
         }]));
         let now = |m: &Model| {
             let shown = m.shown();
@@ -14745,7 +14877,7 @@ mod tests {
         assert_eq!(
             now(&m),
             vec![
-                fold("1 step", false, vec![Part::Bubbles(vec![0])]),
+                fold("Took 1 step", false, vec![Part::Bubbles(vec![0])]),
                 Part::Bubbles(vec![2]),
             ]
         );
@@ -14785,6 +14917,7 @@ mod tests {
             status: status.map(str::to_string),
             block: Some(0),
             parent: None,
+            ..Tool::default()
         };
         assert_eq!(tool_went(&tool(None), true), Went::Running);
         assert_eq!(tool_went(&tool(Some("done")), true), Went::Done);
@@ -14830,6 +14963,7 @@ mod tests {
             status: None,
             block: Some(block),
             parent: parent.map(str::to_string),
+            ..Tool::default()
         };
         m.tools = Rc::new(Tools::new(vec![
             tool("tc_1", "Explore the notes", 0, None),
@@ -14857,7 +14991,7 @@ mod tests {
         assert_eq!(
             parts(&shown[0], &m.tools, EVERYTHING),
             vec![
-                fold("1 step", false, vec![Part::Tools(vec![0])]),
+                fold("Took 1 step", false, vec![Part::Tools(vec![0])]),
                 Part::Bubbles(vec![3]),
             ]
         );
@@ -14886,7 +15020,7 @@ mod tests {
         assert_eq!(
             parts(&lost, &m.tools, EVERYTHING),
             vec![
-                fold("1 step", false, vec![Part::Tools(vec![0])]),
+                fold("Took 1 step", false, vec![Part::Tools(vec![0])]),
                 Part::Bubbles(vec![3]),
             ]
         );
@@ -14931,6 +15065,7 @@ mod tests {
             status: Some("done".into()),
             block: Some(block),
             parent: None,
+            ..Tool::default()
         };
         m.tools = Rc::new(Tools::new(vec![
             tool("tc_1", "Read the food log", 0),
@@ -14981,7 +15116,7 @@ mod tests {
             parts(&shown[0], &m.tools, EVERYTHING),
             vec![
                 fold(
-                    "5 steps",
+                    "Took 5 steps",
                     false,
                     vec![
                         Part::Tools(vec![0]),
