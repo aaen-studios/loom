@@ -247,6 +247,7 @@ fn run(server: Child, data: String) ! Error {
     try check(int_at(first_call, "block") == some(1) and int_at(second_call, "block") == some(3), "tool.started says each call's place among the words")
     try check(str_at(named, "title") == some(String("Save a memory")), "a shell command is titled with the few words its agent gave it")
     try check(str_at(second_named, "title") == some(String("cat > notes.md <<'EOF'…")), "and without them, with its first line")
+    try check(str_at(named.copy(), "doing") == some(String("Saving a memory")) and str_at(named, "did") == some(String("Saved a memory")), "a call's title that says what it does words its step")
     var shelled = try back.until("event", "message.created")
     while str_at(at(shelled.copy(), "message"), "role") != some(String("agent")) { shelled = try back.until("event", "message.created") }
     var kinds = List<String>()
@@ -257,6 +258,14 @@ fn run(server: Child, data: String) ! Error {
     _ = try back.until("event", "run.finished")
     let listed_now = try back.cmd("q_shell", "messages.list", Obj.new().s("conversation", conversation.copy()).done())
     try check(not "{at(at(listed_now, "value"), "messages")}".contains("Look into the spoons."), "a prompt the agent program gives itself is never a message")
+
+    // --- A call's step in plain words ---
+    try back.send(Obj.new().s("t", String("send")).s("cid", String("m_words")).s("conversation", conversation.copy()).s("text", String("Now let me read the notes.\n/tool cat notes.md\n/tool Read notes.md\nDone.")).done())
+    let worded = try back.until("event", "tool.started")
+    let titled = try back.until("event", "tool.started")
+    try check(str_at(worded.copy(), "doing") == some(String("Reading the notes")) and str_at(worded.copy(), "did") == some(String("Read the notes")) and str_at(worded.copy(), "name") == some(String("Bash")) and bool_at(worded, "said") == some(true), "a call's step is in the agent's own words just before it, with its tool's name")
+    try check(str_at(titled.copy(), "doing") == some(String("Reading notes.md")) and str_at(titled.copy(), "did") == some(String("Read notes.md")) and bool_at(titled, "said") == some(false), "and a call after another, in its title's")
+    _ = try back.until("event", "run.finished")
 
     // --- A subagent's calls and words sit inside the call that started it ---
     try back.send(Obj.new().s("t", String("send")).s("cid", String("m_sub")).s("conversation", conversation.copy()).s("text", String("/subagent Explore the notes; /tool Read notes.md; Three notes.; /tool Grep spoons\nDone exploring.")).done())

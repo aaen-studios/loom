@@ -342,6 +342,12 @@ pub fn tool_title(call: Json) -> String {
     return String("Use a tool")
 }
 
+// The tool's name as its program names it, as Claude's adapter gives it in
+// `_meta.claudeCode.toolName` (Bash, Read, mcp__acta__get_task), or "".
+pub fn tool_name(call: Json) -> String {
+    return str_at(at(at(call, "_meta"), "claudeCode"), "toolName") ?? String()
+}
+
 // Whether a tool call update says anything of the title: a title, or a
 // shell command's description.
 pub fn names_tool(call: Json) -> bool {
