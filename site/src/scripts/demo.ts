@@ -17,8 +17,13 @@
 // it is anyway in a narrow window (rail.rs), or with no room for the rail, as on a phone, opens
 // over the chat from the header. The header gives way in a narrow window as the app's does (model/header.rs).
 //
+// loom's sounds play where the app plays them, once the visitor has clicked on the page (sounds.ts):
+// Message sent as the person's message goes, Reply arrived as a reply is done, Another agent
+// answered in the group chat, and the mic's Dictation on and off.
+//
 // It plays only while it's on screen, and with reduced motion it shows each chat's end instead.
 import { draft, type Draft } from './draft';
+import { cue, listen } from './sounds';
 import { threadOf, threadsIn, tieOf, tiesIn, yarnsIn, type Mood, type Thread } from './thread';
 
 type Chat = 'juniper' | 'shop' | 'moss';
@@ -80,6 +85,7 @@ function writing(said: HTMLElement) {
 }
 
 export function play(app: HTMLElement) {
+	listen();
 	threadsIn(app);
 	yarnsIn(app);
 	const head = threadOf(app.querySelector('svg[data-head]'))!;
@@ -529,6 +535,14 @@ export function play(app: HTMLElement) {
 		drawContext();
 		fitHeader();
 	};
+	// The mic: dictation on, and off again, each with its sound.
+	const mic = app.querySelector<HTMLElement>('[data-mic]');
+	let dictating = false;
+	mic?.addEventListener('click', () => {
+		dictating = !dictating;
+		mic.classList.toggle('on', dictating);
+		cue(dictating ? 'dictation-on' : 'dictation-off');
+	});
 	app.querySelector('[data-room="Shop"]')?.addEventListener('click', () => openChat('shop'));
 	app.querySelector('.agent[data-agent="Moss"]')?.addEventListener('click', () => openChat('moss'));
 	app.querySelector('.agent[data-agent="Juniper"]')?.addEventListener('click', () => openChat('juniper'));
@@ -1059,6 +1073,7 @@ export function play(app: HTMLElement) {
 		await wait(400, id);
 		typed.replaceChildren();
 		send(s.ask);
+		cue('sent');
 		app.classList.add('busy');
 		// About a second for the router's pick, on its warm session.
 		if (s.chat === 'shop') await wait(900, id);
@@ -1095,6 +1110,8 @@ export function play(app: HTMLElement) {
 		s.thread?.set('idle');
 		work('idle', '');
 		app.classList.remove('busy');
+		// Another agent answering in a group chat has the Reply cue too.
+		cue(s.chat === 'shop' ? 'other' : 'reply');
 		// The header's ring is the member's that answered last.
 		if (s.chat === 'shop') {
 			fills.shop = BISCUIT_FILL;

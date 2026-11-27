@@ -43,6 +43,28 @@ targets:
       - path: ../design/twemoji/sequences.txt
         group: Loom/Resources
         buildPhase: resources
+      # loom's sounds, which notifications name and the app plays (design/sounds).
+      - path: ../design/sounds/loom-reply.wav
+        group: Loom/Resources/Sounds
+        buildPhase: resources
+      - path: ../design/sounds/loom-waiting.wav
+        group: Loom/Resources/Sounds
+        buildPhase: resources
+      - path: ../design/sounds/loom-routine.wav
+        group: Loom/Resources/Sounds
+        buildPhase: resources
+      - path: ../design/sounds/loom-failed.wav
+        group: Loom/Resources/Sounds
+        buildPhase: resources
+      - path: ../design/sounds/loom-sent.wav
+        group: Loom/Resources/Sounds
+        buildPhase: resources
+      - path: ../design/sounds/loom-dictation-on.wav
+        group: Loom/Resources/Sounds
+        buildPhase: resources
+      - path: ../design/sounds/loom-dictation-off.wav
+        group: Loom/Resources/Sounds
+        buildPhase: resources
       - path: ../desktop/assets/fonts/Geist-Regular.ttf
         group: Loom/Resources/Fonts
       - path: ../desktop/assets/fonts/Geist-Medium.ttf

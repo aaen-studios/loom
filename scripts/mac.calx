@@ -3,8 +3,9 @@
 //     calx scripts/mac.calx app LOOM VERSION OUT_DIR
 //         makes OUT_DIR/loom.app from the program LOOM (desktop/target/release/loom):
 //         its Info.plist with VERSION and the bundle identifier the app uses
-//         (desktop/src/shell.rs, BUNDLE_ID), the icon (design/logo/app.icns), and an
-//         ad-hoc signature (`codesign -s -`), since loom has no Developer ID yet.
+//         (desktop/src/shell.rs, BUNDLE_ID), the icon (design/logo/app.icns), loom's
+//         sounds (design/sounds), and an ad-hoc signature (`codesign -s -`), since
+//         loom has no Developer ID yet.
 //     calx scripts/mac.calx dmg APP OUT
 //         makes the disk image OUT, loom-mac.dmg on a release, holding APP and a link
 //         to /Applications to drag it onto. hdiutil sometimes finds its disk busy on a
@@ -14,6 +15,7 @@
 // download and the app updates itself from (desktop/src/swap.rs).
 import std.env
 import std.fs
+import std.path
 import std.process.{Command, exit}
 import std.thread
 
@@ -89,6 +91,11 @@ fn app(args: List<String>) ! Error {
     try fs.copy(program, "{bundle}/Contents/MacOS/loom")
     try fs.set_mode("{bundle}/Contents/MacOS/loom", 0o755)
     try fs.copy(String(ICON), "{bundle}/Contents/Resources/loom.icns")
+    // loom's sounds, which a notification names (desktop/src/mac.rs).
+    for wav in try fs.glob(String("design/sounds/*.wav")) {
+        let name = path.file_name(wav.copy()) ?? String()
+        try fs.copy(wav, "{bundle}/Contents/Resources/{name}")
+    }
     try Command.new(String("codesign")).args([String("--force"), String("--sign"), String("-"), String("--timestamp=none"), bundle.copy()]).run()
     try Command.new(String("codesign")).args([String("--verify"), String("--strict"), bundle.copy()]).run()
     println("made {bundle}, loom {version}, signed ad hoc")

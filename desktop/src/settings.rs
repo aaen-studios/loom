@@ -2,6 +2,7 @@
 //! and putting a change into effect at once.
 
 use super::*;
+use crate::prefs::{SoundMode, CUES};
 
 /// One of the person's pages in the popup: its id, icon, name and screen.
 pub(super) type Page = (&'static str, Ico, &'static str, Screen);
@@ -100,7 +101,7 @@ fn page_words(screen: Screen) -> &'static str {
             "tool calls tools hidden folded thoughts thinking context ring compacted compaction fresh session send enter ctrl composer replies messages bubbles plain style vibrant colour color search sidebar find width wide narrow comfortable full column"
         }
         Screen::AppPrefs => {
-            "start login startup tray close background awake sleep notifications sound preview updates version restart"
+            "start login startup tray close background awake sleep notifications sound sounds volume cues quiet hours dictation preview updates version restart"
         }
         Screen::Programs => "brains models agent programs claude code codex gemini opencode acp registry install tokens limits share",
         Screen::Defaults => {
@@ -164,6 +165,7 @@ impl Loom {
         self.composer
             .update(cx, |s, cx| s.set_submit_on_enter(!ctrl_enter, cx));
         shell::keep_in_tray(self.prefs.tray);
+        self.tell_sounds();
         self.refresh_rows(cx);
         self.scroller.update(cx, |s, cx| s.remeasure(cx));
         cx.notify();
@@ -478,15 +480,8 @@ impl Loom {
                 |p, v| p.preview = v,
                 cx,
             ));
-            notify.push(self.pref_switch(
-                "pref-sound",
-                "Play a sound",
-                "",
-                self.prefs.sound,
-                |p, v| p.sound = v,
-                cx,
-            ));
         }
+        let sounds = self.sound_rows(cx);
         let check = self
             .button("pref-check-update", "Check now", false)
             .on_click(cx.listener(|this, _, _, cx| {
@@ -538,29 +533,351 @@ impl Loom {
         let groups = vec![
             self.group(Some("This computer"), computer),
             self.group(Some("Notifications"), notify),
+            self.group(Some("Sounds"), sounds),
             self.group(Some("Updates"), updates),
             self.group(Some("Credits"), credits),
         ];
         self.settings_page("app-prefs-page", "App & notifications", None, groups)
     }
 
+    /// The Sounds group (PLAN.md, "Sounds"): loom's, the system's or none, the volume,
+    /// each cue with its play button and switch, silent while the chat is in front, and
+    /// quiet hours.
+    fn sound_rows(&mut self, cx: &mut Context<Self>) -> Vec<AnyElement> {
+        let p = self.p;
+        let s = self.prefs.sounds.clone();
+        let mode = self.pref_choice(
+            "sounds",
+            s.mode,
+            &[
+                (SoundMode::Loom, "loom"),
+                (SoundMode::System, "System"),
+                (SoundMode::Off, "Off"),
+            ],
+            |p, v| p.sounds.mode = v,
+            cx,
+        );
+        let mut rows = vec![
+            self.row(None, "Sounds", None, Some(mode))
+                .into_any_element(),
+            self.row(None, "Volume", None, Some(self.volume_slider(s.volume, cx)))
+                .into_any_element(),
+        ];
+        for (i, (cue, label)) in CUES.iter().enumerate() {
+            let on = s.cues[i];
+            let play = div()
+                .id(SharedString::from(format!("sound-try-{cue}")))
+                .role(Role::Button)
+                .aria_label(format!("Play {label}"))
+                .size(px(control::BUTTON_SMALL))
+                .flex_none()
+                .flex()
+                .items_center()
+                .justify_center()
+                .rounded(px(radius::BUTTON))
+                .border_1()
+                .border_color(p.line)
+                .text_color(p.ink_2)
+                .cursor_pointer()
+                .soft_hover(transparent_black(), p.hover, Some((p.ink_2, p.ink)))
+                .child(Icon::new(Ico::Play).xsmall())
+                .on_click(cx.listener(move |this, _, _, _| {
+                    this.send(serde_json::json!({"t": "sound.try", "cue": cue}));
+                }));
+            let toggle = self
+                .switch(format!("sound-cue-{cue}"), on)
+                .on_click(cx.listener(move |this, _, window, cx| {
+                    this.set_prefs(|p| p.sounds.cues[i] = !on, window, cx);
+                }));
+            rows.push(
+                self.row(
+                    None,
+                    *label,
+                    None,
+                    Some(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(px(space::M))
+                            .child(play)
+                            .child(toggle)
+                            .into_any_element(),
+                    ),
+                )
+                .into_any_element(),
+            );
+        }
+        rows.push(self.pref_switch(
+            "sound-in-front",
+            "Silent while the chat is in front",
+            "",
+            s.in_front,
+            |p, v| p.sounds.in_front = v,
+            cx,
+        ));
+        let quiet = s.quiet;
+        let quiet_toggle =
+            self.switch("sound-quiet", quiet)
+                .on_click(cx.listener(move |this, _, window, cx| {
+                    this.set_prefs(|p| p.sounds.quiet = !quiet, window, cx);
+                }));
+        let time = |input: &Entity<InputState>| div().w(px(64.0)).child(Input::new(input).small());
+        rows.push(
+            self.row(
+                None,
+                "Quiet hours",
+                None,
+                Some(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(space::S))
+                        .child(time(&self.sound_ui.from_in))
+                        .child(
+                            div()
+                                .text_size(px(size::SMALL))
+                                .text_color(p.ink_3)
+                                .child("to"),
+                        )
+                        .child(time(&self.sound_ui.to_in))
+                        .child(div().w(px(space::S)))
+                        .child(quiet_toggle)
+                        .into_any_element(),
+                ),
+            )
+            .into_any_element(),
+        );
+        rows
+    }
+
+    /// The volume, as a track with a knob: a click or a drag along it sets it, in
+    /// twentieths.
+    fn volume_slider(&self, volume: f32, cx: &mut Context<Self>) -> AnyElement {
+        const WIDE: f32 = 160.0;
+        const STEPS: usize = 20;
+        let p = self.p;
+        let v = volume.clamp(0.0, 1.0);
+        let mut hits = div().absolute().inset_0().flex();
+        for step in 0..=STEPS {
+            let to = step as f32 / STEPS as f32;
+            hits = hits.child(
+                div()
+                    .id(SharedString::from(format!("sound-volume-{step}")))
+                    .flex_1()
+                    .h_full()
+                    .cursor_pointer()
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(move |this, _, window, cx| {
+                            this.set_prefs(|p| p.sounds.volume = to, window, cx);
+                        }),
+                    )
+                    .on_mouse_move(cx.listener(move |this, e: &MouseMoveEvent, window, cx| {
+                        if e.pressed_button == Some(MouseButton::Left)
+                            && this.prefs.sounds.volume != to
+                        {
+                            this.set_prefs(|p| p.sounds.volume = to, window, cx);
+                        }
+                    })),
+            );
+        }
+        div()
+            .id("sound-volume")
+            .role(Role::Slider)
+            .aria_label("Volume")
+            .relative()
+            .w(px(WIDE))
+            .h(px(18.0))
+            .flex_none()
+            .child(
+                div()
+                    .absolute()
+                    .left_0()
+                    .top(px(7.0))
+                    .w(px(WIDE))
+                    .h(px(4.0))
+                    .rounded(px(2.0))
+                    .bg(p.line_strong),
+            )
+            .child(
+                div()
+                    .absolute()
+                    .left_0()
+                    .top(px(7.0))
+                    .w(px(WIDE * v))
+                    .h(px(4.0))
+                    .rounded(px(2.0))
+                    .bg(p.ink),
+            )
+            .child(
+                div()
+                    .absolute()
+                    .top(px(2.0))
+                    .left(px((WIDE * v - 7.0).clamp(0.0, WIDE - 14.0)))
+                    .size(px(14.0))
+                    .rounded_full()
+                    .border_1()
+                    .border_color(p.line_strong)
+                    .bg(if p.dark { p.ink } else { p.bg })
+                    .shadow_sm(),
+            )
+            .child(hits)
+            .into_any_element()
+    }
+
+    /// Hands the sound prefs to every core: each decides its sounds by them.
+    pub(super) fn tell_sounds(&self) {
+        let frame = sounds_frame(&self.prefs);
+        crate::core::set_first_frame(&frame);
+        self.core.send(&frame);
+        for a in &self.away {
+            a.core.send(&frame);
+        }
+    }
+
+    /// The prefs as the core said them back whole (`core.sounds`): a quiet hour typed as
+    /// the core can't read comes back as its default, into its field as the window is next
+    /// drawn (`tell_front`).
+    pub(super) fn took_sounds(&mut self, said: &serde_json::Value) {
+        let s = crate::prefs::Sounds::from_json(said.get("sounds"), None);
+        if s.from != self.prefs.sounds.from || s.to != self.prefs.sounds.to {
+            self.prefs.sounds.from = s.from.clone();
+            self.prefs.sounds.to = s.to.clone();
+            self.prefs.save(&data_dir());
+            self.sound_ui.said = Some((s.from, s.to));
+        }
+    }
+
+    /// Tells the core on screen which conversation the window shows, when that changed:
+    /// it's silent while the person looks at it. And puts quiet hours the core read
+    /// otherwise than typed into their fields.
+    pub(super) fn tell_front(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some((from, to)) = self.sound_ui.said.take() {
+            self.sound_ui
+                .from_in
+                .update(cx, |i, cx| i.set_value(from, window, cx));
+            self.sound_ui
+                .to_in
+                .update(cx, |i, cx| i.set_value(to, window, cx));
+        }
+        let front = if self.screen == Screen::Chat {
+            self.model.conversation().unwrap_or_default()
+        } else {
+            String::new()
+        };
+        if front != self.sound_ui.front {
+            self.send(serde_json::json!({"t": "app.front", "conversation": front}));
+            self.sound_ui.front = front;
+        }
+    }
+
     /// A notification from the core, as the prefs let it show.
-    pub(super) fn notify(&self, title: &str, body: &str, about: shell::About) {
-        notify_as(&self.prefs, title, body, about);
+    pub(super) fn notify(&self, frame: &serde_json::Value, about: shell::About) {
+        notify_as(&self.prefs, frame, about);
     }
 }
 
-/// A notification from a core, as `prefs` let it show.
-pub(super) fn notify_as(prefs: &Prefs, title: &str, body: &str, about: shell::About) {
+/// The quiet hours' fields, and the conversation the core on screen was last told is in
+/// front.
+pub(super) struct SoundUi {
+    pub from_in: Entity<InputState>,
+    pub to_in: Entity<InputState>,
+    pub front: String,
+    pub said: Option<(String, String)>,
+}
+
+impl SoundUi {
+    pub fn new(prefs: &Prefs, window: &mut Window, cx: &mut Context<Loom>) -> SoundUi {
+        let field = |value: &str, window: &mut Window, cx: &mut Context<Loom>| {
+            let value = value.to_string();
+            cx.new(|cx| {
+                InputState::new(window, cx)
+                    .placeholder("HH:MM")
+                    .default_value(value)
+            })
+        };
+        let from_in = field(&prefs.sounds.from, window, cx);
+        let to_in = field(&prefs.sounds.to, window, cx);
+        // Enter, or leaving the field, keeps the time typed; the core says it back as it
+        // reads it (`took_sounds`).
+        for (state, from) in [(&from_in, true), (&to_in, false)] {
+            cx.subscribe_in(
+                state,
+                window,
+                move |this: &mut Loom, state, event: &InputEvent, window, cx| {
+                    if matches!(event, InputEvent::PressEnter { .. } | InputEvent::Blur) {
+                        let typed = state.read(cx).value().trim().to_string();
+                        this.set_prefs(
+                            |p| {
+                                if from {
+                                    p.sounds.from = typed;
+                                } else {
+                                    p.sounds.to = typed;
+                                }
+                            },
+                            window,
+                            cx,
+                        );
+                    }
+                },
+            )
+            .detach();
+        }
+        SoundUi {
+            from_in,
+            to_in,
+            front: String::new(),
+            said: None,
+        }
+    }
+}
+
+/// The `app.sounds` frame for `prefs`.
+pub(super) fn sounds_frame(prefs: &Prefs) -> String {
+    serde_json::json!({"t": "app.sounds", "sounds": prefs.sounds.to_json()}).to_string()
+}
+
+/// A notification from a core, as `prefs` let it show, with the sound the core gave it.
+/// With notifications off, one of loom's own still plays.
+pub(super) fn notify_as(prefs: &Prefs, frame: &serde_json::Value, about: shell::About) {
+    let s = |k: &str| {
+        frame
+            .get(k)
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default()
+            .to_string()
+    };
+    let volume = frame
+        .get("volume")
+        .and_then(serde_json::Value::as_f64)
+        .unwrap_or(1.0) as f32;
+    let sound = shell::Sound::of(&s("sound"), volume);
     if !prefs.notify {
+        if let shell::Sound::Loom(file, volume) = &sound {
+            crate::sound::play(file, *volume);
+        }
         return;
     }
+    let body = s("body");
     let body = if prefs.preview {
-        body
+        body.as_str()
     } else {
         "Sent you a message"
     };
-    shell::notify(title, body, Some(about), prefs.sound);
+    shell::notify(&s("title"), body, Some(about), sound);
+}
+
+/// Plays what a `core.sound` says.
+pub(super) fn play(frame: &serde_json::Value) {
+    let file = frame
+        .get("file")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default();
+    let volume = frame
+        .get("volume")
+        .and_then(serde_json::Value::as_f64)
+        .unwrap_or(1.0) as f32;
+    crate::sound::play(file, volume);
 }
 
 #[cfg(test)]

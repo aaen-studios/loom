@@ -681,6 +681,8 @@ pub struct Loom {
     confirm_delete: bool,
     /// The routine page's schedule fields, history and week (routines.rs).
     routine_ui: routines::RoutineUi,
+    /// Quiet hours' fields, and which conversation the core on screen knows is in front.
+    sound_ui: settings::SoundUi,
     /// The form that starts a T3 thread, beside the chat.
     t3_ui: t3_view::T3Ui,
     routine_prompt_in: Entity<TextareaState>,
@@ -1008,6 +1010,10 @@ impl Loom {
             .and_then(|mut c| c.take())
             .unwrap_or_else(|| Core::start(&core_config("", None)));
         let (device_tx, device_rx) = std::sync::mpsc::channel();
+        // The sound prefs, to this core and every core started after it.
+        let sounds = settings::sounds_frame(&prefs);
+        crate::core::set_first_frame(&sounds);
+        core.send(&sounds);
 
         // Twemoji's pictures are drawn with GPUI's own SVG renderer (src/emoji.rs).
         crate::emoji::set_renderer(cx);
@@ -1312,6 +1318,7 @@ impl Loom {
         let relay_in = input(window, cx, "https://push.loom.example", false);
         let move_code_in = input(window, cx, "loom-move-…", false);
         let routine_ui = routines::RoutineUi::new(window, cx);
+        let sound_ui = settings::SoundUi::new(&prefs, window, cx);
         let t3_ui = t3_view::T3Ui::new(window, cx);
         let list_ui = list_page::ListUi::new(window, cx);
         let spools_ui = spools::SpoolsUi::new(window, cx);
@@ -1549,19 +1556,24 @@ ACTA_KEY=secret:ACTA_KEY",
                             loom.device_ask(&v, cx);
                             continue;
                         }
-                        if v.get("t").and_then(Value::as_str) == Some("core.notify") {
-                            let s = |k: &str| {
-                                v.get(k)
-                                    .and_then(Value::as_str)
-                                    .unwrap_or_default()
-                                    .to_string()
-                            };
-                            let about = shell::About {
-                                server: loom.here.clone(),
-                                agent: s("agent"),
-                                conversation: s("conversation"),
-                            };
-                            loom.notify(&s("title"), &s("body"), about);
+                        match v.get("t").and_then(Value::as_str) {
+                            Some("core.notify") => {
+                                let s = |k: &str| {
+                                    v.get(k)
+                                        .and_then(Value::as_str)
+                                        .unwrap_or_default()
+                                        .to_string()
+                                };
+                                let about = shell::About {
+                                    server: loom.here.clone(),
+                                    agent: s("agent"),
+                                    conversation: s("conversation"),
+                                };
+                                loom.notify(&v, about);
+                            }
+                            Some("core.sound") => settings::play(&v),
+                            Some("core.sounds") => loom.took_sounds(&v),
+                            _ => {}
                         }
                         changed |= crate::perf::step("take", || loom.model.take(&v));
                     }
@@ -1869,6 +1881,7 @@ ACTA_KEY=secret:ACTA_KEY",
             form_at: Instant::now(),
             confirm_delete: false,
             routine_ui,
+            sound_ui,
             t3_ui,
             routine_prompt_in,
             routine_open: None,
@@ -2537,8 +2550,9 @@ ACTA_KEY=secret:ACTA_KEY",
                             agent: s("agent"),
                             conversation: s("conversation"),
                         };
-                        settings::notify_as(&prefs, &s("title"), &s("body"), about);
+                        settings::notify_as(&prefs, &v, about);
                     }
+                    Some("core.sound") => settings::play(&v),
                     _ => {}
                 }
                 changed |= a.model.take(&v);
@@ -2669,6 +2683,9 @@ ACTA_KEY=secret:ACTA_KEY",
         // The one away notifies whatever the window does; the one here, only while it's
         // not looked at, and it's looked at now.
         a.core.send(r#"{"t":"app.active","active":false}"#);
+        a.core.send(r#"{"t":"app.front","conversation":""}"#);
+        // The core now on screen hears which conversation is in front as the window draws.
+        self.sound_ui.front = "?".into();
         self.send(serde_json::json!({"t": "app.active", "active": true}));
         self.popup = None;
         self.side = None;
@@ -3008,7 +3025,7 @@ ACTA_KEY=secret:ACTA_KEY",
         if let Some(words) = self.hub_mut().checked.take() {
             // Settings shows it; away from the window, a notification does.
             if !shell::window_shown(self.hwnd) {
-                shell::notify("loom", &words, None, self.prefs.sound);
+                shell::notify("loom", &words, None, shell::Sound::None);
             }
             self.update_said = Some(words);
             cx.notify();
@@ -7236,6 +7253,15 @@ ACTA_KEY=secret:ACTA_KEY",
                             .truncate()
                             .child(a.name.clone()),
                     )
+                    // A muted agent's quiet mark.
+                    .when(a.muted, |d| {
+                        d.child(
+                            div()
+                                .flex_none()
+                                .text_color(p.ink_3)
+                                .child(Icon::new(Ico::BellOff).xsmall()),
+                        )
+                    })
                     .when(!preview.is_empty(), |d| {
                         d.child(
                             div()
@@ -10942,6 +10968,12 @@ ACTA_KEY=secret:ACTA_KEY",
             .and_then(|id| self.model.agent(id))
             .map(|a| (a.group.clone(), a.hidden))
             .unwrap_or_default();
+        let muted = self
+            .model
+            .selected
+            .as_ref()
+            .and_then(|id| self.model.agent(id))
+            .is_some_and(|a| a.muted);
         if menu == Menu::Agent && self.menu_folders {
             return Some(self.folder_menu(
                 panel.when(under_header, |d| d.left(px(space::S))),
@@ -11008,6 +11040,26 @@ ACTA_KEY=secret:ACTA_KEY",
                         })),
                     )
                 })
+                .child(
+                    self.menu_item(
+                        "mute-agent",
+                        if muted { Ico::Bell } else { Ico::BellOff },
+                        if muted {
+                            "Unmute sounds"
+                        } else {
+                            "Mute sounds"
+                        },
+                        false,
+                    )
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        if let Some(agent) = this.model.selected.clone() {
+                            let f = this.model.mute_agent(&agent, !muted);
+                            this.send(f);
+                        }
+                        this.menu = None;
+                        cx.notify();
+                    })),
+                )
                 .child(
                     self.menu_item(
                         "hide-agent",
@@ -11758,7 +11810,9 @@ ACTA_KEY=secret:ACTA_KEY",
                                     .child(Icon::new(Ico::Mic).small())
                                     .on_click(cx.listener(move |this, _, window, cx| {
                                         this.composer.update(cx, |c, cx| c.focus(window, cx));
-                                        if !shell::dictate() {
+                                        if shell::dictate() {
+                                            this.send(serde_json::json!({"t": "app.dictation", "on": true}));
+                                        } else {
                                             this.model.notices.push(didnt.into());
                                             this.take_notice(cx);
                                         }
@@ -26946,6 +27000,7 @@ impl Render for Loom {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         crate::perf::frame_start();
         self.frames += 1;
+        self.tell_front(window, cx);
         // The emoji the core said of what was typed, and what the chat draws them from.
         crate::emoji::set_play(!self.prefs.emoji_hover, cx.reduce_motion());
         self.take_emoji(window, cx);

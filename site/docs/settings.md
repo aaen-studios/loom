@@ -70,7 +70,22 @@ Under **Notifications**:
 
 - **Notifications**: loom tells you when an agent says something while you're away.
 - **Show what was said**: a notification shows the message. Turn it off and it says only who it's from.
-- **Play a sound**.
+Under **Sounds**:
+
+- **Sounds**: loom, System (the system's notification sound) or Off.
+- **Volume**.
+- A row for each sound, with a play button to hear it and a switch:
+  - **Reply arrived**: an agent's reply is done. On.
+  - **Waiting on you**: an agent asks first, or needs you in its browser. On.
+  - **Another agent answered**: a reply in a group chat, with the same sound as Reply arrived. On.
+  - **Routine posted**: a routine posted in its chat. Off.
+  - **Routine failed**: a routine failed, or turned itself off. On.
+  - **Message sent**. Off.
+  - **Dictation on and off**: as you start dictating from the composer's mic. On.
+- **Silent while the chat is in front**: no sound for the chat you're looking at. On.
+- **Quiet hours**: from and to, 22:00 to 07:30 to start with, and their switch. In quiet hours only your own Message sent and dictation sound. Off.
+
+On Windows, loom's sounds stay silent while Focus Assist or Do Not Disturb is on. On a Mac and an iPhone, Focus silences them as it does any app's. To quiet one agent everywhere, its ⋯ menu has **Mute sounds**; a muted agent has a bell with a line through it in the sidebar, and its notifications still come.
 
 Under **Updates**:
 

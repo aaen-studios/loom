@@ -155,6 +155,8 @@ pub struct Agent {
     /// The sidebar folder it's in, if any, and whether it's hidden there.
     pub group: Option<String>,
     pub hidden: bool,
+    /// Whether its replies, questions and posts make no sound (`agent.mute`).
+    pub muted: bool,
     /// Whether it reaches tools through scripts, search_tools and run_code (Code
     /// Mode, the default), rather than each tool plainly.
     pub code_mode: bool,
@@ -9574,6 +9576,7 @@ impl Model {
                         order: a.get("order").and_then(Value::as_i64),
                         group: a.get("group").and_then(Value::as_str).map(str::to_string),
                         hidden: a.get("hidden").is_some_and(|h| !h.is_null()),
+                        muted: a.get("muted").is_some_and(|m| !m.is_null()),
                         code_mode: a.get("code_mode").and_then(Value::as_bool).unwrap_or(true),
                         isolated: a.get("isolated").and_then(Value::as_bool).unwrap_or(false),
                         network: a.get("network").and_then(Value::as_array).map(|hs| {
@@ -11882,6 +11885,12 @@ impl Model {
         Some(
             json!({"t": "cmd", "id": id, "name": "agent.pin", "args": {"agent": agent, "pinned": pinned}}),
         )
+    }
+
+    /// Mutes an agent's sounds on every device and in push, or unmutes them.
+    pub fn mute_agent(&mut self, agent: &str, muted: bool) -> Value {
+        let id = self.id("app.mute_agent");
+        json!({"t": "cmd", "id": id, "name": "agent.mute", "args": {"agent": agent, "muted": muted}})
     }
 
     /// Hides an agent in the sidebar, or shows it again.
@@ -17644,6 +17653,19 @@ mod tests {
         assert!(m.agents[0].hidden && m.agents[1].group.as_deref() == Some("g_1"));
         let f = m.hide_agent("a_2", true);
         assert_eq!(f["args"], json!({"agent": "a_2", "hidden": true}));
+    }
+
+    #[test]
+    fn a_muted_agent_says_so_and_unmutes() {
+        let mut m = Model::new();
+        m.take(&json!({"t": "core.data", "what": "agents", "items": [
+            {"id": "a_1", "name": "One", "muted": 7},
+            {"id": "a_2", "name": "Two"}
+        ]}));
+        assert!(m.agents[0].muted && !m.agents[1].muted);
+        let f = m.mute_agent("a_1", false);
+        assert_eq!(f["name"], "agent.mute");
+        assert_eq!(f["args"], json!({"agent": "a_1", "muted": false}));
     }
 
     #[test]

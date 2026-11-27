@@ -18,6 +18,8 @@ struct ChatView: View {
     /// pay for building the screen the first time (AgentsView's `Warmup`). It selects
     /// nothing and fetches nothing.
     var warming = false
+    /// The conversation this chat told the core is in front.
+    @State private var front = ""
     @State private var atBottom = true
     @State private var openThoughts: Set<String> = []
     /// A message's text open to select from.
@@ -379,6 +381,16 @@ struct ChatView: View {
             model.open(thread: thread?.id)
             session.flush()
             openFromLaunch()
+        }
+        // The conversation in front, which is silent while the person looks at it.
+        .onChange(of: model.conversation, initial: true) { _, now in
+            guard !warming else { return }
+            front = now ?? ""
+            session.front(front)
+        }
+        .onDisappear {
+            guard !warming else { return }
+            session.left(front)
         }
     }
 

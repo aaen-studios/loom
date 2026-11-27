@@ -71,6 +71,17 @@ pub struct Core {
 // The handle is only used through the core's functions, which take any thread.
 unsafe impl Send for Core {}
 
+/// The frame each core is given as it starts (`set_first_frame`).
+static FIRST: std::sync::Mutex<String> = std::sync::Mutex::new(String::new());
+
+/// Gives every core started from now `frame` first: the app's sound prefs, which a
+/// server added later has from its start.
+pub fn set_first_frame(frame: &str) {
+    if let Ok(mut first) = FIRST.lock() {
+        *first = frame.to_string();
+    }
+}
+
 impl Core {
     /// Starts the core. Its events come out of the receiver, and its browser frames
     /// out of `pages`.
@@ -86,6 +97,12 @@ impl Core {
         static INIT: std::sync::Once = std::sync::Once::new();
         INIT.call_once(|| unsafe { calx_init() });
         let handle = unsafe { loom_core_start(config.as_ptr(), config.len(), on_event, ctx) };
+        // What every core is told as it starts: the sound prefs.
+        if let Ok(first) = FIRST.lock() {
+            if !first.is_empty() {
+                unsafe { loom_core_send(handle, first.as_ptr(), first.len()) }
+            }
+        }
         (
             Core {
                 handle,

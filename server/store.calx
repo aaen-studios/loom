@@ -591,6 +591,13 @@ impl Store {
             if text(r[1].copy()) == "seen" { seen = true }
         }
         if not seen { try s.db.execute_script(String("ALTER TABLE devices ADD COLUMN seen INTEGER NOT NULL DEFAULT 0;")) }
+        // Devices from before they said their sound prefs get the column, empty for the
+        // defaults (shared/sounds.calx).
+        var sounded = false
+        for r in try s.db.query(String("PRAGMA table_info(devices)")) {
+            if text(r[1].copy()) == "sounds" { sounded = true }
+        }
+        if not sounded { try s.db.execute_script(String("ALTER TABLE devices ADD COLUMN sounds TEXT NOT NULL DEFAULT '';")) }
         // A person's routine runs by when they started, which the status reads for the last 24 hours.
         try s.db.execute_script(String("CREATE INDEX IF NOT EXISTS runs_by_routine ON runs (user, at) WHERE routine != '';"))
         // Files from before a picture kept its width and height get the columns, 0 for not
@@ -952,6 +959,22 @@ impl Store {
 
     pub fn update_device_tz(self, id: String, tz: String) ! Error {
         _ = try self.db.execute(String("UPDATE devices SET tz = ? WHERE id = ?"), [t(tz), t(id)])
+    }
+
+    // The sound prefs a device last said, as JSON, which its push sounds by.
+    pub fn set_device_sounds(self, id: String, sounds: String) ! Error {
+        _ = try self.db.execute(String("UPDATE devices SET sounds = ? WHERE id = ?"), [t(sounds), t(id)])
+    }
+
+    // The sound prefs and time zone device `id` last said: Null and "" for none.
+    pub fn device_sounds(self, id: String) -> (Json, String) ! Error {
+        let r = try self.db.query_one(String("SELECT sounds, tz FROM devices WHERE id = ?"), [t(id)]) else return (Json.Null, String())
+        let kept = text(r[0].copy())
+        let prefs = match parse(kept) {
+            ok(j) => j,
+            err(_) => Json.Null,
+        }
+        return (prefs, text(r[1].copy()))
     }
 
     pub fn revoke_device(self, id: String) ! Error {

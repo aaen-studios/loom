@@ -55,6 +55,130 @@ pub enum Width {
     Full,
 }
 
+/// Which sounds loom makes: its own, the system's notification sound, or none.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum SoundMode {
+    Loom,
+    System,
+    Off,
+}
+
+/// Each cue, as the prefs and the core name it, with its row's words in Settings.
+pub const CUES: [(&str, &str); 7] = [
+    ("reply", "Reply arrived"),
+    ("waiting", "Waiting on you"),
+    ("other", "Another agent answered"),
+    ("routine", "Routine posted"),
+    ("failed", "Routine failed"),
+    ("sent", "Message sent"),
+    ("dictation", "Dictation on and off"),
+];
+
+/// The sounds, as Settings → App & notifications sets them (PLAN.md, "Sounds"). The app
+/// keeps them and hands them to its cores (`app.sounds`); the core decides every sound by
+/// them (shared/sounds.calx), and says them back whole (`core.sounds`).
+#[derive(Clone, PartialEq, Debug)]
+pub struct Sounds {
+    pub mode: SoundMode,
+    /// 0 to 1.
+    pub volume: f32,
+    /// Each cue's switch, in `CUES`' order.
+    pub cues: [bool; 7],
+    /// Silent while the chat it's about is in front.
+    pub in_front: bool,
+    /// Quiet hours: whether they're on, and from and to, as `HH:MM`.
+    pub quiet: bool,
+    pub from: String,
+    pub to: String,
+}
+
+impl Default for Sounds {
+    fn default() -> Sounds {
+        Sounds {
+            mode: SoundMode::Loom,
+            volume: 0.8,
+            cues: [true, true, true, false, true, false, true],
+            in_front: true,
+            quiet: false,
+            from: "22:00".into(),
+            to: "07:30".into(),
+        }
+    }
+}
+
+impl Sounds {
+    /// The sounds kept as `v`, as `app.sounds` and `core.sounds` carry them, or `old`'s
+    /// Play a sound off from before them.
+    pub fn from_json(v: Option<&Value>, sound: Option<bool>) -> Sounds {
+        let d = Sounds::default();
+        let Some(v) = v.filter(|v| v.is_object()) else {
+            return Sounds {
+                mode: if sound == Some(false) {
+                    SoundMode::Off
+                } else {
+                    d.mode
+                },
+                ..d
+            };
+        };
+        let cues = v.get("cues");
+        let mut on = d.cues;
+        for (i, (cue, _)) in CUES.iter().enumerate() {
+            if let Some(b) = cues.and_then(|c| c.get(*cue)).and_then(Value::as_bool) {
+                on[i] = b;
+            }
+        }
+        let quiet = v.get("quiet");
+        let time = |k: &str, or: &str| {
+            quiet
+                .and_then(|q| q.get(k))
+                .and_then(Value::as_str)
+                .unwrap_or(or)
+                .to_string()
+        };
+        Sounds {
+            mode: match v.get("mode").and_then(Value::as_str) {
+                Some("system") => SoundMode::System,
+                Some("off") => SoundMode::Off,
+                _ => SoundMode::Loom,
+            },
+            volume: v
+                .get("volume")
+                .and_then(Value::as_f64)
+                .map_or(d.volume, |x| x.clamp(0.0, 1.0) as f32),
+            cues: on,
+            in_front: v
+                .get("in_front")
+                .and_then(Value::as_bool)
+                .unwrap_or(d.in_front),
+            quiet: quiet
+                .and_then(|q| q.get("on"))
+                .and_then(Value::as_bool)
+                .unwrap_or(d.quiet),
+            from: time("from", &d.from),
+            to: time("to", &d.to),
+        }
+    }
+
+    pub fn to_json(&self) -> Value {
+        let mut cues = Map::new();
+        for (i, (cue, _)) in CUES.iter().enumerate() {
+            cues.insert((*cue).into(), json!(self.cues[i]));
+        }
+        json!({
+            "mode": match self.mode {
+                SoundMode::Loom => "loom",
+                SoundMode::System => "system",
+                SoundMode::Off => "off",
+            },
+            "volume": (f64::from(self.volume) * 100.0).round() / 100.0,
+            "cues": cues,
+            "in_front": self.in_front,
+            "quiet": {"on": self.quiet, "from": self.from, "to": self.to},
+        })
+    }
+}
+
 #[derive(Clone, PartialEq, Debug)]
 pub struct Prefs {
     pub theme: Theme,
@@ -79,8 +203,8 @@ pub struct Prefs {
     /// Whether loom notifies, and whether a notification says what was said.
     pub notify: bool,
     pub preview: bool,
-    /// Whether a notification makes a sound.
-    pub sound: bool,
+    /// Which sounds loom makes, and when.
+    pub sounds: Sounds,
     /// Whether the computer stays awake while an agent works.
     pub awake: bool,
     /// Whether a downloaded update goes in on its own, while loom is in the tray and
@@ -126,7 +250,7 @@ impl Default for Prefs {
             tray: true,
             notify: true,
             preview: true,
-            sound: true,
+            sounds: Sounds::default(),
             awake: false,
             auto_update: false,
             search: false,
@@ -216,7 +340,7 @@ impl Prefs {
             tray: b("tray", d.tray),
             notify: b("notify", d.notify),
             preview: b("preview", d.preview),
-            sound: b("sound", d.sound),
+            sounds: Sounds::from_json(v.get("sounds"), v.get("sound").and_then(Value::as_bool)),
             awake: b("awake", d.awake),
             auto_update: b("auto_update", d.auto_update),
             search: b("search", d.search),
@@ -316,7 +440,7 @@ impl Prefs {
         m.insert("tray".into(), json!(self.tray));
         m.insert("notify".into(), json!(self.notify));
         m.insert("preview".into(), json!(self.preview));
-        m.insert("sound".into(), json!(self.sound));
+        m.insert("sounds".into(), self.sounds.to_json());
         m.insert("awake".into(), json!(self.awake));
         m.insert("auto_update".into(), json!(self.auto_update));
         m.insert("search".into(), json!(self.search));
@@ -435,7 +559,7 @@ pub fn mono_font() -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use super::{Prefs, Theme, Thoughts, Tools, Width};
+    use super::{Prefs, SoundMode, Sounds, Theme, Thoughts, Tools, Width};
     use serde_json::json;
 
     #[test]
@@ -467,13 +591,48 @@ mod tests {
             theme: Theme::Dark,
             tools: Tools::Folded,
             ctrl_enter: true,
-            sound: false,
+            sounds: Sounds {
+                mode: SoundMode::System,
+                volume: 0.35,
+                quiet: true,
+                ..Sounds::default()
+            },
             search: true,
             width: Width::Comfortable,
             ..Prefs::default()
         };
         assert_eq!(Prefs::from_json(&p.to_json()), p);
         assert_eq!(Prefs::default().width, Width::Normal);
+    }
+
+    #[test]
+    fn sounds_start_as_the_card_says_and_an_old_play_a_sound_carries_over() {
+        let d = Prefs::default().sounds;
+        assert_eq!(d.mode, SoundMode::Loom);
+        assert_eq!(d.cues, [true, true, true, false, true, false, true]);
+        assert!(d.in_front && !d.quiet && d.from == "22:00" && d.to == "07:30");
+        // A file from before sounds, with Play a sound off, is Off; on, loom's own.
+        assert_eq!(
+            Prefs::from_json(&json!({"sound": false})).sounds.mode,
+            SoundMode::Off
+        );
+        assert_eq!(
+            Prefs::from_json(&json!({"sound": true})).sounds,
+            Sounds::default()
+        );
+        assert!(Prefs::default().to_json().get("sound").is_none());
+        // What the core says back whole reads the same.
+        let said = json!({"mode": "system", "volume": 0.5, "cues": {"sent": true, "reply": false}, "in_front": false, "quiet": {"on": true, "from": "23:00", "to": "06:00"}});
+        let s = Sounds::from_json(Some(&said), None);
+        assert!(
+            s.mode == SoundMode::System
+                && s.volume == 0.5
+                && s.cues[5]
+                && !s.cues[0]
+                && !s.in_front
+        );
+        assert!(s.quiet && s.from == "23:00" && s.to == "06:00");
+        assert_eq!(Sounds::from_json(Some(&s.to_json()), None), s);
     }
 
     #[test]

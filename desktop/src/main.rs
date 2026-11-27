@@ -26,6 +26,7 @@ mod shell;
 mod signin;
 mod single;
 mod smooth;
+mod sound;
 #[cfg(any(target_os = "macos", test))]
 mod swap;
 mod thread;
@@ -356,6 +357,7 @@ gpui_kit::assets::icon_assets!(
         Folder,
         ExternalLink,
         Bell,
+        BellOff,
         Palette,
         MessageSquare,
         ArrowRightLeft,

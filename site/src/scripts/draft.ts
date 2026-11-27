@@ -2,6 +2,8 @@
 // PLAN.md "Drafts"): Send waits five seconds with Undo and then says Sent with the time,
 // Send later says when it goes, Edit makes the rows and the body editable where they are,
 // and Reject asks for a note and leaves one line. Nothing is sent anywhere.
+// Send has Message sent's sound (sounds.ts).
+import { cue } from './sounds';
 
 /** How long Undo lasts after Send, in seconds (server/drafts.calx, UNDO_MS). */
 const UNDO = 5;
@@ -56,6 +58,7 @@ export function draft(card: HTMLElement): Draft {
 	};
 	const send = () => {
 		editing(false);
+		cue('sent');
 		const at = clock();
 		let left = UNDO;
 		gone(`Sent ${at} ✓`, true, true);

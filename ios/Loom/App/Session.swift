@@ -36,6 +36,8 @@ final class Session {
             core = CalxCore(config: Session.config(), inbox: inbox)
             #endif
         }
+        // The sound prefs, which the core decides every sound by.
+        core?.send(SoundPrefs.load().frame)
         watchNetwork()
         flush()
     }
@@ -95,6 +97,8 @@ final class Session {
             case "core.notify":
                 Notifications.show(f)
                 model.take(f)
+            case "core.sound":
+                Sounds.play(f["file"].text, volume: f["volume"].double ?? 1)
             case "welcome":
                 model.take(f)
                 registerPush()
@@ -269,6 +273,23 @@ final class Session {
         #else
         "production"
         #endif
+    }
+
+    // MARK: Sounds
+
+    @ObservationIgnored private var frontSent = ""
+
+    /// Tells the core which conversation is in front of the person, silent while they look
+    /// at it (`app.front`).
+    func front(_ conversation: String) {
+        guard conversation != frontSent else { return }
+        frontSent = conversation
+        send(["t": "app.front", "conversation": JSON(conversation)])
+    }
+
+    /// A chat closed: none is in front, unless another chat is already.
+    func left(_ conversation: String) {
+        if conversation == frontSent { front("") }
     }
 
     func signOut() {
