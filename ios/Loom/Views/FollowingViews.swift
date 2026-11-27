@@ -57,13 +57,13 @@ struct FollowPillView: View {
                 CardPillView(card: card, shrinks: true)
             } else {
                 PillFrame {
-                    Image(uiImage: Pill.tile())
+                    Pill.mark()
                     Text(id).font(Fonts.mono(Tokens.PhoneSize.small - 1)).foregroundStyle(P.ink2)
                 }
             }
         case .board(let board):
             PillFrame {
-                Image(uiImage: Pill.tile())
+                Pill.mark()
                 words(model.boardName(board))
             }
         case .thread(let title):

@@ -13,6 +13,7 @@ pub mod acta;
 pub mod context;
 pub mod drafts;
 pub mod header;
+pub mod pools;
 mod popover;
 pub mod popup;
 mod rooms;
@@ -762,6 +763,8 @@ pub struct Program {
     pub members: Option<Vec<String>>,
     /// The limits of the person's plan with it, where it reports them.
     pub limits: Option<PlanLimits>,
+    /// To the owner, the usage pool it draws from, with its newest reading.
+    pub pool: Option<pools::Pool>,
 }
 
 /// The limits of the person's plan with an agent program, as it last reported them
@@ -7826,6 +7829,8 @@ impl Model {
                     self.has_password = Some(has);
                 }
             }
+            // A program's usage pool was read again, or linked or unlinked.
+            "pool" => self.pool_updated(f),
             // A program reported the limits of the person's plan with it.
             "limits" => {
                 let name = s(f, "program");
@@ -9352,6 +9357,7 @@ impl Model {
                             }),
                             members: ids(p.get("members")),
                             limits: p.get("limits").and_then(PlanLimits::of),
+                            pool: p.get("pool").and_then(pools::Pool::of),
                         })
                         .collect()
                 })

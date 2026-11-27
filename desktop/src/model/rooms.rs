@@ -36,8 +36,6 @@ pub struct Room {
     /// The member a message goes to when the router can't pick, or "" for the one
     /// that answered last.
     pub default: String,
-    /// Everyone's: every one of the person's agents, made by the instance.
-    pub everyone: bool,
     /// What the person re-sent to another member, newest last.
     pub corrections: Vec<Correction>,
 }
@@ -95,9 +93,6 @@ pub struct RoomForm {
 pub struct RoomPanel {
     /// The group chat it changes, or None while one is made.
     pub room: Option<Room>,
-    /// The members row: there while one is made and for every group chat but
-    /// Everyone, whose members are all of the person's agents.
-    pub members_row: bool,
     pub members: Vec<String>,
     pub color: String,
     /// What the one being made still needs before Make turns on, or None once it can
@@ -176,7 +171,6 @@ impl Room {
                 .unwrap_or_default(),
             color: s(r, "color"),
             default: s(r, "default"),
-            everyone: r.get("everyone").and_then(Value::as_bool).unwrap_or(false),
             corrections: r
                 .get("corrections")
                 .and_then(Value::as_array)
@@ -330,7 +324,6 @@ impl Model {
         if let Some(r) = self.room_changing() {
             return RoomPanel {
                 room: Some(r.clone()),
-                members_row: !r.everyone,
                 members: r.members.clone(),
                 color: r.color.clone(),
                 needs: None,
@@ -348,7 +341,6 @@ impl Model {
         };
         RoomPanel {
             room: None,
-            members_row: true,
             members: f.members.clone(),
             color: f.color.clone(),
             needs,
@@ -754,15 +746,15 @@ mod tests {
         assert_eq!(m.open_room_usage(), None);
     }
 
-    /// Three agents, Everyone, and the Money group chat with two of them.
-    fn with_everyone(m: &mut Model) {
+    /// Three agents, the House group chat with all three, and Money with two of them.
+    fn with_rooms(m: &mut Model) {
         m.take(&json!({"t": "core.data", "what": "agents", "items": [
             {"id": "a_1", "name": "Ledger"}, {"id": "a_2", "name": "Hermes"}, {"id": "a_3", "name": "Casper"}
         ]}));
         let items = vec![
             json!({"id": "c_1", "agent": "a_1", "title": "Chat"}),
-            json!({"id": "c_0", "agent": "", "title": "Everyone",
-                   "room": {"name": "Everyone", "members": ["a_1", "a_2", "a_3"], "default": "", "color": "", "everyone": true}}),
+            json!({"id": "c_0", "agent": "", "title": "House",
+                   "room": {"name": "House", "members": ["a_1", "a_2", "a_3"], "default": "", "color": ""}}),
             json!({"id": "c_9", "agent": "", "title": "Money",
                    "room": {"name": "Money", "members": ["a_1", "a_2"], "default": "a_2", "color": "amber"}}),
         ];
@@ -775,7 +767,6 @@ mod tests {
         let p = m.room_panel("");
         assert!(p.making());
         assert_eq!(p.room, None);
-        assert!(p.members_row);
         assert!(p.members.is_empty());
         assert_eq!(p.color, "");
         assert_eq!(p.needs, Some(MakeNeeds::Name));
@@ -791,14 +782,17 @@ mod tests {
     }
 
     #[test]
-    fn a_new_group_chat_opened_from_everyone_shows_members_and_makes_it() {
+    fn a_new_group_chat_opened_from_a_group_chat_shows_members_and_makes_it() {
         let mut m = Model::new();
-        with_everyone(&mut m);
+        with_rooms(&mut m);
         m.show_room("c_0");
-        // Everyone's own settings have no members row.
-        let p = m.room_panel("Everyone");
+        // House's own settings have its members.
+        let p = m.room_panel("House");
         assert!(!p.making());
-        assert!(!p.members_row);
+        assert_eq!(
+            p.members,
+            vec!["a_1".to_string(), "a_2".to_string(), "a_3".to_string()]
+        );
         m.start_room_form();
         assert_fresh_form(&m);
         assert_eq!(m.room_panel("Code").needs, Some(MakeNeeds::Members));
@@ -817,8 +811,8 @@ mod tests {
         assert_eq!(f["args"]["name"], "Code");
         assert_eq!(f["args"]["members"], json!(["a_1", "a_3"]));
         assert_eq!(f["args"]["color"], "mint");
-        // Until it's made the form stays, not Everyone's settings, so Save there can't
-        // rename Everyone and a refusal shows under the form.
+        // Until it's made the form stays, not House's settings, so Save there can't
+        // rename House and a refusal shows under the form.
         assert!(m.room_panel("Code").making());
         let id = f["id"].as_str().unwrap().to_string();
         m.take(&json!({"t": "result", "id": id, "ok": true, "value": {"conversation": {
@@ -828,7 +822,6 @@ mod tests {
         assert_eq!(m.open_room.as_deref(), Some("c_12"));
         let p = m.room_panel("Code");
         assert_eq!(p.room.map(|r| r.id), Some("c_12".to_string()));
-        assert!(p.members_row);
     }
 
     // LOO-355: the new group chat's settings had no Usage row until they were opened
@@ -836,9 +829,9 @@ mod tests {
     #[test]
     fn a_group_chat_made_from_the_panel_asks_for_its_usage() {
         let mut m = Model::new();
-        with_everyone(&mut m);
+        with_rooms(&mut m);
         m.show_room("c_0");
-        // Everyone's settings were open, with their usage.
+        // House's settings were open, with their usage.
         let f = m.ask_room_usage("c_0");
         m.take(&json!({"t": "result", "id": f["id"], "ok": true, "value": {
             "tokens_today": 850, "tokens_month": 12400, "router_today": 60, "router_month": 900
@@ -864,7 +857,7 @@ mod tests {
             .collect();
         assert_eq!(asked.len(), 1);
         assert_eq!(asked[0]["args"]["conversation"], "c_12");
-        // Not Everyone's meanwhile, and the new one's zeros once they come.
+        // Not House's meanwhile, and the new one's zeros once they come.
         assert_eq!(m.open_room_usage(), None);
         let id = asked[0]["id"].clone();
         m.take(&json!({"t": "result", "id": id, "ok": true, "value": {
@@ -878,7 +871,7 @@ mod tests {
     #[test]
     fn a_refused_group_chat_keeps_its_form() {
         let mut m = Model::new();
-        with_everyone(&mut m);
+        with_rooms(&mut m);
         m.show_room("c_0");
         m.start_room_form();
         m.toggle_room_member("a_1");
@@ -896,9 +889,9 @@ mod tests {
         assert_fresh_form(&m);
     }
 
-    /// The form ready to make Code, with Ledger and Hermes, from Everyone.
+    /// The form ready to make Code, with Ledger and Hermes, from House.
     fn ready_to_make(m: &mut Model) {
-        with_everyone(m);
+        with_rooms(m);
         m.show_room("c_0");
         m.start_room_form();
         m.toggle_room_member("a_1");
@@ -1002,11 +995,10 @@ mod tests {
     #[test]
     fn a_new_group_chat_opened_from_another_group_chat_starts_empty() {
         let mut m = Model::new();
-        with_everyone(&mut m);
+        with_rooms(&mut m);
         m.show_room("c_9");
         // Money's settings are Money's.
         let p = m.room_panel("Money");
-        assert!(p.members_row);
         assert_eq!(p.members, vec!["a_1".to_string(), "a_2".to_string()]);
         assert_eq!(p.color, "amber");
         m.start_room_form();
@@ -1029,12 +1021,11 @@ mod tests {
     #[test]
     fn a_new_group_chat_opened_from_an_agent_s_chat_has_that_agent_picked() {
         let mut m = Model::new();
-        with_everyone(&mut m);
+        with_rooms(&mut m);
         m.select(Some("a_2".into()));
         m.start_room_form();
         let p = m.room_panel("");
         assert!(p.making());
-        assert!(p.members_row);
         assert_eq!(p.members, vec!["a_2".to_string()]);
         assert_eq!(p.color, "");
         assert_eq!(m.room_panel("Code").needs, Some(MakeNeeds::Members));
@@ -1047,7 +1038,7 @@ mod tests {
     #[test]
     fn members_counts_the_picked_of_two_until_it_has_them() {
         let mut m = Model::new();
-        with_everyone(&mut m);
+        with_rooms(&mut m);
         m.show_room("c_0");
         m.start_room_form();
         let count = |m: &Model| {
@@ -1074,19 +1065,18 @@ mod tests {
     #[test]
     fn an_open_group_chat_s_settings_have_no_members_count() {
         let mut m = Model::new();
-        with_everyone(&mut m);
+        with_rooms(&mut m);
         m.show_room("c_9");
         let p = m.room_panel("Money");
-        assert!(p.members_row);
         assert_eq!(p.members_count, None);
         m.show_room("c_0");
-        assert_eq!(m.room_panel("Everyone").members_count, None);
+        assert_eq!(m.room_panel("House").members_count, None);
     }
 
     #[test]
     fn an_open_group_chat_s_settings_change_it_and_keep_two_members() {
         let mut m = Model::new();
-        with_everyone(&mut m);
+        with_rooms(&mut m);
         m.show_room("c_9");
         // Two at least: taking one out of two sends nothing.
         assert_eq!(m.toggle_room_member("a_1"), None);

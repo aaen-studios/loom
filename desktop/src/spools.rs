@@ -1,9 +1,9 @@
 //! Spools in the settings popup (PLAN.md, "The integrations catalog"). Find has loom's
 //! own two as wide cards, each with loom's knot tied to the integration's logo by a
 //! thread that hangs slack until it's connected, then the category pills and a grid of
-//! the rest; a tile, or a card's Connect or Manage, opens its pane over the grid's
-//! right, where it's connected step by step. Installed lists the person's servers beside
-//! the one picked. `model::spools` decides what each shows; this only draws it.
+//! the rest; a tile, or a card's Connect or Manage, opens its detail beside the grid,
+//! which narrows for it, where it's connected step by step. Installed lists the
+//! person's servers beside the one picked. `model::spools` decides what each shows; this only draws it.
 
 use super::*;
 use crate::model::popup::Dot;
@@ -239,6 +239,8 @@ impl Loom {
         let pill = self.model.spools.pill.clone();
         let shown = self.model.spools_shown(&query);
         let open = self.model.spools.flow.as_ref().map(|f| f.entry.clone());
+        // With an entry open, the grid narrows beside its detail, as Settings' lists do.
+        let narrow = open.is_some();
         let mut column = div()
             .px(px(space::XL))
             .pt(px(space::S))
@@ -247,7 +249,10 @@ impl Loom {
             .flex_col()
             .gap(px(space::L));
         if !shown.cards.is_empty() {
-            let mut row = div().flex().gap(px(space::M));
+            let mut row = div()
+                .flex()
+                .when(narrow, |d| d.flex_col())
+                .gap(px(space::M));
             for e in &shown.cards {
                 row = row.child(self.spool_card(e, cx));
             }
@@ -285,7 +290,10 @@ impl Loom {
         // A grid of equal columns, so every tile is as wide as every other, whatever
         // its row.
         if !shown.tiles.is_empty() {
-            let mut grid = div().grid().grid_cols(ACROSS).gap(px(space::S));
+            let mut grid = div()
+                .grid()
+                .grid_cols(if narrow { 2 } else { ACROSS })
+                .gap(px(space::S));
             for e in &shown.tiles {
                 let picked = open.as_deref() == Some(e.id.as_str());
                 grid = grid.child(self.spool_tile(e, picked, cx));
@@ -304,11 +312,14 @@ impl Loom {
             div()
                 .flex_1()
                 .min_h_0()
-                .relative()
+                .flex()
                 .child(
                     div()
                         .id("spools-find")
-                        .size_full()
+                        .h_full()
+                        .when(narrow, |d| d.w(px(layout::LIST)).flex_none())
+                        .when(!narrow, |d| d.flex_1())
+                        .min_w_0()
                         .overflow_y_scroll()
                         .child(column),
                 )
@@ -339,14 +350,6 @@ impl Loom {
                 )
             })
             .child(label.to_string())
-    }
-
-    /// The colour an entry's card and thread take: its badge's, softly.
-    fn spool_tint(&self, e: &Entry) -> Hsla {
-        match e.badge.as_ref().filter(|b| !b.color.is_empty()) {
-            Some(b) => thread::color(&b.color, self.p.dark),
-            None => self.p.ink_3,
-        }
     }
 
     /// An integration's logo, `size` square: the icon its server gave of its own, once
@@ -394,17 +397,49 @@ impl Loom {
             )
     }
 
-    /// One of loom's own as a wide card in a soft tint of its colour: loom's knot tied
-    /// to its logo, slack until it's connected and taut once it is; its name and line;
+    /// One of loom's own entries' logos on a tile in ink, black in light and white in
+    /// dark, as the featured cards and an open entry draw it: its mark, or its initial.
+    fn spool_mark_ink(&self, e: &Entry, size: f32) -> Div {
+        let p = self.p;
+        let tile = div()
+            .size(px(size))
+            .flex_none()
+            .flex()
+            .items_center()
+            .justify_center()
+            .rounded(px(if size >= BADGE {
+                radius::CARD
+            } else {
+                radius::ROW
+            }))
+            .bg(p.button)
+            .text_color(p.button_ink);
+        match e.icon_svg.as_deref() {
+            Some(mark) => tile.child(
+                svg()
+                    .path(crate::runtime_svg(&format!("spools/{}.svg", e.id), mark))
+                    .size(px((size * 0.56).round()))
+                    .text_color(p.button_ink),
+            ),
+            None => tile
+                .text_size(px(size * 0.42))
+                .font_weight(FontWeight::SEMIBOLD)
+                .child(e.name.chars().next().unwrap_or('?').to_string()),
+        }
+    }
+
+    /// One of loom's own as a wide card, in black and white as the rest of the app: loom's
+    /// knot tied to its logo, on a tile in ink, by a thread that hangs grey and slack until
+    /// it's connected and is pulled taut in ink once it is; its name and line;
     /// and Connect, or ✓ Connected (or what's wrong) with Manage, and Connect another
     /// for one there can be several of.
     fn spool_card(&self, e: &Entry, cx: &mut Context<Self>) -> AnyElement {
         let p = self.p;
         let status = spools::card_status(e, &self.model.mcp_servers);
         let taut = matches!(status, Some((_, Dot::Ok)));
-        let tint = self.spool_tint(e);
-        let fill = motion::mix(self.card_fill(), tint, 0.07);
-        let edge = motion::mix(p.line, tint, 0.3);
+        let tint = if taut { p.ink } else { p.ink_3 };
+        let fill = self.card_fill();
+        let edge = p.line;
         let knot = div()
             .size(px(BADGE))
             .flex_none()
@@ -427,7 +462,7 @@ impl Loom {
                 tint,
                 MARK_H * 2.0,
             ))
-            .child(self.spool_logo(None, Some(e), &e.server, BADGE));
+            .child(self.spool_mark_ink(e, BADGE));
         let id = e.id.clone();
         let mut actions = div().flex().items_center().gap(px(space::S));
         if e.connected() {
@@ -470,7 +505,7 @@ impl Loom {
         }
         let state = status.map(|(words, dot)| {
             let (ink, words_ink) = match dot {
-                Dot::Ok => (p.ok, p.ok),
+                Dot::Ok => (p.ink, p.ink),
                 Dot::Quiet => (p.ink_3, p.ink_2),
                 Dot::Warn => (p.warn, p.warn),
                 Dot::Bad => (p.bad, p.bad),
@@ -607,8 +642,8 @@ impl Loom {
             .into_any_element()
     }
 
-    /// An entry's pane, over the grid's right: its logo, name and maker; where it runs
-    /// and how it signs in; its tools, each marked reads or changes; and connecting it,
+    /// An entry's detail, beside the narrowed grid: its logo, name and maker; where it runs
+    /// and how it signs in; its tools, in a column of what reads and one of what changes; and connecting it,
     /// step by step, or how its servers stand once it has some.
     fn spool_pane(&mut self, e: &Entry, flow: &Flow, cx: &mut Context<Self>) -> AnyElement {
         let p = self.p;
@@ -623,7 +658,11 @@ impl Loom {
             .flex()
             .items_center()
             .gap(px(space::M))
-            .child(self.spool_logo(None, Some(e), &e.server, BADGE))
+            .child(if e.featured() {
+                self.spool_mark_ink(e, BADGE)
+            } else {
+                self.spool_logo(None, Some(e), &e.server, BADGE)
+            })
             .child(
                 div()
                     .flex_1()
@@ -665,75 +704,82 @@ impl Loom {
             ],
             1.0,
         );
-        let mut tools = div().flex().flex_col().gap(px(space::XS + 2.0));
+        // Its tools in two quiet columns, what only reads and what changes something,
+        // each under its count, a few of each until Show all.
         let shown = spools::tools_shown(&e.tools, flow.all_tools);
         let hidden = e.tools.len() - shown.len();
-        for (name, changes) in shown.iter().map(|&i| &e.tools[i]) {
-            let (kind, words) = if *changes {
-                ("changes", "changes")
-            } else {
-                ("reads", "reads")
-            };
-            tools = tools.child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap(px(space::S))
-                    .child(
-                        div()
-                            .min_w_0()
-                            .truncate()
-                            .font_family(crate::prefs::mono_font())
-                            .text_size(px(size::CAPTION))
-                            .text_color(p.ink)
-                            .child(name.clone()),
-                    )
-                    .children(effect_pill(p, kind, words)),
-            );
-        }
-        if hidden > 0 {
-            tools = tools.child(
-                div().flex().child(
+        let column = |changes: bool| {
+            let total = e.tools.iter().filter(|t| t.1 == changes).count();
+            let mut c = div()
+                .flex_1()
+                .min_w_0()
+                .flex()
+                .flex_col()
+                .gap(px(space::XS))
+                .child(
                     div()
-                        .id("spool-all-tools")
-                        .role(Role::Button)
+                        .pb(px(2.0))
                         .text_size(px(size::SMALL))
-                        .cursor_pointer()
-                        .soft_ink(p.ink_2, p.ink)
-                        .child(format!("Show all {}", e.tools.len()))
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            if let Some(flow) = this.model.spools.flow.as_mut() {
-                                flow.all_tools = true;
-                            }
-                            cx.notify();
-                        })),
-                ),
-            );
-        }
-        let tools_head = div()
-            .flex()
-            .items_baseline()
-            .gap(px(space::S))
-            .text_size(px(size::SMALL))
-            .child(
-                div()
-                    .text_color(p.ink_2)
-                    .font_weight(FontWeight::MEDIUM)
-                    .child("Tools"),
-            )
-            .when(!e.tools_checked, |d| {
-                d.child(
+                        .font_weight(FontWeight::MEDIUM)
+                        .text_color(p.ink_2)
+                        .child(format!(
+                            "{} · {total}",
+                            if changes { "Changes" } else { "Reads" }
+                        )),
+                );
+            for (name, _) in shown
+                .iter()
+                .map(|&i| &e.tools[i])
+                .filter(|t| t.1 == changes)
+            {
+                c = c.child(
                     div()
+                        .min_w_0()
+                        .truncate()
+                        .font_family(crate::prefs::mono_font())
                         .text_size(px(size::CAPTION))
-                        .text_color(p.ink_3)
-                        .child("not checked"),
-                )
-            });
+                        .text_color(p.ink)
+                        .child(name.clone()),
+                );
+            }
+            (c, total)
+        };
+        let (reads, reads_n) = column(false);
+        let (changes, changes_n) = column(true);
+        let tools = div()
+            .flex()
+            .items_start()
+            .gap(px(space::XL))
+            .when(reads_n > 0, |d| d.child(reads))
+            .when(changes_n > 0, |d| d.child(changes));
+        let more = (hidden > 0).then(|| {
+            div().flex().child(
+                div()
+                    .id("spool-all-tools")
+                    .role(Role::Button)
+                    .text_size(px(size::SMALL))
+                    .cursor_pointer()
+                    .soft_ink(p.ink_2, p.ink)
+                    .child(format!("Show all {}", e.tools.len()))
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        if let Some(flow) = this.model.spools.flow.as_mut() {
+                            flow.all_tools = true;
+                        }
+                        cx.notify();
+                    })),
+            )
+        });
+        let unchecked = (!e.tools_checked).then(|| {
+            div()
+                .text_size(px(size::CAPTION))
+                .text_color(p.ink_3)
+                .child("Tools not checked")
+        });
         let mut body = div()
             .flex()
             .flex_col()
             .gap(px(space::L))
-            .p(px(space::L))
+            .p(px(space::XL))
             .child(head)
             .child(
                 div()
@@ -749,8 +795,9 @@ impl Loom {
                     .flex()
                     .flex_col()
                     .gap(px(space::S))
-                    .child(tools_head)
-                    .child(tools),
+                    .child(tools)
+                    .children(more)
+                    .children(unchecked),
             );
         }
         let steps = self.spool_steps(e, flow, cx);
@@ -764,21 +811,15 @@ impl Loom {
                 .gap(px(space::M))
                 .children(steps),
         );
+        // Beside the grid, not over it: the grid narrows to make room (`spools_page`).
         div()
             .id("spool-pane")
-            .occlude()
-            .absolute()
-            .top_0()
-            .bottom_0()
-            .right(px(-space::XL * (1.0 - k)))
-            .w(px(layout::DETAIL_LEAST))
+            .flex_1()
+            .min_w(px(layout::DETAIL_LEAST))
+            .h_full()
             .opacity(k)
-            .bg(p.bg)
             .border_l_1()
-            .border_t_1()
-            .border_color(p.line_strong)
-            .rounded_tl(px(radius::CARD))
-            .shadow_lg()
+            .border_color(p.line)
             .child(
                 div()
                     .id(SharedString::from(format!("spool-pane-{}", e.id)))
@@ -944,12 +985,12 @@ impl Loom {
                 );
             }
             Stage::Going(Step::Agents) => {
-                let mut chips = div().flex().flex_wrap().gap(px(space::S));
-                for a in self.model.agents.clone().iter() {
+                let mut chips = self.switch_box();
+                for (n, a) in self.model.agents.clone().iter().enumerate() {
                     let on = flow.agents.contains(&a.id);
                     let id = a.id.clone();
                     chips = chips.child(
-                        self.member_chip(format!("spool-agent-{}", a.id), a, on)
+                        self.agent_switch_row(format!("spool-agent-{}", a.id), a, on, n == 0)
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 this.model.spool_pick_agent(&id);
                                 cx.notify();
@@ -1012,6 +1053,60 @@ impl Loom {
         out
     }
 
+    /// An agent as a row of a list of switches: its thread, its name, and whether it has
+    /// the server. A click anywhere on the row turns it.
+    fn agent_switch_row(
+        &self,
+        id: String,
+        a: &model::Agent,
+        on: bool,
+        first: bool,
+    ) -> Stateful<Div> {
+        let p = self.p;
+        div()
+            .id(SharedString::from(id.clone()))
+            .role(Role::Switch)
+            .aria_label(a.name.clone())
+            .flex()
+            .items_center()
+            .gap(px(space::M))
+            .px(px(space::M))
+            .py(px(space::S))
+            .cursor_pointer()
+            .when(!first, |d| d.border_t_1().border_color(p.line))
+            .soft_hover(transparent_black(), p.hover, None)
+            .child(thread::strand(
+                format!("{id}-thread"),
+                Mood::Idle,
+                thread::color(&a.color, p.dark),
+                a.outline(),
+                22.0,
+                10.0,
+                None,
+            ))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .truncate()
+                    .text_size(px(size::SMALL))
+                    .text_color(p.ink)
+                    .child(a.name.clone()),
+            )
+            .child(self.switch(format!("{id}-switch"), on))
+    }
+
+    /// The box the agent switch rows sit in.
+    fn switch_box(&self) -> Div {
+        div()
+            .flex()
+            .flex_col()
+            .rounded(px(radius::CARD))
+            .border_1()
+            .border_color(self.p.line)
+            .overflow_hidden()
+    }
+
     /// The form's Connect, with what's typed in it.
     fn spool_submit(&mut self, cx: &mut Context<Self>) {
         let read = |boxes: &[(String, Entity<InputState>)], cx: &App| -> Vec<(String, String)> {
@@ -1053,12 +1148,12 @@ impl Loom {
                     .line_clamp(2)
                     .child(words),
             );
-        let mut chips = div().flex().flex_wrap().gap(px(space::S));
-        for a in self.model.agents.clone().iter() {
+        let mut chips = self.switch_box();
+        for (n, a) in self.model.agents.clone().iter().enumerate() {
             let on = m.agents.contains(&a.id);
             let (server, id) = (m.name.clone(), a.id.clone());
             chips = chips.child(
-                self.member_chip(format!("spool-{}-agent-{}", m.name, a.id), a, on)
+                self.agent_switch_row(format!("spool-{}-agent-{}", m.name, a.id), a, on, n == 0)
                     .on_click(cx.listener(move |this, _, _, cx| {
                         if let Some(f) = this.model.spool_toggle_agent(&server, &id) {
                             this.send(f);

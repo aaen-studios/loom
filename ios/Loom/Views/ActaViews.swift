@@ -136,7 +136,7 @@ struct CardSheetView: View {
                 ToolbarItem(placement: .principal) {
                     if let s {
                         HStack(spacing: Tokens.Space.s) {
-                            Image(uiImage: Pill.tile(16)).accessibilityHidden(true)
+                            Pill.mark(16).accessibilityHidden(true)
                             Text("\(boardLabel(s)) · \(s.id)")
                                 .font(Fonts.mono(Tokens.PhoneSize.small - 1))
                                 .foregroundStyle(P.ink2)
@@ -463,7 +463,7 @@ struct BoardScreenView: View {
             }
         } label: {
             HStack(spacing: 6) {
-                Image(uiImage: Pill.tile(16)).accessibilityHidden(true)
+                Pill.mark(16).accessibilityHidden(true)
                 Text(model.boardName(b.board)).font(Fonts.ui(Tokens.PhoneSize.body, .semibold)).foregroundStyle(P.ink)
                 Image(systemName: "chevron.down").font(.system(size: 10, weight: .semibold)).foregroundStyle(P.ink3)
             }

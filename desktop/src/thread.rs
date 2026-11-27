@@ -302,9 +302,10 @@ fn bend(mood: Mood, u: f32, width: f32, room: f32, t: f32, since_snap: f32) -> (
     let loop_r = (room * 0.9).min(width * 0.18);
     let up = match mood {
         Mood::Idle => {
-            let base = (TAU * (u * 1.3 + t * thread_motion_idle::SPEED)).sin()
-                * thread_motion_idle::AMPLITUDE
-                * 2.0;
+            // An idle thread holds still: nothing asks for frames for it (`moves`), so
+            // a wave in time would move only when something else drew it again, such as
+            // another agent working or the pointer over its row, and jump when it did.
+            let base = (TAU * u * 1.3).sin() * thread_motion_idle::AMPLITUDE * 2.0;
             let snap = if since_snap < 1.2 {
                 let a = thread_motion_snap::AMPLITUDE
                     * 2.0
@@ -832,7 +833,14 @@ pub fn yarn(
 /// one's line, which calms as they come, until there is only that one. `reveal` (0 to 1)
 /// is how far across they've come in from the left, each a little behind the one before.
 pub fn weave(colors: Vec<Hsla>, gather: f32, reveal: f32, h: f32) -> impl IntoElement {
-    weave_layer(colors, gather, reveal, h, None)
+    weave_layer(colors, gather, reveal, h, None, true)
+}
+
+/// `weave`, held still: for a group chat's mark among rows whose threads move only
+/// while their agents work. Nothing asks for frames for it, so a weave in time would
+/// move only when something else drew it again, and jump when it did.
+pub fn weave_still(colors: Vec<Hsla>, h: f32) -> impl IntoElement {
+    weave_layer(colors, 0.0, 1.0, h, None, false)
 }
 
 /// The part of `weave` that passes over a word laid across its middle, `half` either side
@@ -845,7 +853,7 @@ pub fn weave_over(
     h: f32,
     half: f32,
 ) -> impl IntoElement {
-    weave_layer(colors, gather, reveal, h, Some(half))
+    weave_layer(colors, gather, reveal, h, Some(half), true)
 }
 
 /// Whether thread `k` is over the word at `u`, 0 to 1 across it: four stretches, one a
@@ -863,12 +871,13 @@ fn weave_layer(
     reveal: f32,
     h: f32,
     over: Option<f32>,
+    moving: bool,
 ) -> impl IntoElement {
     let g = gather.clamp(0.0, 1.0);
     canvas(
         |_, _, _| {},
         move |bounds, _, window, _| {
-            let t = now();
+            let t = if moving { now() } else { 0.0 };
             let x0 = bounds.origin.x.as_f32();
             let width = bounds.size.width.as_f32();
             let mid = bounds.origin.y.as_f32() + bounds.size.height.as_f32() / 2.0;

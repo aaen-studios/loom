@@ -152,7 +152,7 @@ impl Loom {
             .w(px(w))
             .h(px(h))
             .flex_none()
-            .child(thread::weave(self.room_colors(r), 0.0, 1.0, h))
+            .child(thread::weave_still(self.room_colors(r), h))
     }
 
     /// An empty group chat: its members' threads woven large, its name, and the
@@ -313,10 +313,8 @@ impl Loom {
         )
     }
 
-    /// A right-click on a group chat's row: its settings, and Delete for one the person
-    /// made.
+    /// A right-click on a group chat's row: its settings, and Delete.
     pub(super) fn room_menu(&self, panel: Div, room: String, cx: &mut Context<Self>) -> Div {
-        let everyone = self.model.room(&room).is_some_and(|r| r.everyone);
         let open = room.clone();
         let panel = panel.child(
             self.menu_item("ctx-room-settings", Ico::Settings, "Settings", false)
@@ -326,9 +324,6 @@ impl Loom {
                     this.room_settings(cx);
                 })),
         );
-        if everyone {
-            return panel;
-        }
         panel.child(
             self.menu_item("ctx-room-delete", Ico::Trash, "Delete group chat", true)
                 .on_click(cx.listener(move |this, _, _, cx| {
@@ -429,25 +424,23 @@ impl Loom {
                 )
             });
         page = page.child(self.field("Name", name_row));
-        // Its members: every one of the person's agents, each on or off. Everyone's
-        // are all of them, always. While one is made, the label counts the picked.
-        if panel.members_row {
-            let mut chips = div().flex().flex_wrap().gap(px(space::S));
-            for a in self.model.agents.iter() {
-                let on = panel.members.contains(&a.id);
-                let id = a.id.clone();
-                chips = chips.child(
-                    self.member_chip(format!("room-member-{}", a.id), a, on)
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            this.toggle_member(&id, cx);
-                        })),
-                );
-            }
-            page = page.child(match &panel.members_count {
-                Some(c) => self.counted_field("Members", c, chips),
-                None => self.field("Members", chips),
-            });
+        // Its members: every one of the person's agents, each on or off. While one is
+        // made, the label counts the picked.
+        let mut chips = div().flex().flex_wrap().gap(px(space::S));
+        for a in self.model.agents.iter() {
+            let on = panel.members.contains(&a.id);
+            let id = a.id.clone();
+            chips = chips.child(
+                self.member_chip(format!("room-member-{}", a.id), a, on)
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.toggle_member(&id, cx);
+                    })),
+            );
         }
+        page = page.child(match &panel.members_count {
+            Some(c) => self.counted_field("Members", c, chips),
+            None => self.field("Members", chips),
+        });
         // Its colour, or none.
         page = page.child(self.field("Colour", self.room_swatches(&panel.color, cx)));
         if making {

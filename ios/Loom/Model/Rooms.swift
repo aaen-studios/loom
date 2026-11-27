@@ -17,8 +17,6 @@ struct Room: Identifiable, Equatable, Sendable {
     /// The member a message goes to when the router can't pick, or "" for the one that
     /// answered last.
     var defaultAgent: String
-    /// Everyone's: every one of the person's agents, made by the instance.
-    var everyone: Bool
     /// What the person re-sent to another member, newest last.
     var corrections: [Correction]
 
@@ -28,7 +26,6 @@ struct Room: Identifiable, Equatable, Sendable {
         members = r["members"].array.map(\.text)
         color = r["color"].text
         defaultAgent = r["default"].text
-        everyone = r["everyone"].bool ?? false
         corrections = r["corrections"].array.map {
             Correction(id: $0["id"].text, text: $0["text"].text, to: $0["to"].text, from: $0["from"].text, at: $0["at"].int ?? 0)
         }

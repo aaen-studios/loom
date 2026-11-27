@@ -15,16 +15,16 @@ import Testing
         #expect(listed(all).map(\.id) == ["d", "b", "c", "a", "e"])
     }
 
-    /// Four agents and Everyone, as the core groups them: none pinned, Scribe waiting, then
-    /// Everyone and Builder in the list, Gardener in Home, and Postmaster hidden.
+    /// Four agents and the Daily group chat, as the core groups them: none pinned, Scribe
+    /// waiting, then Daily and Builder in the list, Gardener in Home, and Postmaster hidden.
     func grouped() -> Model {
         let m = caughtUp(agents: ["a_1", "a_2", "a_3", "a_4"])
         m.take(data("conversations", ["a_1", "a_2", "a_3", "a_4"].map { ["id": JSON(chat(of: $0)), "agent": JSON($0), "title": ""] } + [
-            ["id": "c_6", "agent": "", "title": "Everyone", "room": ["name": "Everyone", "everyone": true, "members": ["a_1", "a_2", "a_3", "a_4"]]],
+            ["id": "c_6", "agent": "", "title": "Daily", "room": ["name": "Daily", "members": ["a_1", "a_2", "a_3", "a_4"]]],
         ]))
         m.take(data("sidebar", [
             ["kind": "pinned", "agents": []], ["kind": "waiting", "agents": ["a_2"]],
-            ["kind": "list", "items": [["kind": "room", "id": "c_6", "name": "Everyone", "everyone": true], ["kind": "agent", "id": "a_1"]]],
+            ["kind": "list", "items": [["kind": "room", "id": "c_6", "name": "Daily"], ["kind": "agent", "id": "a_1"]]],
             ["kind": "group", "id": "g_1", "name": "Home", "collapsed": false, "items": [["kind": "agent", "id": "a_4"]]],
             ["kind": "hidden", "agents": ["a_3"]],
             ["kind": "order", "items": ["c_6", "a_2", "a_1", "a_4", "a_3"]],
@@ -68,7 +68,7 @@ import Testing
 
     @Test func aRowMovedInTheListTellsTheInstanceTheNewOrder() throws {
         let m = grouped()
-        // Builder, dragged over Everyone.
+        // Builder, dragged over Daily.
         let up = try #require(m.rowDrop(from: 1, to: 0))
         #expect(up.0 == "a_1")
         #expect(up.1 == .before("c_6"))
@@ -83,7 +83,7 @@ import Testing
 
     @Test func aGroupChatDraggedIntoAFolderGoesInIt() throws {
         let m = grouped()
-        // Everyone, dragged under Gardener, the folder's last.
+        // Daily, dragged under Gardener, the folder's last.
         let down = try #require(m.rowDrop(from: 0, to: 4))
         #expect(down.0 == "c_6")
         #expect(down.1 == .after("a_4"))

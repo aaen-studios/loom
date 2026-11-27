@@ -639,6 +639,8 @@ pub struct Loom {
     side_drop: Option<(String, bool)>,
     /// Whether the agent menu shows the folders to move the agent to.
     menu_folders: bool,
+    /// Whether the agent menu shows the agent's threads, to open one.
+    menu_threads: bool,
     listing_hosts: bool,
     /// One of the person's own hosts to add, by what ssh is given, on the Hosts page.
     ssh_host_in: Entity<InputState>,
@@ -749,6 +751,9 @@ pub struct Loom {
     setting_value_in: Entity<InputState>,
     /// The open program's share: tokens each person may use, and whether each month.
     share_in: Entity<InputState>,
+    /// The open program's usage pool to link: its address and the secret with its key.
+    pool_address_in: Entity<InputState>,
+    pool_secret_in: Entity<InputState>,
     share_month: bool,
     instructions_in: Entity<TextareaState>,
     search_in: Entity<InputState>,
@@ -1350,6 +1355,8 @@ ACTA_KEY=secret:ACTA_KEY",
         let setting_key_in = input(window, cx, "ANTHROPIC_API_KEY", false);
         let setting_value_in = input(window, cx, "Its value", true);
         let share_in = input(window, cx, "Tokens", false);
+        let pool_address_in = input(window, cx, "http://127.0.0.1:8317", false);
+        let pool_secret_in = input(window, cx, "pool-key", false);
         let skill_desc_in = input(window, cx, "When it's for, in one sentence", false);
         let skill_body_in = cx.new(|cx| {
             TextareaState::new(window, cx)
@@ -1788,6 +1795,7 @@ ACTA_KEY=secret:ACTA_KEY",
             side_dragging: None,
             side_drop: None,
             menu_folders: false,
+            menu_threads: false,
             listing_hosts: false,
             ssh_host_in,
             skill_name_in,
@@ -1896,6 +1904,8 @@ ACTA_KEY=secret:ACTA_KEY",
             setting_key_in,
             setting_value_in,
             share_in,
+            pool_address_in,
+            pool_secret_in,
             share_month: false,
             instructions_in,
             search_in,
@@ -3597,6 +3607,7 @@ ACTA_KEY=secret:ACTA_KEY",
         self.ctx = None;
         self.menu = Some(Menu::Agent);
         self.menu_folders = false;
+        self.menu_threads = false;
         self.menu_at = Some(at);
         cx.notify();
     }
@@ -4958,52 +4969,51 @@ ACTA_KEY=secret:ACTA_KEY",
         )
     }
 
-    /// Another agent's thread with `agent`, under its row in the sidebar: the asker's
-    /// thread and "From NAME", which opens it in the chat's place.
-    fn ask_row(
+    /// One of the agent's threads in its menu's Threads (another agent's with it, "From
+    /// NAME" by the asker's thread, or one it made): a click opens it in the chat's place.
+    /// A dot in the asker's colour while a reply in it hasn't been seen.
+    fn ask_item(
         &self,
         agent: &str,
+        n: usize,
         k: &model::Ask,
-        open: bool,
         cx: &mut Context<Self>,
     ) -> Stateful<Div> {
         let p = self.p;
         let agent = agent.to_string();
         let conversation = k.conversation.clone();
+        let tint = self.ask_tint(k);
         div()
-            .id(SharedString::from(format!("ask-{}", k.conversation)))
-            .role(Role::Button)
+            .id(SharedString::from(format!("ask-{n}")))
+            .role(Role::MenuItem)
             .aria_label(k.label.clone())
             .flex()
             .items_center()
             .gap(px(space::M))
-            .pl(px(space::M + space::S))
-            .pr(px(space::M))
-            .py(px(space::XS))
+            .px(px(space::M))
+            .py(px(space::S))
             .rounded(px(radius::ROW))
             .cursor_pointer()
-            .when(open, |d| d.bg(p.active))
-            .when(!open, move |d| {
-                d.soft_hover(transparent_black(), p.hover, None)
-            })
-            .on_click(
-                cx.listener(move |this, _, _, cx| this.open_thread(&agent, &conversation, cx)),
-            )
-            .child(self.ask_strand(format!("ask-side-{}", k.conversation), k))
+            .text_size(px(size::SMALL))
+            .text_color(p.ink)
+            .soft_hover(transparent_black(), p.hover, None)
+            .on_click(cx.listener(move |this, _, _, cx| {
+                this.menu = None;
+                this.menu_threads = false;
+                this.open_thread(&agent, &conversation, cx)
+            }))
+            .child(self.ask_strand(format!("ask-menu-{}", k.conversation), k))
             .child(
                 div()
                     .flex_1()
                     .min_w_0()
                     .truncate()
-                    .text_size(px(size::CAPTION))
-                    .font_weight(if k.unread {
-                        FontWeight::SEMIBOLD
-                    } else {
-                        FontWeight::NORMAL
-                    })
-                    .text_color(if k.unread || open { p.ink } else { p.ink_2 })
+                    .when(k.unread, |d| d.font_weight(FontWeight::SEMIBOLD))
                     .child(k.label.clone()),
             )
+            .when(k.unread, |d| {
+                d.child(div().size(px(6.0)).flex_none().rounded_full().bg(tint))
+            })
     }
 
     /// Shows a routine's thread of its own in place of its agent's chat, closing the page
@@ -7110,7 +7120,6 @@ ACTA_KEY=secret:ACTA_KEY",
             .asks(&a.id)
             .iter()
             .find(|k| k.unread)
-            .filter(|_| !selected)
             .map(|k| self.ask_tint(k));
         let id = a.id.clone();
         div()
@@ -7190,23 +7199,6 @@ ACTA_KEY=secret:ACTA_KEY",
                         d.child(div().size(px(6.0)).flex_none().rounded_full().bg(tint))
                     }),
             )
-    }
-
-    /// Other agents' threads with the agent `a`, each a labelled row under it, while its
-    /// chat is open (its tile has no room under it: they head the list then).
-    fn ask_rows(&self, a: &model::Agent, cx: &mut Context<Self>) -> Vec<Stateful<Div>> {
-        if self.model.selected.as_deref() != Some(a.id.as_str()) || self.screen != Screen::Chat {
-            return Vec::new();
-        }
-        let open = self.model.ask_open().map(|k| k.conversation);
-        self.model
-            .asks(&a.id)
-            .iter()
-            .map(|k| {
-                let here = open.as_deref() == Some(k.conversation.as_str());
-                self.ask_row(&a.id, k, here, cx)
-            })
-            .collect()
     }
 
     /// A group's head in the sidebar: its name, small and quiet, with a chevron when it
@@ -7318,13 +7310,7 @@ ACTA_KEY=secret:ACTA_KEY",
                 let row = self
                     .agent_row(a, cx)
                     .on_drag(SideDrag::of(a, p), SideDrag::ghost);
-                let mut out = vec![self.droppable(row, id, false, cx).into_any_element()];
-                out.extend(
-                    self.ask_rows(a, cx)
-                        .into_iter()
-                        .map(IntoElement::into_any_element),
-                );
-                out
+                vec![self.droppable(row, id, false, cx).into_any_element()]
             }
             model::SideItem::Room(id) => {
                 let Some(r) = self.model.room(id).cloned() else {
@@ -7399,9 +7385,6 @@ ACTA_KEY=secret:ACTA_KEY",
                     for a in &agents {
                         let tile = self.pinned_tile(a, cx);
                         tiles.push(self.tile_drop(tile, &a.id, cx));
-                        // Its tile has no room under it for other agents' threads with it:
-                        // they head the list while it's open.
-                        list = list.children(self.ask_rows(a, cx));
                     }
                 }
                 model::SidePart::Waiting => {
@@ -7416,7 +7399,6 @@ ACTA_KEY=secret:ACTA_KEY",
                     ));
                     for a in &agents {
                         top = top.child(self.waiting_row(a, cx));
-                        top = top.children(self.ask_rows(a, cx));
                     }
                 }
                 model::SidePart::List => {
@@ -7458,7 +7440,6 @@ ACTA_KEY=secret:ACTA_KEY",
             if open {
                 for a in &hidden {
                     list = list.child(self.agent_row(a, cx));
-                    list = list.children(self.ask_rows(a, cx));
                 }
             }
         }
@@ -8531,6 +8512,7 @@ ACTA_KEY=secret:ACTA_KEY",
                 .on_click(cx.listener(|this, _, _, cx| {
                     this.menu_at = None;
                     this.menu_folders = false;
+                    this.menu_threads = false;
                     this.menu = if this.menu == Some(Menu::Agent) {
                         None
                     } else {
@@ -10864,6 +10846,7 @@ ACTA_KEY=secret:ACTA_KEY",
             self.armed = None;
             self.menu_at = None;
             self.menu_folders = false;
+            self.menu_threads = false;
         }
         let menu = self.menu?;
         let under_header = self.menu_at.is_none();
@@ -10907,6 +10890,22 @@ ACTA_KEY=secret:ACTA_KEY",
                 cx,
             ));
         }
+        if menu == Menu::Agent && self.menu_threads {
+            let mut panel = panel.when(under_header, |d| d.left(px(space::S)));
+            if let Some(agent) = self.model.selected.clone() {
+                for (n, k) in self.model.asks(&agent).iter().enumerate() {
+                    panel = panel.child(self.ask_item(&agent, n, k, cx));
+                }
+            }
+            return Some(panel);
+        }
+        let threads = self
+            .model
+            .selected
+            .as_ref()
+            .map(|id| self.model.asks(id))
+            .unwrap_or_default();
+        let threads_unread = threads.iter().any(|k| k.unread);
         Some(match menu {
             Menu::Agent => panel
                 .when(under_header, |d| d.left(px(space::S)))
@@ -10932,6 +10931,24 @@ ACTA_KEY=secret:ACTA_KEY",
                             cx.notify();
                         })),
                 )
+                .when(!threads.is_empty(), |d| {
+                    d.child(
+                        self.menu_item(
+                            "agent-threads",
+                            Ico::GitBranch,
+                            &format!("Threads · {}", threads.len()),
+                            false,
+                        )
+                        .when(threads_unread, |d| {
+                            d.child(div().size(px(6.0)).flex_none().rounded_full().bg(p.ink))
+                        })
+                        .child(Icon::new(Ico::ChevronRight).small().text_color(p.ink_3))
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.menu_threads = true;
+                            cx.notify();
+                        })),
+                    )
+                })
                 .child(
                     self.menu_item(
                         "hide-agent",
@@ -16834,77 +16851,71 @@ ACTA_KEY=secret:ACTA_KEY",
         } else {
             format!("Version {} · {settings_words}", prog.version)
         };
+        // With a pool, how many of its accounts are ready.
+        let what = match prog.pool.as_ref().and_then(|p| p.reading.as_ref()) {
+            Some(r) => format!(
+                "{what} · Pool of {}, {} ready",
+                r.total.accounts, r.total.ready
+            ),
+            None => what,
+        };
         (from_registry.or(listed), shown, what, newer)
     }
 
-    /// The Brains page: the agent programs on the instance down the left, each an agent's
-    /// brain, and the one picked beside them, with its settings and sharing; and under
-    /// them the ACP Registry, whose programs show beside the list to install.
+    /// The Brains page, as it was before the settings had lists beside the one picked:
+    /// one column, each agent program on the instance (an agent's brain) a row with its
+    /// tile and what it is, which opens in place to its plan, the usage pool it draws
+    /// from, its settings and sharing; and under them the ACP Registry's to install.
     fn programs_page(&mut self, cx: &mut Context<Self>) -> Div {
-        let installed = self.model.installed.clone();
-        let keys: Vec<&str> = installed.iter().map(|p| p.name.as_str()).collect();
-        let open = self.program_open.clone();
-        let split = self.list_split();
-        let shows = popup::shows(split, open.as_ref().map(|o| o.as_deref()), &keys, false);
-        let query = self.list_query(cx);
-        let found = (0..installed.len())
-            .filter(|&i| popup::finds(&query, &self.brain_about(&installed[i]).1))
-            .collect();
-        // The registry, when it's picked, or side by side while there's no brain yet.
-        let registry = match shows.pane {
-            Pane::New => true,
-            Pane::Nothing => split,
-            _ => false,
-        };
-        let (pane_key, pane) = match shows.pane {
-            Pane::Item(i) => (
-                installed[i].name.clone(),
-                self.program_pane(&installed[i], cx),
-            ),
-            _ if registry => ("registry".to_string(), self.registry_pane(cx)),
-            _ => (String::new(), Vec::new()),
-        };
-        let foot = Some(self.registry_row(registry, cx));
-        self.list_detail(
-            ListPage {
-                id: "programs-page",
-                title: "Brains",
-                action: None,
-                shows,
-                found,
-                row: Loom::program_row,
-                head: None,
-                foot,
-                pane_key,
-                pane,
-            },
-            cx,
-        )
-    }
-
-    /// One of the brains on the instance, as a row of the list: what it is, and a dot
-    /// while the registry has a newer version.
-    fn program_row(&mut self, ix: usize, picked: bool, cx: &mut Context<Self>) -> AnyElement {
-        let Some(prog) = self.model.installed.get(ix).cloned() else {
-            return div().into_any_element();
-        };
-        let (listed, shown, what, newer) = self.brain_about(&prog);
-        let name = prog.name.clone();
-        self.list_row_unsaved(
-            format!("program-{}", prog.name),
-            self.brain_tile(listed.as_ref(), control::LEAD),
-            shown,
-            what,
-            newer.map(|_| popup::Dot::Warn),
-            self.unsaved(DraftPage::Brains, &prog.name),
-            picked,
-        )
-        .on_click(cx.listener(move |this, _, window, cx| {
-            this.program_open = Some(Some(name.clone()));
-            this.fill_brain(&name, window, cx);
-            cx.notify();
-        }))
-        .into_any_element()
+        let mut groups = Vec::new();
+        let mut mine = Vec::new();
+        for prog in self.model.installed.clone() {
+            let open =
+                self.program_open.as_ref().and_then(|o| o.as_deref()) == Some(prog.name.as_str());
+            let (listed, shown, what, _) = self.brain_about(&prog);
+            let name = prog.name.clone();
+            let chevron = div()
+                .text_color(self.p.ink_3)
+                .child(
+                    Icon::new(if open {
+                        Ico::ChevronDown
+                    } else {
+                        Ico::ChevronRight
+                    })
+                    .small(),
+                )
+                .into_any_element();
+            let row = self.row(
+                Some(self.brain_tile(listed.as_ref(), BRAIN_TILE)),
+                shown,
+                Some(what),
+                Some(chevron),
+            );
+            mine.push(
+                self.link_row(SharedString::from(format!("program-{}", prog.name)), row)
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        let was = this.program_open.as_ref().and_then(|o| o.as_deref())
+                            == Some(name.as_str());
+                        this.leave_form(cx);
+                        this.program_open = if was { None } else { Some(Some(name.clone())) };
+                        if !was {
+                            this.fill_brain(&name, window, cx);
+                        }
+                        cx.notify();
+                    }))
+                    .into_any_element(),
+            );
+            if open {
+                mine.extend(self.program_open_rows(&prog, cx));
+            }
+        }
+        if mine.is_empty() {
+            groups.push(self.empty(Ico::Brain, "No brains yet", None, None));
+        } else {
+            groups.push(self.group(Some("Your brains"), mine));
+        }
+        groups.push(self.registry_cards(cx));
+        self.settings_page("programs-page", "Brains", None, groups)
     }
 
     /// Fills the brain form, its setting to add and its tokens to share, empty for brain
@@ -16914,100 +16925,80 @@ ACTA_KEY=secret:ACTA_KEY",
         self.fill_form(DraftPage::Brains, Some(name.to_string()), own, window, cx);
     }
 
-    /// The ACP Registry, as the row under the brains: how many of its programs aren't
-    /// on the instance yet.
-    fn registry_row(&mut self, picked: bool, cx: &mut Context<Self>) -> AnyElement {
-        let more = self
-            .model
-            .registry
-            .iter()
-            .filter(|l| {
-                l.installed.is_none() && !self.model.program_ids.values().any(|id| *id == l.id)
-            })
-            .count();
-        let line = if self.model.registry_loading {
-            "Reading…".to_string()
-        } else if self.model.registry.is_empty() {
-            String::new()
-        } else {
-            format!("{more} to install")
-        };
-        self.list_row(
-            "brains-registry",
-            self.tile(Ico::Package),
-            "ACP Registry",
-            line,
-            None,
-            picked,
-        )
-        .on_click(cx.listener(|this, _, _, cx| {
-            this.leave_form(cx);
-            this.program_open = Some(None);
-            cx.notify();
-        }))
-        .into_any_element()
+    /// A row of an open brain, set in under its tile so it reads as the brain's.
+    fn brain_inset(&self, row: impl IntoElement) -> AnyElement {
+        div()
+            .pl(px(BRAIN_TILE + space::M))
+            .child(row)
+            .into_any_element()
     }
 
-    /// The brain picked, beside the list: its name and what it is, its settings, which
-    /// stay on the instance, sharing them, who has it, and updating or removing it.
-    fn program_pane(&mut self, prog: &model::Program, cx: &mut Context<Self>) -> Vec<AnyElement> {
+    /// An open brain's rows, under its own: its plan, the usage pool it draws from, its
+    /// settings, which stay on the instance, sharing them, who has it, and updating or
+    /// removing it.
+    fn program_open_rows(
+        &mut self,
+        prog: &model::Program,
+        cx: &mut Context<Self>,
+    ) -> Vec<AnyElement> {
         let p = self.p;
-        let (listed, shown, what, newer) = self.brain_about(prog);
+        let (_, _, _, newer) = self.brain_about(prog);
         let mut rows = Vec::new();
+        for r in self.program_plan(&prog.name) {
+            rows.push(self.brain_inset(r));
+        }
+        rows.extend(self.program_pool(prog, cx));
         // Its settings, which stay on the instance: only their names come here.
         for key in prog.settings.clone() {
             let (program, k) = (prog.name.clone(), key.clone());
-            rows.push(
-                self.row(
-                    None,
-                    key.clone(),
-                    Some("••••••••".into()),
-                    Some(
-                        self.small_button(format!("unset-{}-{key}", prog.name), "Remove", false)
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                let f = this.model.set_setting(&program, &k, None);
-                                this.send(f);
-                                cx.notify();
-                            }))
-                            .into_any_element(),
-                    ),
-                )
-                .into_any_element(),
+            let row = self.row(
+                None,
+                key.clone(),
+                Some("••••••••".into()),
+                Some(
+                    self.small_button(format!("unset-{}-{key}", prog.name), "Remove", false)
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            let f = this.model.set_setting(&program, &k, None);
+                            this.send(f);
+                            cx.notify();
+                        }))
+                        .into_any_element(),
+                ),
             );
+            rows.push(self.brain_inset(row));
         }
         let program = prog.name.clone();
-        rows.push(
-            div()
-                .flex()
-                .items_center()
-                .gap(px(space::S))
-                .px(px(space::L))
-                .py(px(space::M))
-                .child(div().flex_1().child(Input::new(&self.setting_key_in)))
-                .child(div().flex_1().child(Input::new(&self.setting_value_in)))
-                .child(
-                    self.small_button(format!("set-{}", prog.name), "Add setting", false)
-                        .on_click(cx.listener(move |this, _, window, cx| {
-                            let key = this.setting_key_in.read(cx).value().to_string();
-                            let value = this.setting_value_in.read(cx).value().to_string();
-                            if key.trim().is_empty() {
-                                this.model.notices.push(
-                                    "A setting needs a name, such as ANTHROPIC_API_KEY.".into(),
-                                );
-                                cx.notify();
-                                return;
-                            }
-                            let f = this.model.set_setting(&program, &key, Some(&value));
-                            this.send(f);
-                            for s in [&this.setting_key_in, &this.setting_value_in] {
-                                s.update(cx, |s, cx| s.set_value("", window, cx));
-                            }
+        let add = div()
+            .flex()
+            .items_center()
+            .gap(px(space::S))
+            .px(px(space::L))
+            .py(px(space::M))
+            .child(div().flex_1().child(Input::new(&self.setting_key_in)))
+            .child(div().flex_1().child(Input::new(&self.setting_value_in)))
+            .child(
+                self.small_button(format!("set-{}", prog.name), "Add setting", false)
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        let key = this.setting_key_in.read(cx).value().to_string();
+                        let value = this.setting_value_in.read(cx).value().to_string();
+                        if key.trim().is_empty() {
+                            this.model
+                                .notices
+                                .push("A setting needs a name, such as ANTHROPIC_API_KEY.".into());
                             cx.notify();
-                        })),
-                )
-                .into_any_element(),
-        );
-        // Sharing its settings with the people invited, a number of tokens each.
+                            return;
+                        }
+                        let f = this.model.set_setting(&program, &key, Some(&value));
+                        this.send(f);
+                        for s in [&this.setting_key_in, &this.setting_value_in] {
+                            s.update(cx, |s, cx| s.set_value("", window, cx));
+                        }
+                        cx.notify();
+                    })),
+            );
+        rows.push(self.brain_inset(add));
+        // Sharing its settings with the people invited, a number of tokens each. With a
+        // pool, what's shared is drawn from its accounts like the owner's own turns.
         let month = self.share_month;
         let program = prog.name.clone();
         let mut share = div()
@@ -17058,11 +17049,12 @@ ACTA_KEY=secret:ACTA_KEY",
                     })),
             );
         }
-        // Its control is wide: under its title when they don't fit side by side (LOO-401).
-        rows.push(
-            self.wrapping_row("Share it", share.into_any_element())
-                .into_any_element(),
-        );
+        let share_title = match (&prog.share, &prog.pool) {
+            (Some(sh), Some(_)) => format!("Share it · {}, from the pool", share_words(sh)),
+            (Some(sh), None) => format!("Share it · {}", share_words(sh)),
+            _ => "Share it".to_string(),
+        };
+        rows.push(self.brain_inset(self.wrapping_row(share_title, share.into_any_element())));
         // Who has it, and who gets the settings shared: the owner's to say.
         let people: Vec<model::Person> = self
             .model
@@ -17083,15 +17075,13 @@ ACTA_KEY=secret:ACTA_KEY",
                     this.send(f);
                 },
             );
-            rows.push(
-                self.row(
-                    None,
-                    "Who has it",
-                    Some(who_words(prog.members.as_deref(), &people)),
-                    Some(chips.into_any_element()),
-                )
-                .into_any_element(),
+            let row = self.row(
+                None,
+                "Who has it",
+                Some(who_words(prog.members.as_deref(), &people)),
+                Some(chips.into_any_element()),
             );
+            rows.push(self.brain_inset(row));
             if let Some(sh) = prog.share.clone() {
                 let program = prog.name.clone();
                 let given = sh.members.clone();
@@ -17105,15 +17095,13 @@ ACTA_KEY=secret:ACTA_KEY",
                         this.send(f);
                     },
                 );
-                rows.push(
-                    self.row(
-                        None,
-                        "Who gets your settings",
-                        Some(who_words(given.as_deref(), &people)),
-                        Some(chips.into_any_element()),
-                    )
-                    .into_any_element(),
+                let row = self.row(
+                    None,
+                    "Who gets your settings",
+                    Some(who_words(given.as_deref(), &people)),
+                    Some(chips.into_any_element()),
                 );
+                rows.push(self.brain_inset(row));
             }
         }
         let mut actions = div().flex().justify_end().gap(px(space::S));
@@ -17144,23 +17132,269 @@ ACTA_KEY=secret:ACTA_KEY",
                     cx.notify();
                 })),
         );
-        let mut pane = vec![self.pane_head(
-            Some(self.brain_tile(listed.as_ref(), control::ICON_LARGE + 6.0)),
-            shown,
-            Some(what),
+        rows.push(
+            div()
+                .px(px(space::L))
+                .py(px(space::M))
+                .child(actions)
+                .into_any_element(),
+        );
+        rows
+    }
+
+    /// A bar with how much of a limit is used and its words after it, quiet, orange from
+    /// 75% and red from 90%, as the plan's are.
+    fn limit_bar(&self, w: model::LimitWindow, words_w: f32) -> Div {
+        let p = self.p;
+        let now = chrono::Local::now();
+        let w = w.at(now.timestamp_millis());
+        let (bar, words) = self.limit_inks(w.used);
+        div()
+            .flex_1()
+            .min_w_0()
+            .flex()
+            .items_center()
+            .gap(px(space::M))
+            .child(
+                div()
+                    .flex_1()
+                    .h(px(6.0))
+                    .rounded_full()
+                    .bg(p.line_strong)
+                    .overflow_hidden()
+                    .child(
+                        div()
+                            .h_full()
+                            .w(relative(w.fraction()))
+                            .rounded_full()
+                            .bg(bar),
+                    ),
+            )
+            .child(
+                div()
+                    .flex_none()
+                    .w(px(words_w))
+                    .text_right()
+                    .text_size(px(size::CAPTION))
+                    .text_color(words)
+                    .child(w.words(now)),
+            )
+    }
+
+    /// An account's name in a pool, blurred until the pointer is over it: its words hidden,
+    /// keeping their width, under a soft smudge of ink, and shown
+    /// plainly under the pointer, so an email isn't read over the person's shoulder.
+    fn hidden_name(&self, id: SharedString, name: String) -> Stateful<Div> {
+        let p = self.p;
+        let group = SharedString::from(format!("{id}-group"));
+        div()
+            .id(id)
+            .group(group.clone())
+            .relative()
+            .w(px(POOL_NAME_W))
+            .flex_none()
+            .child(
+                div()
+                    .truncate()
+                    .text_color(p.ink)
+                    .font_weight(FontWeight::MEDIUM)
+                    .opacity(0.0)
+                    .group_hover(group.clone(), |s| s.opacity(1.0))
+                    .child(name),
+            )
+            .child(
+                div()
+                    .absolute()
+                    .top(px(7.0))
+                    .bottom(px(7.0))
+                    .left(px(4.0))
+                    .right(px(10.0))
+                    .rounded_full()
+                    .shadow(vec![BoxShadow {
+                        color: p.ink.opacity(0.45),
+                        offset: point(px(0.0), px(0.0)),
+                        blur_radius: px(7.0),
+                        spread_radius: px(0.0),
+                        inset: false,
+                    }])
+                    .group_hover(group, |s| s.opacity(0.0)),
+            )
+    }
+
+    /// One line of a pool's account, or of the whole pool: its name (an account's blurred
+    /// until hovered, `hidden`) and how it stands,
+    /// then each window it reports, its label, bar and words.
+    fn pool_line(
+        &self,
+        name: String,
+        hidden: Option<SharedString>,
+        state: String,
+        state_ink: Hsla,
+        limits: &[model::pools::Limit],
+    ) -> Div {
+        let p = self.p;
+        let mut col = div()
+            .flex()
+            .flex_col()
+            .gap(px(space::XS + 2.0))
+            .px(px(space::L))
+            .py(px(space::S + 2.0))
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(space::M))
+                    .text_size(px(size::SMALL))
+                    .child(match hidden {
+                        Some(id) => self.hidden_name(id, name).into_any_element(),
+                        None => div()
+                            .w(px(POOL_NAME_W))
+                            .flex_none()
+                            .truncate()
+                            .text_color(p.ink)
+                            .font_weight(FontWeight::MEDIUM)
+                            .child(name)
+                            .into_any_element(),
+                    })
+                    .child(
+                        div()
+                            .min_w_0()
+                            .truncate()
+                            .text_color(state_ink)
+                            .child(state),
+                    ),
+            );
+        for l in limits {
+            col = col.child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(space::M))
+                    .child(
+                        div()
+                            .w(px(POOL_NAME_W))
+                            .flex_none()
+                            .truncate()
+                            .text_size(px(size::CAPTION))
+                            .text_color(p.ink_3)
+                            .child(l.label.clone()),
+                    )
+                    .child(self.limit_bar(
+                        model::LimitWindow {
+                            used: l.used,
+                            resets: l.resets,
+                        },
+                        layout::LIMIT_WORDS,
+                    )),
+            );
+        }
+        col
+    }
+
+    /// The usage pool an open brain draws from, to its owner: its kind and when it was
+    /// read, the whole pool's windows, then each account with how it stands and the
+    /// limits it reports, which differ between accounts; or the form that links one.
+    fn program_pool(&mut self, prog: &model::Program, cx: &mut Context<Self>) -> Vec<AnyElement> {
+        let p = self.p;
+        if !self.model.programs_owner {
+            return Vec::new();
+        }
+        let program = prog.name.clone();
+        let Some(pool) = prog.pool.clone() else {
+            // Linking one: where the pool is (the program's base address when left
+            // empty) and the secret with its management key.
+            let link = div()
+                .flex()
+                .flex_wrap()
+                .items_center()
+                .gap(px(space::S))
+                .child(
+                    div()
+                        .w(px(200.0))
+                        .child(Input::new(&self.pool_address_in).small()),
+                )
+                .child(
+                    div()
+                        .w(px(130.0))
+                        .child(Input::new(&self.pool_secret_in).small()),
+                )
+                .child(
+                    self.small_button(format!("pool-link-{}", prog.name), "Link", false)
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            let address = this.pool_address_in.read(cx).value().to_string();
+                            let secret = this.pool_secret_in.read(cx).value().to_string();
+                            if secret.trim().is_empty() {
+                                this.model.notices.push(
+                                    "Name the secret that holds the pool's management key.".into(),
+                                );
+                                cx.notify();
+                                return;
+                            }
+                            let f = this.model.link_pool(&program, &address, &secret);
+                            this.send(f);
+                            for s in [&this.pool_address_in, &this.pool_secret_in] {
+                                s.update(cx, |s, cx| s.set_value("", window, cx));
+                            }
+                            cx.notify();
+                        })),
+                );
+            let row = self.wrapping_row("Usage pool · CLIProxyAPI", link.into_any_element());
+            return vec![self.brain_inset(row)];
+        };
+        let mut rows = Vec::new();
+        let now = chrono::Local::now();
+        let read = match (&pool.reading, &pool.error) {
+            (_, Some(e)) => e.clone(),
+            (Some(r), None) => format!("Read {}", model::ago(now.timestamp_millis() - r.at)),
+            (None, None) => "Reading…".to_string(),
+        };
+        let unlink = self
+            .small_button(format!("pool-unlink-{}", prog.name), "Unlink", false)
+            .on_click(cx.listener(move |this, _, _, cx| {
+                let f = this.model.unlink_pool(&program);
+                this.send(f);
+                cx.notify();
+            }));
+        let head = self.row(
             None,
-        )];
-        pane.extend(self.program_plan(&prog.name));
-        pane.push(self.group(None, rows));
-        pane.push(actions.into_any_element());
-        pane
+            format!("Usage pool · {}", pool.kind_name()),
+            Some(read),
+            Some(unlink.into_any_element()),
+        );
+        rows.push(self.brain_inset(head));
+        let Some(reading) = pool.reading.clone() else {
+            return rows;
+        };
+        let t = &reading.total;
+        let whole = self.pool_line(
+            "All accounts".into(),
+            None,
+            format!("{} of {} ready", t.ready, t.accounts),
+            p.ink_2,
+            &t.limits,
+        );
+        rows.push(self.brain_inset(whole));
+        for (n, a) in reading.accounts.iter().enumerate() {
+            use model::pools::State;
+            let ink = match a.state {
+                State::Ready | State::Off => p.ink_3,
+                State::Cooling | State::SignedOut => p.warn,
+                State::Over | State::Error => p.bad,
+            };
+            let hidden = Some(SharedString::from(format!("pool-{}-{n}", prog.name)));
+            let line = self.pool_line(a.name.clone(), hidden, a.words(now), ink, &a.limits);
+            rows.push(self.brain_inset(line));
+        }
+        rows
     }
 
     /// The plan the person is signed in to with a program, on its page under Brains:
     /// Signed in with the plan's name, then the session and the week, each a bar with how
-    /// much is used and when it resets. None while it has reported no plan.
-    fn program_plan(&self, program: &str) -> Option<AnyElement> {
-        let limits = self.model.program_limits(program)?.clone();
+    /// much is used and when it resets. Nothing while it has reported no plan.
+    fn program_plan(&self, program: &str) -> Vec<AnyElement> {
+        let Some(limits) = self.model.program_limits(program).cloned() else {
+            return Vec::new();
+        };
         let p = self.p;
         let now = chrono::Local::now();
         let mut rows = Vec::new();
@@ -17215,12 +17449,12 @@ ACTA_KEY=secret:ACTA_KEY",
                 ),
             );
         }
-        Some(self.group(None, rows))
+        rows
     }
 
-    /// The ACP Registry's programs that aren't on the instance, beside the list: as
-    /// cards with their icons, as many across as fit, each to install.
-    fn registry_pane(&mut self, cx: &mut Context<Self>) -> Vec<AnyElement> {
+    /// The ACP Registry's programs that aren't on the instance, under the brains: as
+    /// cards with their icons, as many across as the column holds, each to install.
+    fn registry_cards(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let p = self.p;
         let mut cards = Vec::new();
         for l in self.model.registry.clone() {
@@ -17295,7 +17529,6 @@ ACTA_KEY=secret:ACTA_KEY",
                     .into_any_element(),
             );
         }
-        let width = self.list_ui.shape.map_or(layout::SETTINGS, |s| s.pane);
         let body: AnyElement = if self.model.registry_loading {
             self.group(
                 None,
@@ -17306,12 +17539,25 @@ ACTA_KEY=secret:ACTA_KEY",
         } else {
             div()
                 .grid()
-                .grid_cols(popup::columns(width, layout::CARD_LEAST, space::S) as u16)
+                .grid_cols(popup::columns(layout::SETTINGS, layout::CARD_LEAST, space::S) as u16)
                 .gap(px(space::S))
                 .children(cards)
                 .into_any_element()
         };
-        vec![self.pane_head(None, "ACP Registry", None, None), body]
+        div()
+            .flex()
+            .flex_col()
+            .gap(px(space::S))
+            .child(
+                div()
+                    .px(px(space::XS))
+                    .text_size(px(size::SMALL))
+                    .font_weight(FontWeight::MEDIUM)
+                    .text_color(self.p.ink_2)
+                    .child("ACP Registry"),
+            )
+            .child(body)
+            .into_any_element()
     }
 
     /// The Agent defaults page: what every agent follows where it has nothing of its
@@ -21186,6 +21432,10 @@ struct Show {
 const CARD_MOST: f32 = 600.0;
 /// A service's badge at a card's start, and a step's, smaller, and an answered card's.
 const BADGE: f32 = control::ICON_LARGE;
+/// A brain's tile on its row under Brains, which its open rows are set in under.
+const BRAIN_TILE: f32 = control::LEAD + 4.0;
+/// How wide an account's name, and a limit's, are in a usage pool's lines.
+const POOL_NAME_W: f32 = 150.0;
 const BADGE_STEP: f32 = 22.0;
 const BADGE_MINI: f32 = 18.0;
 /// The agent's thread beside a card's title.
@@ -22956,36 +23206,19 @@ thread_local! {
     static CARD_TIPS: RefCell<HashMap<String, (Palette, model::ActaCard)>> = RefCell::new(HashMap::new());
 }
 
-/// The board's tile before a card's id: Acta's purple, with its layers glyph, until Acta
-/// gives each board its own icon. An SVG file, written once.
-fn board_tile() -> Option<String> {
-    let tile = hex_of(rgb(color_dark::BOARD).into());
-    mention_svg(&format!("board-{tile}"), || {
-        format!(
-            "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"42\" height=\"42\" viewBox=\"0 0 14 14\">\
-             <rect width=\"14\" height=\"14\" rx=\"3\" fill=\"#{tile}\"/>\
-             <g transform=\"translate(2 2) scale(0.4167)\" fill=\"none\" stroke=\"#f4f1fc\" \
-             stroke-width=\"2.4\" stroke-linecap=\"round\" stroke-linejoin=\"round\">\
-             <path d=\"M12.83 2.18a2 2 0 0 0-1.66 0L2.6 6.08a1 1 0 0 0 0 1.83l8.58 3.91a2 2 0 0 0 1.66 0l8.58-3.9a1 1 0 0 0 0-1.83z\"/>\
-             <path d=\"M2 12a1 1 0 0 0 .58.91l8.6 3.91a2 2 0 0 0 1.65 0l8.58-3.9A1 1 0 0 0 22 12\"/>\
-             <path d=\"M2 17a1 1 0 0 0 .58.91l8.6 3.91a2 2 0 0 0 1.65 0l8.58-3.9A1 1 0 0 0 22 17\"/></g></svg>"
-        )
-    })
-}
+/// Acta's own mark, the one its site and app use, kept in one place for every app and
+/// Spools (`server/catalog/acta.svg`, whose README says where it came from).
+const ACTA_MARK: &str = include_str!("../../server/catalog/acta.svg");
 
-fn board_icon(size: f32) -> AnyElement {
-    match board_tile() {
-        Some(path) => img(std::path::PathBuf::from(path))
-            .flex_none()
-            .size(px(size))
-            .into_any_element(),
-        None => div()
-            .flex_none()
-            .size(px(size))
-            .rounded(px(3.0))
-            .bg(rgb(color_dark::BOARD))
-            .into_any_element(),
-    }
+/// Acta's mark before a card's id, in a card's preview and beside the chat: one colour,
+/// in the chat's ink, as the rest of loom draws.
+fn board_icon(p: Palette, size: f32) -> AnyElement {
+    svg()
+        .path(crate::runtime_svg("acta/mark.svg", ACTA_MARK))
+        .flex_none()
+        .size(px(size))
+        .text_color(p.ink)
+        .into_any_element()
 }
 
 /// The colour a card's status is drawn in (`model::CardInk`).
@@ -23060,7 +23293,7 @@ fn card_pill_in(
         .border_color(p.line)
         .bg(p.bubble)
         .cursor_pointer()
-        .when(line_dot.is_none(), |d| d.child(board_icon(14.0)))
+        .when(line_dot.is_none(), |d| d.child(board_icon(p, 14.0)))
         .child(card_id_text(id, p.ink_2));
     let Some(card) = card.cloned() else {
         return pill.into_any_element();
@@ -23202,7 +23435,7 @@ fn card_preview(p: Palette, card: &model::ActaCard) -> Stateful<Div> {
                     .gap(px(6.0))
                     .text_size(px(size::CAPTION))
                     .text_color(p.ink_3)
-                    .child(board_icon(14.0))
+                    .child(board_icon(p, 14.0))
                     .child(
                         div()
                             .id("card-preview-board")

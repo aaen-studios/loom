@@ -20,23 +20,25 @@ extension CardInk {
 }
 
 enum Pill {
-    /// The board's tile, until Acta gives each board its own icon: Acta's purple with its
-    /// layers in white, `side` points square, kept once it's made.
+    /// The board's mark, until Acta gives each board its own icon: Acta's own mark
+    /// (server/catalog/acta.svg, `mark-acta` in the marks the build makes), `side` points
+    /// square, as a template to draw in ink, kept once it's made.
     static func tile(_ side: CGFloat = 14) -> UIImage {
         let key = side as NSNumber
         if let kept = tiles.object(forKey: key) { return kept }
         let made = UIGraphicsImageRenderer(size: CGSize(width: side, height: side)).image { _ in
-            let box = CGRect(x: 0, y: 0, width: side, height: side)
-            UIColor(loom: Tokens.ColorLight.board).setFill()
-            UIBezierPath(roundedRect: box, cornerRadius: side * 0.24).fill()
-            let glyph = UIImage(systemName: "square.3.layers.3d", withConfiguration: UIImage.SymbolConfiguration(pointSize: side * 0.62, weight: .semibold))?
-                .withTintColor(.white, renderingMode: .alwaysOriginal)
-            if let glyph {
-                glyph.draw(in: CGRect(x: (side - glyph.size.width) / 2, y: (side - glyph.size.height) / 2, width: glyph.size.width, height: glyph.size.height))
-            }
-        }
+            guard let mark = UIImage(named: "mark-acta"), mark.size.width > 0, mark.size.height > 0 else { return }
+            let scale = min(side / mark.size.width, side / mark.size.height)
+            let w = mark.size.width * scale, h = mark.size.height * scale
+            mark.draw(in: CGRect(x: (side - w) / 2, y: (side - h) / 2, width: w, height: h))
+        }.withRenderingMode(.alwaysTemplate)
         tiles.setObject(made, forKey: key)
         return made
+    }
+
+    /// The board's mark in ink, `side` points square.
+    static func mark(_ side: CGFloat = 14) -> some View {
+        Image(uiImage: tile(side)).renderingMode(.template).foregroundStyle(P.ink)
     }
 
     nonisolated(unsafe) private static let tiles = NSCache<NSNumber, UIImage>()
@@ -142,7 +144,7 @@ struct CardPillView: View {
 
     private var face: some View {
         PillFrame {
-            Image(uiImage: Pill.tile())
+            Pill.mark()
             Text(card.id).font(Fonts.mono(Tokens.PhoneSize.small - 1)).foregroundStyle(P.ink2)
                 .fixedSize()
             if !card.missing && !card.title.isEmpty {
@@ -221,7 +223,7 @@ private func drawCardPiece(ref: String, preview: CardPreview?, font: UIFont, mos
         path.lineWidth = 1
         path.stroke()
         var x = 1 + pad
-        Pill.tile(side).draw(in: CGRect(x: x, y: (height - side) / 2, width: side, height: side))
+        Pill.tile(side).withTintColor(ui(P.ink)).draw(in: CGRect(x: x, y: (height - side) / 2, width: side, height: side))
         x += side + gap
         let ids = idText.size()
         idText.draw(at: CGPoint(x: x, y: (height - ids.height) / 2))

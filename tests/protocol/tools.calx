@@ -73,8 +73,7 @@ fn run(i: Instance) ! Error {
     try check(again == "message_agent: again" and str_at(at(last(app, "conversation.created"), "conversation"), "title") == some(String("From Main")), "and the next message goes to the same one")
     var conversations: usize = 0
     for f in app.frames {
-        // Everyone comes too, once there are two agents: it isn't one of theirs.
-        if str_at(f.copy(), "kind") == some(String("conversation.created")) and at(at(f, "conversation"), "room") == Json.Null { conversations += 1 }
+        if str_at(f, "kind") == some(String("conversation.created")) { conversations += 1 }
     }
     try check(conversations == 2, "the two keep one conversation")
     let self_talk = try say(mut app, conversation.copy(), "m_5", String(#"/mcp message_agent {"agent":"Main","text":"hi"}"#))

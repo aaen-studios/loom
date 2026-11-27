@@ -8,7 +8,7 @@ module server.rooms
 // the agent that answers is told of what was said. The instance does the rest,
 // with the store and the agent programs.
 import std.json.{Json, parse}
-import shared.obj.{Obj, at, bool_at, str_at}
+import shared.obj.{Obj, at, str_at}
 
 // The most corrections a chat keeps, the newest.
 pub const CORRECTIONS_MOST: usize = 20
@@ -34,8 +34,6 @@ pub const START_MS: i64 = 60000
 pub const PICKS_PER_SESSION: i64 = 20
 // The model the router is set to until the person picks another.
 pub const ROUTER_MODEL: str = "haiku"
-// Everyone's name, until the person renames it.
-pub const EVERYONE: str = "Everyone"
 
 // `text`, trimmed and on one line, cut at `most` bytes with "…".
 pub fn cut(text: String, most: usize) -> String {
@@ -100,10 +98,9 @@ pub fn ids_json(ids: List<String>) -> Json {
     return Json.Array(out)
 }
 
-// A room's members as they are now: Everyone's are all the person's agents
-// (`all`, their ids); another's, those it names that are still there.
+// A room's members as they are now: those it names that are still among the
+// person's agents (`all`, their ids).
 pub fn members_of(room: Json, all: List<String>) -> List<String> {
-    if bool_at(room.copy(), "everyone") ?? false { return all.copy() }
     var out = List<String>()
     for id in ids_in(at(room, "members")) {
         if all.contains(id.copy()) { out.push(id.copy()) }
@@ -387,9 +384,8 @@ pub fn room_made(args: Json, all: List<String>, color_ok: fn(String) -> bool) ->
 }
 
 // `room` with what room.update's `args` change, checked as `made` checks a new
-// one. Everyone's members don't change.
+// one.
 pub fn room_changed(room: Json, args: Json, all: List<String>, color_ok: fn(String) -> bool) -> (Json, String) {
-    let everyone = bool_at(room.copy(), "everyone") ?? false
     var o = Obj.new()
     if let Json.Object(m) = room.copy() { o.m = m }
     if let name = str_at(args.copy(), "name") {
@@ -400,7 +396,6 @@ pub fn room_changed(room: Json, args: Json, all: List<String>, color_ok: fn(Stri
     }
     var members = ids_in(at(room.copy(), "members"))
     if at(args.copy(), "members") != Json.Null {
-        if everyone { return (Json.Null, String("not_allowed:Everyone has all your agents in it.")) }
         members = ids_in(at(args.copy(), "members"))
         for id in members.copy() {
             if not all.contains(id.copy()) { return (Json.Null, "not_found:There's no agent {id}.") }
@@ -414,8 +409,7 @@ pub fn room_changed(room: Json, args: Json, all: List<String>, color_ok: fn(Stri
         o.m.insert(String("color"), Json.Str(c))
     }
     if let default = str_at(args, "default") {
-        let in_it = if everyone { all.contains(default.copy()) } else { members.contains(default.copy()) }
-        if default.len() > 0 and not in_it { return (Json.Null, String("The default agent is one of the members.")) }
+        if default.len() > 0 and not members.contains(default.copy()) { return (Json.Null, String("The default agent is one of the members.")) }
         o.m.insert(String("default"), Json.Str(default))
     }
     // A default that has left the chat is passed over (`fallback`).
@@ -576,9 +570,6 @@ fn a_room_is_checked_as_it_s_made_and_changed() {
     assert(gone.starts_with("not_found:"))
     let (c, w) = room_changed(r, Obj.new().s("name", String("Bills")).j("members", ids_json([String("a_1"), String("a_7")])).done(), all.copy(), yes)
     assert(w.len() == 0 and str_at(c.copy(), "name") == some(String("Bills")))
-    let everyone = Obj.new().b("everyone", true).s("name", String(EVERYONE)).done()
-    let (_, no) = room_changed(everyone, Obj.new().j("members", ids_json([String("a_1"), String("a_5")])).done(), all, yes)
-    assert(no.starts_with("not_allowed:"))
 }
 
 // How many characters `s` has.

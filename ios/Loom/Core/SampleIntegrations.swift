@@ -11,7 +11,7 @@ struct SampleKept {
     var status: [String: String] = [:]
     var ticked: [String: Bool] = [:]
     /// Builder's chat follows the loom board and a T3 thread, whose lines it has; Scribe's
-    /// a card and a board it can't see any more; Everyone the loom board; and a routine
+    /// a card and a board it can't see any more; Daily the loom board; and a routine
     /// runs when a loom card moves to Done.
     var watches: [JSON] = [
         ["id": "w_1", "integration": "acta", "target": ["board": "aaen-studios/loom"], "conversation": "c_1"],

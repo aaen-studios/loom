@@ -7,7 +7,7 @@ module core.sidebar
 //
 //     [{"kind": "pinned", "agents": ["a_1"]},
 //      {"kind": "waiting", "agents": ["a_4"]},
-//      {"kind": "list", "items": [{"kind": "room", "id": "c_4", "name": "Everyone", "color": "", "everyone": true}, {"kind": "agent", "id": "a_2"}]},
+//      {"kind": "list", "items": [{"kind": "room", "id": "c_4", "name": "House", "color": "sky"}, {"kind": "agent", "id": "a_2"}]},
 //      {"kind": "group", "id": "g_1", "name": "Work", "collapsed": false, "items": [{"kind": "agent", "id": "a_3"}]},
 //      {"kind": "hidden", "agents": ["a_5"]},
 //      {"kind": "order", "items": ["a_1", "c_4", "a_2", "a_3", "a_4", "a_5"]}]
@@ -16,7 +16,7 @@ module core.sidebar
 // - `waiting`: every agent with a question open, hidden or in a folder too, but
 //   a pinned one, whose tile stays where it is.
 // - `list`: the agents and group chats that aren't in a folder, together, each
-//   item an agent or a group chat (with its `name`, `color` and `everyone`).
+//   item an agent or a group chat (with its `name` and `color`).
 // - `group`: one for each folder, in the order they were made, empty ones too,
 //   with its agents and group chats as `list` has them.
 // - `hidden`: the hidden agents.
@@ -26,8 +26,8 @@ module core.sidebar
 // Each agent and group chat is in one section but `order`. Within each, they're
 // in the person's order: pinned ones as they were dragged, then as they were
 // pinned; the rest as they were dragged (`order`), with what was never placed
-// as it was made: group chats over the rest, Everyone first, and agents under
-// it. All but `group` are always there, empty or not.
+// as it was made: group chats over the rest, and agents under them. All but
+// `group` are always there, empty or not.
 import std.json.{Json}
 import shared.obj.{Obj, at, bool_at, int_at, str_at}
 
@@ -53,12 +53,12 @@ struct Item {
 
 fn item_json(it: Item) -> Json {
     if not it.room { return Obj.new().s("kind", String("agent")).s("id", it.id.copy()).done() }
-    return Obj.new().s("kind", String("room")).s("id", it.id.copy()).s("name", str_at(it.of.copy(), "name") ?? String()).s("color", str_at(it.of.copy(), "color") ?? String()).b("everyone", bool_at(it.of.copy(), "everyone") ?? false).done()
+    return Obj.new().s("kind", String("room")).s("id", it.id.copy()).s("name", str_at(it.of.copy(), "name") ?? String()).s("color", str_at(it.of.copy(), "color") ?? String()).done()
 }
 
 /// The agents and group chats in the person's order: pinned agents first, as
 /// dragged and then as pinned; then the rest, group chats never placed first,
-/// Everyone at the top, then as they were placed, then agents never placed, as
+/// as they were made, then as they were placed, then agents never placed, as
 /// they were made.
 fn ordered(rooms: List<Json>, agents: List<Json>) -> List<Item> {
     var all = List<Item>()
@@ -66,8 +66,7 @@ fn ordered(rooms: List<Json>, agents: List<Json>) -> List<Item> {
     for c in rooms {
         let r = at(c.copy(), "room")
         let n = i64.wrap(all.len())
-        let everyone: i64 = if bool_at(r.copy(), "everyone") ?? false { 0 } else { 1 }
-        let key: (i64, i64, i64, i64) = if let o = int_at(r.copy(), "order") { (2, o, 0, n) } else { (1, everyone, 0, n) }
+        let key: (i64, i64, i64, i64) = if let o = int_at(r.copy(), "order") { (2, o, 0, n) } else { (1, 0, 0, n) }
         keys.push(key)
         all.push(Item { id: str_at(c, "id") ?? String(), of: r, room: true })
     }
@@ -223,21 +222,22 @@ fn pinned_ones_come_first_as_dragged_then_as_pinned() {
 fn group_chats_and_agents_are_one_list_in_the_persons_order() {
     let rooms: List<Json> = [
         chat("c_7", Obj.new().s("name", String("Money")).s("color", String("amber"))),
-        chat("c_4", Obj.new().s("name", String("Everyone")).b("everyone", true)),
+        chat("c_4", Obj.new().s("name", String("House"))),
     ]
-    // Never placed: the group chats over the agents, Everyone first.
+    // Never placed: the group chats over the agents, as they were made.
     let s = arrange(rooms.copy(), [agent("a_1").done(), agent("a_2").done()], List<Json>(), List<String>())
-    assert(in_section(s.copy(), "list") == [String("c_4"), String("c_7"), String("a_1"), String("a_2")])
+    assert(in_section(s.copy(), "list") == [String("c_7"), String("c_4"), String("a_1"), String("a_2")])
     let Json.Array(all) = s else return
     let Json.Array(items) = at(all[2].copy(), "items") else return
-    assert(str_at(items[0].copy(), "kind") == some(String("room")) and bool_at(items[0].copy(), "everyone") == some(true))
-    assert(str_at(items[1].copy(), "name") == some(String("Money")) and str_at(items[1].copy(), "color") == some(String("amber")))
+    assert(str_at(items[0].copy(), "name") == some(String("Money")) and str_at(items[0].copy(), "color") == some(String("amber")))
+    assert(str_at(items[1].copy(), "kind") == some(String("room")) and str_at(items[1].copy(), "name") == some(String("House")))
+    assert(at(items[1].copy(), "everyone") == Json.Null)
     assert(str_at(items[2].copy(), "kind") == some(String("agent")) and at(items[2].copy(), "name") == Json.Null)
 
     // Placed, they mix; what was never placed comes as above.
     let placed: List<Json> = [
         chat("c_7", Obj.new().s("name", String("Money")).i("order", 1)),
-        chat("c_4", Obj.new().s("name", String("Everyone")).b("everyone", true).i("order", 2)),
+        chat("c_4", Obj.new().s("name", String("House")).i("order", 2)),
         chat("c_9", Obj.new().s("name", String("New"))),
     ]
     let mixed = arrange(placed, [agent("a_1").i("order", 0).done(), agent("a_2").done(), agent("a_3").i("order", 3).done()], List<Json>(), List<String>())

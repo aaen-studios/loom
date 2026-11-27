@@ -83,12 +83,9 @@ pub(super) fn settings_groups() -> Vec<(Option<&'static str>, Vec<Page>)> {
 pub(super) fn page_kind(screen: Screen) -> crate::model::popup::Kind {
     use crate::model::popup::Kind;
     match screen {
-        Screen::Mcp
-        | Screen::Programs
-        | Screen::Skills
-        | Screen::Proposals
-        | Screen::Routines
-        | Screen::Installed => Kind::List,
+        Screen::Mcp | Screen::Skills | Screen::Proposals | Screen::Routines | Screen::Installed => {
+            Kind::List
+        }
         Screen::Emoji | Screen::Spools => Kind::Grid,
         _ => Kind::Column,
     }
@@ -107,7 +104,7 @@ fn page_words(screen: Screen) -> &'static str {
         }
         Screen::Programs => "brains models agent programs claude code codex gemini opencode acp registry install tokens limits share",
         Screen::Defaults => {
-            "defaults every agent brain backup model effort permission mode ask allow instructions busy queue steer group chats everyone router haiku"
+            "defaults every agent brain backup model effort permission mode ask allow instructions busy queue steer group chats router haiku"
         }
         Screen::Rules => {
             "rules allow deny ask what if permissions site path file folder command shell tool webhook routine"
@@ -583,11 +580,13 @@ mod tests {
         };
         assert_eq!(
             kinds(Kind::List),
-            ["Brains", "Skills", "Proposals", "MCP servers", "Routines"]
+            ["Skills", "Proposals", "MCP servers", "Routines"]
         );
         assert_eq!(kinds(Kind::Grid), ["Emoji", "Spools"]);
         assert!(kinds(Kind::Column).contains(&"Appearance"));
         assert_eq!(page_kind(Screen::Server), Kind::Column);
+        // Brains is one column, each brain opening in place.
+        assert_eq!(page_kind(Screen::Programs), Kind::Column);
         // Spools' Installed tab is a list.
         assert_eq!(page_kind(Screen::Installed), Kind::List);
     }

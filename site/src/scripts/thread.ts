@@ -401,8 +401,9 @@ export const threadOf = (svg: Element | null) => (svg ? threads.get(svg as SVGSV
 
 // ---------------------------------------------------------------------------------------------
 // The thread between loom's knot and an integration's logo on Spools' wide cards (thread.rs, tie
-// and span_drawn): slack, hanging and drifting, and dashed, until the integration is connected;
-// then pulled straight and whole, its dashes closing as it tightens, with one twang.
+// and span_drawn): slack, hanging and drifting, grey and dashed, until the integration is
+// connected; then pulled straight and whole in ink, its dashes closing as it tightens, with one
+// twang.
 
 /** How long a tie twangs once it's pulled straight, in seconds (thread.rs, TWANG). */
 const TWANG = 1.2;
@@ -419,14 +420,15 @@ export class Tie {
 	visible = true;
 	stale = true;
 
-	constructor(svg: SVGSVGElement, o: { h: number; color: string; taut: boolean }) {
+	constructor(svg: SVGSVGElement, o: { h: number; taut: boolean }) {
 		this.svg = svg;
 		this.h = o.h;
 		this.taut = o.taut;
 		svg.setAttribute('fill', 'none');
 		this.path = document.createElementNS(NS, 'path');
 		this.path.setAttribute('stroke-width', String(stroke.small));
-		this.path.style.stroke = `var(--thread-${o.color})`;
+		this.path.style.transition = 'stroke 0.3s';
+		this.ink();
 		svg.append(this.path);
 		// It runs across what room its card gives it, so it's measured whenever that changes.
 		const measure = () => {
@@ -445,7 +447,13 @@ export class Tie {
 		if (taut === this.taut) return;
 		this.taut = taut;
 		this.at = now();
+		this.ink();
 		loop.kick();
+	}
+
+	/** Grey while it's slack and ink once it's taut, as the rest of the app is black and white (spools.rs, spool_card). */
+	private ink() {
+		this.path.style.stroke = this.taut ? 'var(--ink)' : 'var(--ink-3)';
 	}
 
 	/** Slack, it drifts; pulled straight or let go, it moves until it settles. */
@@ -483,11 +491,11 @@ export class Tie {
 
 const ties = new WeakMap<SVGSVGElement, Tie>();
 
-/** Starts a tie in every `<svg data-tie>` under root: its colour from data-color, its height from its height attribute, and taut when data-taut is there. */
+/** Starts a tie in every `<svg data-tie>` under root: its height from its height attribute, and taut when data-taut is there. */
 export function tiesIn(root: ParentNode = document) {
 	for (const svg of root.querySelectorAll<SVGSVGElement>('svg[data-tie]')) {
 		if (ties.has(svg)) continue;
-		ties.set(svg, new Tie(svg, { h: Number(svg.getAttribute('height')) || 28, color: svg.dataset.color ?? 'grey', taut: svg.hasAttribute('data-taut') }));
+		ties.set(svg, new Tie(svg, { h: Number(svg.getAttribute('height')) || 28, taut: svg.hasAttribute('data-taut') }));
 	}
 }
 

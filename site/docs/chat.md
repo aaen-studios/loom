@@ -41,7 +41,7 @@ To try another way from some point without losing the chat, point at a message a
 
 ## Group chats
 
-A group chat is a chat with several of your agents in it, where loom picks which one answers each message. **Everyone** has all your agents in it, and is there once you have two. To make another, choose **+ New** at the end of the sidebar's list, then **New group chat**, name it, pick two or more agents, and a colour if you want one. On the iPhone, **+ New** is at the end of the agent list too.
+A group chat is a chat with several of your agents in it, where loom picks which one answers each message. To make one, choose **+ New** at the end of the sidebar's list, then **New group chat**, name it, pick two or more agents, and a colour if you want one. On the iPhone, **+ New** is at the end of the agent list too.
 
 You just write. One agent answers each message: the one your message is for, or the one that answered last while you stay on the same subject. A line over each answer says who answered and why, "→ Ledger · money question", in that agent's shape and colour. To pick yourself, mention an agent: "@Hermes any new mail?" goes to Hermes, and the line says "you asked".
 
@@ -49,7 +49,7 @@ If the wrong agent answered, click the line and pick another. Your message goes 
 
 Each answer is the agent's own, with its memory, tools and permissions. It sees what was said in the group chat since it last answered, by whom. Your chat with each agent stays as it was: nothing from a group chat goes into it, and a message pinned in a group chat is pinned there only.
 
-Click the group chat's name over the chat to change its name, members, colour, and who answers when loom can't tell, the agent you pick or the one that answered last. Its **Corrections** are the examples you made, newest first; the × by one forgets it. **Following** has what the group chat follows ([Following Acta and T3](#following-acta-and-t3)). **Usage** says how many tokens its agents' answers there used today and this month, and on its own line, how many loom's picking used. Everyone's members are always all your agents. Right-click a group chat in the sidebar to delete it; Everyone can't be deleted. On the iPhone, the people icon at the chat's top opens these, and swiping a correction left forgets it.
+Click the group chat's name over the chat to change its name, members, colour, and who answers when loom can't tell, the agent you pick or the one that answered last. Its **Corrections** are the examples you made, newest first; the × by one forgets it. **Following** has what the group chat follows ([Following Acta and T3](#following-acta-and-t3)). **Usage** says how many tokens its agents' answers there used today and this month, and on its own line, how many loom's picking used. Right-click a group chat in the sidebar to delete it. On the iPhone, the people icon at the chat's top opens these, and swiping a correction left forgets it.
 
 The picking is done by a small, fast model: Claude Haiku 5.5, unless you pick another in [Agent defaults](agents.md#agent-defaults). It's ready when you open the app or a group chat, so a message is picked for in about a second. What it reads to pick an agent is the agent's **What it's for** line ([Making an agent](agents.md#making-an-agent)), its skills and its MCP servers.
 
@@ -199,7 +199,7 @@ Each routine's **History**, on its page under **Routines**, says how every run e
 
 ## Following Acta and T3
 
-An agent can follow an Acta board, a card on one, or a T3 thread for you, and tell you in the chat when something happens there. Each change is a quiet line on the left: the board's purple tile, the card's pill with its dot in the colour of the status the line is about (where it moved to, for a move), and what happened and who, "moved to Done · Sam"; or for a thread, its strand and title and "Thread finished", the strand lying straight in green once it finished, sagging in red if it failed. Lines one after another sit close together. When the change wakes the agent, its reply comes after the line. On the iPhone the lines show the same way.
+An agent can follow an Acta board, a card on one, or a T3 thread for you, and tell you in the chat when something happens there. Each change is a quiet line on the left: Acta's mark, the card's pill with its dot in the colour of the status the line is about (where it moved to, for a move), and what happened and who, "moved to Done · Sam"; or for a thread, its strand and title and "Thread finished", the strand lying straight in green once it finished, sagging in red if it failed. Lines one after another sit close together. When the change wakes the agent, its reply comes after the line. On the iPhone the lines show the same way.
 
 What an agent or a group chat follows is under **Following** in its settings: each as its pill, with a red dot and why when loom couldn't look, and an × to stop following it. It shows only when there's something followed.
 
