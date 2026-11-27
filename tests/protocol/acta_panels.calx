@@ -5,8 +5,9 @@ module tests.protocol.acta_panels
 // Acta connected, the commands are refused. Once the person has it, acta.board
 // gives a board's labels and people, and acta.tasks its tasks: the open ones,
 // or those of the statuses asked for, by label. card.get gives a card's side
-// preview: its whole description, its subtasks and its last three comments.
-// card.update moves it and ticks its subtasks, as the person, and answers with
+// preview: its whole description, its subtasks, its comments, its activity and
+// its pull request with its checks. card.update moves it and ticks its
+// subtasks, and card.comment comments on it, as the person, each answering with
 // the card as it is now. card.create makes a card from a message: the message
 // keeps it in `made_cards` and `cards`, which comes with message.updated, and
 // it's looked up again as the message's other cards are. A card just moved is
@@ -82,7 +83,24 @@ fn run(i: Instance, fake: String) ! Error {
     let card = at(at(try app.cmd("q_11", "card.get", Obj.new().s("board", String(LOOM)).s("id", String("LOO-206")).done()), "value"), "card")
     try check(str_at(card.copy(), "description") == some(String("The plan's usage limits that Claude reports, as small rings under the agents, with when each resets.\n\nHover shows the numbers.")) and str_at(card.copy(), "board_name") == some(String("loom")), "card.get gives a card's whole description")
     try check("{at(card.copy(), "checklist")}" == #"[{"id":"s1","title":"Step 1","done":true},{"id":"s2","title":"Step 2","done":true},{"id":"s3","title":"Step 3","done":true},{"id":"s4","title":"Step 4","done":false},{"id":"s5","title":"Step 5","done":false}]"#, "its subtasks")
-    try check("{at(card.copy(), "comments")}" == #"[{"by":"Elliot","at":"2026-11-25T10:00:00Z","body":"Rings drawn, numbers next."},{"by":"Claude Code","at":"2026-11-25T10:00:00Z","body":"Numbers show on hover."},{"by":"Elliot","at":"2026-11-25T10:00:00Z","body":"Looks right. The 90% colour is next."}]"#, "and its last three comments, oldest first")
+    try check("{at(card.copy(), "comments")}" == #"[{"id":"c0","by":"Elliot","at":"2026-11-25T10:00:00Z","body":"Started on the rings."},{"id":"c1","by":"Elliot","at":"2026-11-25T10:00:00Z","body":"Rings drawn, numbers next."},{"id":"c2","by":"Claude Code","at":"2026-11-25T10:00:00Z","body":"Numbers show on hover."},{"id":"c3","by":"Elliot","at":"2026-11-25T10:00:00Z","body":"Looks right. The 90% colour is next."}]"#, "its comments, oldest first")
+    try check("{at(card.copy(), "pull_request")}" == #"{"number":"349","title":"Usage rings","state":"open","checks":"success","url":"https://github.com/aaen-studios/loom/pull/349"}"#, "its pull request with its checks")
+    try check("{at(card.copy(), "activity")}" == "[]" and at(card.copy(), "can_comment") == Json.Bool(true), "its activity, and that the person may comment")
+
+    // --- Commenting on it ---
+    let commented = at(at(try app.cmd("q_11b", "card.comment", Obj.new().s("board", String(LOOM)).s("id", String("LOO-206")).s("body", String(" Same on the iPhone. ")).done()), "value"), "card")
+    let after = match at(commented.copy(), "comments") {
+        Json.Array(cs) => cs.copy(),
+        _ => List<Json>(),
+    }
+    try check(after.len() == 5 and str_at(after[4].copy(), "body") == some(String("Same on the iPhone.")) and str_at(after[4].copy(), "by") == some(String("Elliot")), "card.comment posts a comment as the person, and answers with the card as it is now")
+    let said = match at(commented, "activity") {
+        Json.Array(xs) => xs.copy(),
+        _ => List<Json>(),
+    }
+    try check(said.len() == 1 and str_at(said[0].copy(), "text") == some(String("commented")), "whose activity says so")
+    let wordless = try app.cmd("q_11c", "card.comment", Obj.new().s("board", String(LOOM)).s("id", String("LOO-206")).s("body", String("  ")).done())
+    try check(code(wordless) == "bad_request", "a comment with no words is refused before Acta is asked")
     let gone = try app.cmd("q_12", "card.get", Obj.new().s("board", String(LOOM)).s("id", String("LOO-999")).done())
     try check(code(gone.copy()) == "mcp_failed" and str_at(at(gone, "error"), "message") == some(String("There's no task LOO-999 on that board.")), "a card that isn't there is refused in Acta's words")
 
