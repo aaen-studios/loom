@@ -23398,6 +23398,47 @@ fn badge_icon(sha: &str) -> Option<String> {
 /// How far a reply's sources tab hangs below its bubble, and how much of it is tucked
 /// under the bubble.
 const SOURCES_HANG: f32 = 19.0;
+
+/// A reply's steps lines, each as tall as this, so the one beside its agent's thread
+/// has its middle on the thread's middle.
+const STEP_ROW: f32 = 22.0;
+
+/// How tall a reply's thread is beside it (`reply`).
+const REPLY_THREAD: f32 = 10.0;
+
+/// Words with a band of light running over them, left to right, as the step a turn is
+/// on shows: `base` with `lit` at the band's middle.
+fn shimmer(id: String, words: String, base: Hsla, lit: Hsla) -> impl IntoElement {
+    let text = SharedString::from(words);
+    // Each rune's place, so a band's highlight never splits one.
+    let runes: Vec<std::ops::Range<usize>> = text
+        .char_indices()
+        .map(|(i, c)| i..i + c.len_utf8())
+        .collect();
+    StyledText::new(text).with_animation(
+        SharedString::from(id),
+        Animation::new(Duration::from_millis(1800))
+            .repeat()
+            .with_max_fps(30.0),
+        move |el, k| {
+            const BAND: f32 = 6.0;
+            let at = k * (runes.len() as f32 + 2.0 * BAND) - BAND;
+            let lit_runes = runes.iter().enumerate().filter_map(|(i, r)| {
+                let near = 1.0 - (i as f32 - at).abs() / BAND;
+                (near > 0.0).then(|| {
+                    (
+                        r.clone(),
+                        HighlightStyle {
+                            color: Some(motion::mix(base, lit, near)),
+                            ..Default::default()
+                        },
+                    )
+                })
+            });
+            el.with_highlights(lit_runes.collect::<Vec<_>>())
+        },
+    )
+}
 const SOURCES_TUCK: f32 = 7.0;
 
 /// The sources tab's colours: a shade lighter than the bubble, its edge, and a shade
@@ -24798,6 +24839,9 @@ impl ReplyDraw<'_> {
                 parts,
             } => self.fold(words, *working, parts),
             Part::Quiet(words) => div()
+                .h(px(STEP_ROW))
+                .flex()
+                .items_center()
                 .text_size(px(size::SMALL))
                 .text_color(self.p.ink_3)
                 .truncate()
@@ -25116,10 +25160,9 @@ impl ReplyDraw<'_> {
                     .iter()
                     .filter(|b| matches!(status(b).as_deref(), Some("failed" | "denied")))
                     .count();
-                let title = |b: &model::Block| model::tool_title(b.call.as_ref(), tools);
                 let words = match running {
-                    Some(b) => format!("{}…", title(b)),
-                    None if blocks.len() == 1 => format!("Used {}", title(blocks[0])),
+                    Some(b) => format!("{}…", model::tool_doing(b.call.as_ref(), tools)),
+                    None if blocks.len() == 1 => model::tool_did(blocks[0].call.as_ref(), tools),
                     None => format!("Used {} tools", blocks.len()),
                 };
                 let this = self.this.clone();
@@ -25221,7 +25264,8 @@ impl ReplyDraw<'_> {
     }
 
     /// The turn's steps under one quiet line, which opens to show them: while it runs,
-    /// the step it's on, and once it's done, how many there were.
+    /// the step it's on in plain words, shimmering, with its number; and once it's done,
+    /// how many it took. Opened, each call is a line of what it did.
     fn fold(&self, words: &str, working: bool, parts: &[model::Part]) -> AnyElement {
         let p = self.p;
         let key = format!("steps/{}", self.m.id);
@@ -25229,42 +25273,148 @@ impl ReplyDraw<'_> {
         let opened = can_open && self.open.contains(&key);
         let this = self.this.clone();
         let k = key.clone();
-        let line = div()
+        let mut line = div()
             .id(SharedString::from(format!("s-{}", self.m.id)))
+            .h(px(STEP_ROW))
             .flex()
             .items_center()
             .gap(px(space::S))
             .min_w_0()
             .text_size(px(size::SMALL))
-            .text_color(p.ink_3)
+            .text_color(p.ink_2)
             .when(can_open, |d| {
-                d.cursor_pointer()
-                    .soft_ink(p.ink_3, p.ink)
-                    .child(if opened { "⌄" } else { "›" })
-                    .on_click(move |_, _, cx| {
-                        let _ = this.update(cx, |loom, cx| loom.toggle_thought(k.clone(), cx));
-                    })
-            })
-            .child(div().min_w_0().truncate().child(words.to_string()))
-            .when(working && !words.ends_with('…'), |d| d.child("…"));
-        let mut out = div().flex().flex_col().gap(px(space::S)).child(line);
+                d.cursor_pointer().on_click(move |_, _, cx| {
+                    let _ = this.update(cx, |loom, cx| loom.toggle_thought(k.clone(), cx));
+                })
+            });
+        if working {
+            let words = if words.ends_with('…') {
+                words.to_string()
+            } else {
+                format!("{}…", words.trim_end_matches(['.', ':']))
+            };
+            line = line
+                .child(div().min_w_0().truncate().child(shimmer(
+                    format!("shine-{}", self.m.id),
+                    words,
+                    p.ink_2,
+                    p.ink,
+                )))
+                .when(can_open, |d| {
+                    d.child(
+                        div()
+                            .flex_none()
+                            .text_color(p.ink_3)
+                            .child(format!("step {}", model::step_count(parts))),
+                    )
+                });
+        } else {
+            line = line
+                .soft_ink(p.ink_2, p.ink)
+                .child(div().min_w_0().truncate().child(words.to_string()))
+                .when(can_open, |d| {
+                    d.child(div().flex_none().text_color(p.ink_3).child(if opened {
+                        "⌄"
+                    } else {
+                        "›"
+                    }))
+                });
+        }
+        let mut out = div().flex().flex_col().gap(px(space::XS)).child(line);
         if opened {
             let mut list = div()
                 .flex()
                 .flex_col()
-                .gap(px(space::S))
+                .gap(px(space::XS))
                 .pl(px(space::M))
                 .border_l_1()
                 .border_color(p.line_strong);
             for part in parts {
                 list = list.child(match part {
                     model::Part::Bubbles(run) => self.said_on_the_way(run),
+                    // A line a call, whether the person folds runs of them or not: the
+                    // turn's fold already folds them.
+                    model::Part::Tools(run) => {
+                        let mut rows = div().flex().flex_col();
+                        for &i in run {
+                            rows = rows.child(self.step_row(i));
+                        }
+                        rows.into_any_element()
+                    }
                     _ => self.part(part),
                 });
             }
             out = out.child(list);
         }
         out.into_any_element()
+    }
+
+    /// A call among a turn's steps, in a line: what it did in plain words and how it went,
+    /// with its tool's name quiet on the right. A click opens the call as the chat draws
+    /// it, with what it ran.
+    fn step_row(&self, i: usize) -> AnyElement {
+        let p = self.p;
+        let b = &self.m.blocks[i];
+        let t = b.call.as_ref().and_then(|c| self.tools.get(c));
+        let went = t.map(|t| model::tool_went(t, self.m.live));
+        let words = match went {
+            Some(model::Went::Running) => {
+                format!("{}…", model::tool_doing(b.call.as_ref(), self.tools))
+            }
+            _ => model::tool_did(b.call.as_ref(), self.tools),
+        };
+        let (mark, color) = match went {
+            Some(model::Went::Done) => ("✓", p.ok),
+            Some(model::Went::Failed) => ("✕", p.bad),
+            Some(model::Went::Denied) => ("denied", p.bad),
+            Some(model::Went::Stopped) => ("stopped", p.ink_3),
+            _ => ("", p.ink_3),
+        };
+        let name = t.map(|t| t.name.clone()).unwrap_or_default();
+        let key = format!("step/{}", self.key(i));
+        let opened = self.open.contains(&key);
+        let this = self.this.clone();
+        let row = div()
+            .id(SharedString::from(format!("r-{}", self.key(i))))
+            .h(px(STEP_ROW))
+            .flex()
+            .items_center()
+            .gap(px(space::S))
+            .text_size(px(size::SMALL))
+            .cursor_pointer()
+            .soft_ink(p.ink_2, p.ink)
+            .child(div().min_w_0().truncate().child(words))
+            .child(div().flex_none().text_color(color).child(mark))
+            .child(div().flex_1())
+            .when(!name.is_empty(), |d| {
+                d.child(
+                    div()
+                        .flex_none()
+                        .max_w(px(160.0))
+                        .truncate()
+                        .font_family(crate::prefs::mono_font())
+                        .text_size(px(size::CAPTION))
+                        .text_color(p.ink_3)
+                        .child(name),
+                )
+            })
+            .on_click(move |_, _, cx| {
+                let _ = this.update(cx, |loom, cx| loom.toggle_thought(key.clone(), cx));
+            });
+        if !opened {
+            return row.into_any_element();
+        }
+        div()
+            .flex()
+            .flex_col()
+            .child(row)
+            .child(
+                div()
+                    .pl(px(space::M))
+                    .pb(px(space::XS))
+                    .child(self.tool_entry(i)),
+            )
+            .into_any_element()
     }
 
     /// Words the agent wrote on its way to the answer, among the steps: smaller and quieter
@@ -25575,13 +25725,18 @@ fn reply(
     {
         body = body.child(under);
     }
-    // Its thread beside the name, or else level with the first line of words, plain or
-    // in a bubble.
-    let first_line = (size::REPLY * show.text_scale * line::REPLY - 10.0) / 2.0;
-    let thread_at = match (head, show.bubbles) {
-        (true, _) => 4.0,
-        (false, true) => 16.0,
-        (false, false) => first_line,
+    // Its thread beside the name, or else its middle on the middle of the steps line or
+    // the first line of words, plain or in a bubble.
+    let first_line = (size::REPLY * show.text_scale * line::REPLY - REPLY_THREAD) / 2.0;
+    let steps_first = matches!(
+        parts.first(),
+        Some(model::Part::Fold { .. } | model::Part::Quiet(_))
+    );
+    let thread_at = match (head, steps_first, show.bubbles) {
+        (true, _, _) => 4.0,
+        (false, true, _) => (STEP_ROW - REPLY_THREAD) / 2.0,
+        (false, false, true) => 16.0,
+        (false, false, false) => first_line,
     };
     div()
         .w_full()
@@ -25592,7 +25747,7 @@ fn reply(
             mood,
             tint,
             14.0,
-            10.0,
+            REPLY_THREAD,
             None,
         )))
         .child(body)
@@ -28114,6 +28269,7 @@ mod row_tests {
             status: status.map(String::from),
             block: None,
             parent: None,
+            ..model::Tool::default()
         }
     }
 

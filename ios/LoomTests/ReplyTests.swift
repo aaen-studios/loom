@@ -24,19 +24,19 @@ import Testing
     @Test func itsStepsFoldUnderOneLineAndItsAnswerIsLast() {
         let m = reply([.text("thought", "Which run?"), tool("t_1"), .text("text", "Checking the run."), tool("t_2"), .text("text", "It passed.")])
         #expect(parts(m, tools: []) == [
-            .fold(words: "4 steps", working: false, parts: [.block(0), .tools([1]), .words([2]), .tools([3])]),
+            .fold(words: "Took 4 steps", working: false, parts: [.block(0), .tools([1]), .words([2]), .tools([3])]),
             .words([4]),
         ])
     }
 
     @Test func oneStepIsSaidSo() {
         let m = reply([tool("t_1"), .text("text", "Done.")])
-        #expect(parts(m, tools: []) == [.fold(words: "1 step", working: false, parts: [.tools([0])]), .words([1])])
+        #expect(parts(m, tools: []) == [.fold(words: "Took 1 step", working: false, parts: [.tools([0])]), .words([1])])
     }
 
     @Test func wordsThatAskStayInView() {
         let m = reply([.text("text", "Shall I tag it?"), tool("t_1"), .text("text", "Tagged.")])
-        #expect(parts(m, tools: []) == [.fold(words: "1 step", working: false, parts: [.tools([1])]), .words([0, 2])])
+        #expect(parts(m, tools: []) == [.fold(words: "Took 1 step", working: false, parts: [.tools([1])]), .words([0, 2])])
     }
 
     @Test func whileItWorksTheLineIsTheStepItsOn() {
@@ -46,6 +46,19 @@ import Testing
         let calling = reply([.text("text", "Let me check."), tool("t_1")], live: true)
         let tools = [Tool(call: "t_1", run: "r_1", title: "Check the last run", status: nil)]
         #expect(parts(calling, tools: tools) == [.fold(words: "Check the last run…", working: true, parts: [.words([0]), .tools([1])])])
+    }
+
+    @Test func stepsSayWhatTheyDoInPlainWords() {
+        let worded = Tool(call: "t_1", run: "r_1", title: "Run on example-vps: tailscale serve --https=8444", status: nil, name: "run_command", doing: "Turning on HTTPS for port 8444", did: "Turned on HTTPS for port 8444", said: true)
+        // While it runs, the line is what the call is doing, and the words it was made of
+        // aren't a step of their own.
+        let running = reply([.text("text", "Let me turn on HTTPS for port 8444."), tool("t_1")], live: true)
+        #expect(parts(running, tools: [worded]) == [.fold(words: "Turning on HTTPS for port 8444…", working: true, parts: [.tools([1])])])
+        let done = reply([.text("text", "Let me turn on HTTPS for port 8444."), tool("t_1"), .text("text", "Done.")])
+        #expect(parts(done, tools: [worded]) == [.fold(words: "Took 1 step", working: false, parts: [.tools([1])]), .words([2])])
+        #expect(stepCount([.words([0]), .tools([1, 2])]) == 3)
+        #expect(worded.didWords == "Turned on HTTPS for port 8444")
+        #expect(Tool(call: "t_2", run: "r_1", title: "ls", status: nil).didWords == "ls")
     }
 
     @Test func aTurnCutShortKeepsAllInView() {
@@ -58,7 +71,7 @@ import Testing
         inside.parent = "t_1"
         let m = reply([tool("t_1"), inside, .text("text", "Done.")])
         #expect(insideACall(m) == [false, true, false])
-        #expect(parts(m, tools: []) == [.fold(words: "1 step", working: false, parts: [.tools([0])]), .words([2])])
+        #expect(parts(m, tools: []) == [.fold(words: "Took 1 step", working: false, parts: [.tools([0])]), .words([2])])
     }
 
     @Test func picturesTogetherAreOneFan() {

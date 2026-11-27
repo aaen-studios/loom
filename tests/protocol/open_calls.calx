@@ -91,7 +91,7 @@ fn before_restart(i: Instance) -> (String, i64) ! Error {
     let at_close = int_at(closed, "seq") ?? -1
     try check(at_close > 0 and at_close < reply_seq(app) and at_close < seq_of(app, "run.finished", String()), "before the reply is kept and run.finished")
     try check(has_call(reply.copy(), call.copy()) and reply_text(reply) == "Watched it.", "the kept reply keeps the call, with its words")
-    try check(try calls_of(app, call.copy()) == "[\{\"call\":\"{call}\",\"run\":\"{str_at(started.copy(), "run") ?? String()}\",\"title\":\"Watch the build\",\"status\":\"cancelled\",\"block\":0\}]", "and a core's calls have it ended")
+    try check(try calls_of(app, call.copy()) == "[\{\"call\":\"{call}\",\"run\":\"{str_at(started.copy(), "run") ?? String()}\",\"title\":\"Watch the build\",\"status\":\"cancelled\",\"block\":0,\"name\":\"Bash\",\"doing\":\"Watching the build\",\"did\":\"Watched the build\"\}]", "and a core's calls have it ended")
     let listed = try app.cmd("q_3", "messages.list", Obj.new().s("conversation", chat.copy()).done())
     var kept = Json.Null
     if let Json.Array(ms) = at(at(listed, "value"), "messages") {

@@ -930,7 +930,16 @@ export function play(app: HTMLElement) {
 
 	// The scenes: in each chat, the person's message and the reply, who answers it, and the
 	// sidebar's thread that works while it does; in Moss's, its T3 thread's card.
-	type Scene = { chat: Chat; by: string; ask: HTMLElement; reply: HTMLElement; words: ReturnType<typeof writing>; thread?: Thread; t3: HTMLElement | null };
+	type Scene = {
+		chat: Chat;
+		by: string;
+		ask: HTMLElement;
+		reply: HTMLElement;
+		words: ReturnType<typeof writing>;
+		thread?: Thread;
+		t3: HTMLElement | null;
+		steps: HTMLElement | null;
+	};
 	const scenes: Scene[] = (['juniper', 'shop', 'moss'] as const).map((c) => {
 		const ask = lists[c].querySelector<HTMLElement>('[data-scene="ask"]')!;
 		const reply = lists[c].querySelector<HTMLElement>('[data-scene="reply"]')!;
@@ -942,8 +951,36 @@ export function play(app: HTMLElement) {
 			words: writing(reply.querySelector<HTMLElement>('.said')!),
 			thread: threadOf(reply.querySelector('.reply-thread')),
 			t3: reply.querySelector<HTMLElement>('.t3'),
+			steps: reply.querySelector<HTMLElement>('[data-steps]'),
 		};
 	});
+	/** A reply's steps as its line shows them: the `n`th going now in plain words, shimmering,
+	 * with its number; or, with none, done, "Took N steps", which opens. */
+	const stepsAt = (at: HTMLElement, n?: number) => {
+		const all = [...at.querySelectorAll<HTMLElement>('.step')];
+		const line = at.querySelector<HTMLElement>('[data-steps-line]')!;
+		at.classList.toggle('working', n !== undefined);
+		at.querySelector('[data-steps-words]')!.textContent =
+			n === undefined ? `Took ${all.length} steps` : `${all[n - 1].dataset.doing}…`;
+		at.querySelector('[data-steps-count]')!.textContent = n === undefined ? '' : `step ${n}`;
+		line.setAttribute('aria-expanded', 'false');
+		at.querySelector<HTMLElement>('[data-steps-list]')!.hidden = true;
+	};
+	for (const s of scenes) {
+		const at = s.steps;
+		if (!at) continue;
+		const line = at.querySelector<HTMLElement>('[data-steps-line]')!;
+		const list = at.querySelector<HTMLElement>('[data-steps-list]')!;
+		line.addEventListener('click', () => {
+			if (at.classList.contains('working')) return;
+			list.hidden = !list.hidden;
+			line.setAttribute('aria-expanded', String(!list.hidden));
+		});
+		for (const step of at.querySelectorAll<HTMLElement>('.step')) {
+			const call = step.querySelector<HTMLElement>('.step-call')!;
+			step.querySelector('.step-line')!.addEventListener('click', () => (call.hidden = !call.hidden));
+		}
+	}
 	/** Moss's T3 thread as its card shows it: working, its strand waving in sky, the minutes it
 	 * has run at its title's end and its latest step under it; or, with no step, done, straight
 	 * in the ok colour with its pull request. */
@@ -966,6 +1003,10 @@ export function play(app: HTMLElement) {
 		s.thread?.set('idle');
 		preview(s.by, '', 'idle');
 		if (s.chat === 'shop') fills.shop = BISCUIT_FILL;
+		if (s.steps) {
+			stepsAt(s.steps);
+			s.reply.querySelector<HTMLElement>('.said')!.hidden = false;
+		}
 		if (s.t3) {
 			s.t3.hidden = false;
 			t3(s.t3, T3_STEPS.length + 1);
@@ -1013,6 +1054,23 @@ export function play(app: HTMLElement) {
 		};
 		work('thinking', 'Thinking');
 		await wait(1300, id);
+		// Its steps, one at a time, each the line under its name while it goes, and in the
+		// sidebar after its name; then they fold to how many it took.
+		if (s.steps) {
+			const all = s.steps.querySelectorAll<HTMLElement>('.step');
+			// Its words' bubble waits for its words.
+			const said = s.reply.querySelector<HTMLElement>('.said')!;
+			said.hidden = true;
+			send(s.reply);
+			s.thread?.set('tool');
+			for (const [i, step] of all.entries()) {
+				stepsAt(s.steps, i + 1);
+				work('tool', step.dataset.doing!);
+				await wait(1600, id);
+			}
+			stepsAt(s.steps);
+			said.hidden = false;
+		}
 		work('writing', '');
 		send(s.reply);
 		s.thread?.set('writing');

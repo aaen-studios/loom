@@ -1,0 +1,467 @@
+module server.steps
+
+// A tool call in plain words (PLAN.md, "One answer at the end"): what it's
+// doing, for the line a turn shows while it works ("Checking the VPS's
+// Tailscale setup"), and what it did, for the list its steps fold to once it's
+// done ("Checked the VPS's Tailscale setup"). The words come from the agent's
+// own sentence just before the call, where it said what it's about to do, or
+// else from the call's title when that says what it does, or a template for
+// the tool. No model is asked, so they cost nothing and keep nothing waiting.
+import std.json.{Json}
+import shared.obj.{Obj, str_at}
+
+pub struct Words {
+    pub doing: String
+    pub did: String
+    // Whether they came from the agent's words before the call, and those were
+    // the one sentence that said so: the apps leave those words out of the steps,
+    // since the step says them.
+    pub said: bool
+}
+
+// The most bytes of a step's words, cut at a word with "…".
+const MOST: usize = 80
+
+// Words that open a sentence and say nothing of what's done: "Now, let me…".
+const FILLERS: str = "now|first|next|then|ok|okay|alright|all right|great|good|perfect|so|and|finally|also|right|sure|got it|i see|done|nice"
+// What the agent says just before the step it's about to take.
+const INTENTS: str = "let me|i'll|i’ll|i will|i'm going to|i’m going to|i am going to|i'm gonna|i need to|i want to|i'd like to|let's|let’s|going to|time to|i should|we'll|we need to|i can now|i can"
+// Words between the intent and the step: "Let me quickly check…".
+const ADVERBS: str = "now|first|quickly|also|just|go ahead and|then|next|actually"
+// Where the step it names ends and the next begins: "check X and then Y".
+const THEN: str = " and then | then |, then |; |, and | and also "
+// Verbs that follow an intent but aren't a step.
+const NOT_STEPS: str = "know|be|have|do|try|summarize|explain|answer|reply|respond"
+
+// Verbs a title starts with when it says what the call does ("Read notes.md").
+const VERBS: str = "add apply archive ask build bump call capture change check choose clean clear click clone close commit compare compile configure connect convert copy count create delete deploy describe diff disable download draw edit enable explore export extract fetch fill find fix format generate get go grep hold import inspect install kill launch list load log look make mark measure merge message move navigate note open parse pick pin ping post prepare print probe pull push query read rebase record remove rename render replace reply reset resolve restart restore revert review rewrite run save scan schedule scroll search see select send set show sign sort start stop submit summarize switch take test think trace try turn type undo unzip update upload use validate verify view visit wait watch write zip"
+
+// Verbs whose last letter doubles before -ing and -ed, beyond those the rule finds.
+const DOUBLED: str = "commit submit begin rerun unzip refer permit omit forget upset reset admit regret control quit"
+
+// Past tenses that don't end in -ed.
+const PAST: str = "be:was begin:began bring:brought build:built buy:bought catch:caught choose:chose come:came cut:cut dig:dug do:did draw:drew feed:fed feel:felt find:found forget:forgot get:got give:gave go:went hang:hung have:had hear:heard hide:hid hit:hit hold:held keep:kept know:knew lay:laid lead:led leave:left let:let lose:lost make:made mean:meant meet:met pay:paid put:put read:read rebuild:rebuilt redo:redid rerun:reran reset:reset rewrite:rewrote run:ran say:said see:saw seek:sought sell:sold send:sent set:set shut:shut sit:sat speak:spoke spend:spent split:split stand:stood stick:stuck take:took teach:taught tell:told think:thought throw:threw understand:understood undo:undid upset:upset win:won write:wrote"
+
+// Templates for tools with names that say little: loom's own, Acta's, T3's
+// and the agent programs' built-in ones, by name.
+const TEMPLATES: str = "run_code:Run a script|search_tools:Look for a tool|use_device:Use a device|list_devices:List the devices|run_command:Run a command|screenshot:Take a screenshot|read_clipboard:Read the clipboard|write_clipboard:Copy to the clipboard|show_card:Show a card|message_agent:Message another agent|propose_note:Note something to remember|skill_failed:Note a skill that failed|fix_skill:Fix a skill|attach_files:Attach files|install_loom:Install loom|create_tasks:Make an Acta card|create_task:Make an Acta card|update_task:Update an Acta card|update_tasks:Update Acta cards|get_task:Read an Acta card|list_tasks:Look at the Acta board|search_tasks:Search Acta|add_comment:Comment on an Acta card|edit_comment:Edit a comment on Acta|get_board:Look at the Acta board|list_boards:List the Acta boards|t3_thread_launch:Start a T3 thread|create_threads:Start T3 threads|t3_thread_send:Message a T3 thread|t3_thread_read:Read a T3 thread|t3_thread_list:List the T3 threads|delegate_task:Hand a task to another agent|WebSearch:Search the web|WebFetch:Read a web page|Grep:Search the files|Glob:Look for files|TodoWrite:Update the plan|NotebookEdit:Edit a notebook|Bash:Run a command|Read:Read a file|Write:Write a file|Edit:Edit a file|Task:Hand work to a subagent|Agent:Hand work to a subagent"
+
+// The words for a tool call: `said` is the agent's words just before it (""
+// for none), `title` its title, `name` the tool's name ("" for none), `kind`
+// its kind (`read`, `execute`…), and `input` its arguments.
+pub fn words(said: String, title: String, name: String, kind: String, input: Json) -> Words {
+    if let w = from_said(said.copy()) {
+        var out = w
+        out.said = one_sentence(said)
+        return out
+    }
+    return conjugated(imperative(title, name, kind, input))
+}
+
+// The tool's name to show beside its step: as its program names it, or else
+// the tool part of an MCP tool's title ("mcp__loom__use_device", "loom:
+// use_device"), or "".
+pub fn name_of(title: String, named: String) -> String {
+    if named.len() > 0 {
+        if let (_, tool) = mcp_parts(named.copy()) { return tool }
+        return named.copy()
+    }
+    let (_, tool) = mcp_parts(title) else return String()
+    return tool
+}
+
+// An MCP tool's server and tool, from a title as agent programs make them:
+// "mcp__acta__get_task", "acta: get_task" or "acta - get_task (MCP)".
+fn mcp_parts(title: String) -> (String, String)? {
+    var t = title.trim().copy()
+    if t.starts_with("mcp__") {
+        let (server, tool) = t[5..].split_once("__") else return none
+        if server.len() > 0 and tool.len() > 0 and not tool.contains(" ") { return some((server.copy(), tool.copy())) }
+        return none
+    }
+    t = t.trim_suffix(" (MCP)").trim().copy()
+    for sep in [": ", " - "] {
+        if let (server, named) = t.split_once(sep) {
+            let tool = named.trim()
+            if server.len() > 0 and not server.contains(" ") and tool.len() > 0 and not tool.contains(" ") and (tool.contains("_") or tool.to_lower_root() == tool) {
+                return some((server.trim().copy(), tool.copy()))
+            }
+        }
+    }
+    return none
+}
+
+// Whether `s` starts with `w`, by ASCII letters in any case, and then a break:
+// its end, a space or a comma.
+fn opens_with(s: String, w: String) -> bool {
+    if s.len() < w.len() { return false }
+    for i in 0..w.len() {
+        var b = s.byte_at(i)
+        if b >= 65 and b <= 90 { b += 32 }
+        if b != w.byte_at(i) { return false }
+    }
+    if s.len() == w.len() { return true }
+    let next = s.byte_at(w.len())
+    return next == 32 or next == 44 or next == 46 or next == 33 or next == 58
+}
+
+// `s` without its opening `w` and the spaces and marks after it.
+fn after(s: String, w: String) -> String {
+    var rest = s[w.len()..].copy()
+    while rest.len() > 0 {
+        let b = rest.byte_at(0)
+        if b == 32 or b == 44 or b == 46 or b == 33 or b == 58 {
+            rest = rest[1..].copy()
+        } else {
+            break
+        }
+    }
+    return rest
+}
+
+// The last sentence of `said`: of its last line with words, the part after
+// the last stop.
+fn last_sentence(said: String) -> String {
+    var line = String()
+    for l in said.lines() {
+        let t = l.trim()
+        if t.len() > 0 { line = t.copy() }
+    }
+    // Marks that aren't words.
+    line = line.replace("**", "").replace("`", "").replace("__", "")
+    var body = line.trim_end().copy()
+    while body.ends_with(".") or body.ends_with(":") or body.ends_with("!") or body.ends_with("…") or body.ends_with(",") {
+        body = if body.ends_with("…") { body[..body.len() - 3].copy() } else { body[..body.len() - 1].copy() }
+    }
+    var start: usize = 0
+    for stop in [". ", "! ", "? ", ": "] {
+        if let at = body.find_last(stop) {
+            if at + stop.len() > start { start = at + stop.len() }
+        }
+    }
+    return body[start..].trim().copy()
+}
+
+// Whether `said` is one sentence on one line, so the step's words say all of it.
+fn one_sentence(said: String) -> bool {
+    var lines = 0
+    for l in said.lines() {
+        if l.trim().len() > 0 { lines += 1 }
+    }
+    if lines != 1 { return false }
+    let s = last_sentence(said.copy())
+    return s.len() > 0 and said.trim().replace("**", "").replace("`", "").replace("__", "").starts_with(s.copy())
+}
+
+// The words from the agent's own sentence, where it said what it's about to
+// do: "Now let me check the VPS's Tailscale setup." is "Checking the VPS's
+// Tailscale setup", or "I'm checking…" as it is. None where it said no such
+// thing, or asked something.
+fn from_said(said: String) -> Words? {
+    if said.trim().ends_with("?") { return none }
+    var s = last_sentence(said)
+    // Its openers, "Now," "OK, so".
+    var going = true
+    while going {
+        going = false
+        for f in FILLERS.split("|") {
+            if s.len() > f.len() and opens_with(s.copy(), f) {
+                s = after(s.copy(), f)
+                going = true
+                break
+            }
+        }
+    }
+    // "I'm checking…" says the step as it is.
+    for be in ["i'm ", "i’m ", "i am ", "we're ", "now "] {
+        if opens_with(s.copy(), be.trim()) {
+            let rest = after(s.copy(), be.trim())
+            let (verb, tail) = rest.split_once(" ") ?? (rest.copy(), String())
+            if verb.ends_with("ing") and tail.len() > 0 {
+                if let base = from_ing(verb.to_lower_root()) {
+                    return some(both(base, step_end(tail.copy())))
+                }
+            }
+        }
+    }
+    var found = false
+    for intent in INTENTS.split("|") {
+        if opens_with(s.copy(), intent) {
+            s = after(s.copy(), intent)
+            found = true
+            break
+        }
+    }
+    if not found { return none }
+    going = true
+    while going {
+        going = false
+        for a in ADVERBS.split("|") {
+            if s.len() > a.len() and opens_with(s.copy(), a) {
+                s = after(s.copy(), a)
+                going = true
+                break
+            }
+        }
+    }
+    let (verb, tail) = s.split_once(" ") else return none
+    let low = verb.to_lower_root()
+    if not letters(low.copy()) or low.len() < 2 { return none }
+    for no in NOT_STEPS.split("|") {
+        if low == no { return none }
+    }
+    let step = step_end(tail.copy())
+    if step.len() == 0 { return none }
+    return some(both(low, step))
+}
+
+// The step's words up to where another begins: "check X and then Y" is "check X".
+fn step_end(tail: String) -> String {
+    var end = tail.len()
+    for t in THEN.split("|") {
+        if let at = tail.find(t) {
+            if at < end { end = at }
+        }
+    }
+    return tail[..end].trim().copy()
+}
+
+// Whether `word` is only ASCII letters.
+fn letters(word: String) -> bool {
+    for b in word.to_bytes() {
+        if not ((b >= 97 and b <= 122) or (b >= 65 and b <= 90)) { return false }
+    }
+    return word.len() > 0
+}
+
+// The call as an order, verb first: its title where that starts with a verb,
+// or a template for its tool, or for its kind.
+fn imperative(title: String, name: String, kind: String, input: Json) -> String {
+    let t = title.trim()
+    let tool = name_of(title.copy(), name.copy())
+    let server = if let (s, _) = mcp_parts(title.copy()) { s } else if let (s, _) = mcp_parts(name.copy()) { s } else { String() }
+    // A web search says what it looks for.
+    if tool == "WebSearch" {
+        if let q = str_at(input.copy(), "query") { return "Search the web for {q}" }
+    }
+    // The title, where it says what's done, unless it's only the tool's name.
+    let (first, _) = t.split_once(" ") ?? (t.copy(), String())
+    if server.len() == 0 and is_verb(first.to_lower_root()) and t != tool { return t.copy() }
+    if let w = template(tool.copy()) { return w }
+    // An MCP tool named verb first: get_board is "Get board".
+    if tool.len() > 0 {
+        let spoken = tool.replace("_", " ").trim().copy()
+        let (verb, _) = spoken.split_once(" ") ?? (spoken.copy(), String())
+        if is_verb(verb.to_lower_root()) and spoken.contains(" ") { return spoken }
+        if server.len() > 0 { return "Use {server}" }
+    }
+    if kind == "read" { return String("Read a file") }
+    if kind == "edit" { return String("Edit a file") }
+    if kind == "delete" { return String("Delete a file") }
+    if kind == "move" { return String("Move a file") }
+    if kind == "search" { return String("Search the files") }
+    if kind == "execute" { return String("Run a command") }
+    if kind == "fetch" { return String("Read a web page") }
+    if kind == "think" { return String("Think") }
+    return String("Use a tool")
+}
+
+fn template(tool: String) -> String? {
+    if tool.len() == 0 { return none }
+    for entry in TEMPLATES.split("|") {
+        if let (name, said) = entry.split_once(":") {
+            if name == tool { return some(said.copy()) }
+        }
+    }
+    return none
+}
+
+fn is_verb(word: String) -> bool {
+    for v in VERBS.split(" ") {
+        if v == word { return true }
+    }
+    return false
+}
+
+// An order as both tenses: "Check the setup" is "Checking the setup" and
+// "Checked the setup".
+fn conjugated(order: String) -> Words {
+    let o = order.trim()
+    let (verb, tail) = o.split_once(" ") ?? (o.copy(), String())
+    let v = verb.to_lower_root()
+    if not letters(v.copy()) { return Words { doing: cut(o.copy()), did: cut(o.copy()), said: false } }
+    return both(v, tail.copy())
+}
+
+fn both(verb: String, tail: String) -> Words {
+    let rest = if tail.len() > 0 { " {tail}" } else { String() }
+    return Words { doing: cut("{capital(ing(verb.copy()))}{rest}"), did: cut("{capital(past(verb))}{rest}"), said: false }
+}
+
+fn capital(word: String) -> String {
+    if word.len() == 0 { return word.copy() }
+    return "{word[..1].to_upper_root()}{word[1..]}"
+}
+
+// `words` cut at MOST bytes, at a word, with "…".
+fn cut(text: String) -> String {
+    if text.len() <= MOST { return text.copy() }
+    var out = String()
+    for w in text.split(" ") {
+        if out.len() + w.len() + 1 > MOST { break }
+        if out.len() > 0 { out.push_str(" ") }
+        out.push_str(w)
+    }
+    if out.len() == 0 {
+        for r in text.runes() {
+            if out.len() >= MOST { break }
+            out.push(r)
+        }
+    }
+    out.push_str("…")
+    return out
+}
+
+fn vowel(b: u8) -> bool {
+    return b == 97 or b == 101 or b == 105 or b == 111 or b == 117
+}
+
+// Whether a verb's last letter doubles before -ing and -ed: a short word of
+// one vowel that ends consonant, vowel, consonant (run, stop, set), or one of
+// DOUBLED.
+fn doubles(v: String) -> bool {
+    for d in DOUBLED.split(" ") {
+        if d == v { return true }
+    }
+    let n = v.len()
+    if n < 3 or n > 4 { return false }
+    var vowels = 0
+    for b in v.to_bytes() {
+        if vowel(b) { vowels += 1 }
+    }
+    let (a, b, c) = (v.byte_at(n - 3), v.byte_at(n - 2), v.byte_at(n - 1))
+    return vowels == 1 and not vowel(a) and vowel(b) and not vowel(c) and c != 119 and c != 120 and c != 121
+}
+
+fn ing(v: String) -> String {
+    let n = v.len()
+    if v == "be" or v == "see" { return "{v}ing" }
+    if v.ends_with("ie") { return "{v[..n - 2]}ying" }
+    if v.ends_with("e") and not v.ends_with("ee") and not v.ends_with("oe") and not v.ends_with("ye") and n > 2 { return "{v[..n - 1]}ing" }
+    if doubles(v.copy()) { return "{v}{v[n - 1..]}ing" }
+    return "{v}ing"
+}
+
+fn past(v: String) -> String {
+    for pair in PAST.split(" ") {
+        if let (a, b) = pair.split_once(":") {
+            if a == v { return b.copy() }
+        }
+    }
+    let n = v.len()
+    if v.ends_with("e") { return "{v}d" }
+    if n > 1 and v.ends_with("y") and not vowel(v.byte_at(n - 2)) { return "{v[..n - 1]}ied" }
+    if doubles(v.copy()) { return "{v}{v[n - 1..]}ed" }
+    return "{v}ed"
+}
+
+// A verb from its -ing form, where it's one loom knows: "checking" is "check",
+// "making" "make", "running" "run".
+fn from_ing(word: String) -> String? {
+    if not word.ends_with("ing") or word.len() < 5 { return none }
+    let stem = word[..word.len() - 3].copy()
+    if is_verb(stem.copy()) { return some(stem) }
+    let e = "{stem}e"
+    if is_verb(e.copy()) { return some(e) }
+    let n = stem.len()
+    if n > 2 and stem.byte_at(n - 1) == stem.byte_at(n - 2) {
+        let single = stem[..n - 1].copy()
+        if is_verb(single.copy()) { return some(single) }
+    }
+    if stem.ends_with("y") {
+        let ie = "{stem[..n - 1]}ie"
+        if is_verb(ie.copy()) { return some(ie) }
+    }
+    return none
+}
+
+@test
+fn the_agents_sentence_says_the_step() {
+    let w = words(String("The config looks fine. Now let me turn on HTTPS for port 8444."), String("Run on aaen-vps: tailscale serve --https=8444"), String("run_command"), String("execute"), Json.Null)
+    assert(w.doing == "Turning on HTTPS for port 8444")
+    assert(w.did == "Turned on HTTPS for port 8444")
+    let c = words(String("I'll check the VPS's Tailscale setup first, then read T3's config."), String("Bash"), String(), String("execute"), Json.Null)
+    assert(c.doing == "Checking the VPS's Tailscale setup first")
+    assert(c.did == "Checked the VPS's Tailscale setup first")
+    let r = words(String("OK, I'm reading **T3's** config on the VPS:"), String(), String(), String("read"), Json.Null)
+    assert(r.doing == "Reading T3's config on the VPS")
+    assert(r.did == "Read T3's config on the VPS")
+    let m = words(String("Let me quickly make a card for it and then start a thread"), String(), String(), String("other"), Json.Null)
+    assert(m.doing == "Making a card for it")
+    assert(m.did == "Made a card for it")
+    // Words that were only that sentence are the step's; words with more aren't.
+    assert(m.said and c.said and r.said)
+    assert(not w.said)
+    let t = words(String("Let me read the notes.\n\nThey're long."), String(), String(), String("read"), Json.Null)
+    assert(not t.said)
+}
+
+@test
+fn words_that_say_no_step_leave_it_to_the_tool() {
+    // A question, a sentence with no intent, and an intent with nothing after it.
+    for said in ["Should I restart it?", "The VPS runs Debian.", "Let me check.", "Let me know if that works.", ""] {
+        let w = words(String(said), String("List files in current directory"), String("Bash"), String("execute"), Json.Null)
+        assert(w.doing == "Listing files in current directory", "{said}")
+        assert(w.did == "Listed files in current directory")
+    }
+}
+
+@test
+fn a_title_that_says_what_it_does_is_the_step() {
+    let r = words(String(), String("Read notes.md"), String(), String("read"), Json.Null)
+    assert(r.doing == "Reading notes.md" and r.did == "Read notes.md")
+    let e = words(String(), String("Explore the notes"), String("Task"), String("other"), Json.Null)
+    assert(e.doing == "Exploring the notes" and e.did == "Explored the notes")
+    let s = words(String(), String("Set up the tunnel"), String(), String("execute"), Json.Null)
+    assert(s.doing == "Setting up the tunnel" and s.did == "Set up the tunnel")
+    let t = words(String(), String("Stop the server"), String(), String("execute"), Json.Null)
+    assert(t.doing == "Stopping the server" and t.did == "Stopped the server")
+    let c = words(String(), String("Copy the key"), String(), String("execute"), Json.Null)
+    assert(c.doing == "Copying the key" and c.did == "Copied the key")
+}
+
+@test
+fn a_tool_with_a_bare_name_takes_its_template() {
+    let d = words(String(), String("mcp__loom__use_device"), String(), String("other"), Json.Null)
+    assert(d.doing == "Using a device" and d.did == "Used a device")
+    let a = words(String(), String("acta: create_tasks"), String(), String("other"), Json.Null)
+    assert(a.doing == "Making an Acta card" and a.did == "Made an Acta card")
+    let g = words(String(), String("mcp__github__list_pull_requests"), String(), String("other"), Json.Null)
+    assert(g.doing == "Listing pull requests" and g.did == "Listed pull requests")
+    let o = words(String(), String("mcp__weather__forecast"), String(), String("other"), Json.Null)
+    assert(o.doing == "Using weather" and o.did == "Used weather")
+    let q = words(String(), String("\"loom app\""), String("WebSearch"), String("fetch"), Obj.new().s("query", String("loom app")).done())
+    assert(q.doing == "Searching the web for loom app" and q.did == "Searched the web for loom app")
+    let k = words(String(), String("ls -la"), String(), String("execute"), Json.Null)
+    assert(k.doing == "Running a command" and k.did == "Ran a command")
+    let n = words(String(), String(), String(), String(), Json.Null)
+    assert(n.doing == "Using a tool" and n.did == "Used a tool")
+}
+
+@test
+fn names_come_from_the_program_or_the_mcp_title() {
+    assert(name_of(String("mcp__loom__use_device"), String()) == "use_device")
+    assert(name_of(String("acta: get_task"), String()) == "get_task")
+    assert(name_of(String("acta - get_task (MCP)"), String()) == "get_task")
+    assert(name_of(String("List files"), String("Bash")) == "Bash")
+    assert(name_of(String("Get the task"), String("mcp__acta__get_task")) == "get_task")
+    assert(name_of(String("Read notes.md"), String()) == "")
+}
+
+@test
+fn long_words_are_cut_at_a_word() {
+    let w = words("Let me {"look ".repeat(30)}", String(), String(), String(), Json.Null)
+    assert(w.doing.len() <= MOST + 3)
+    assert(w.doing.ends_with("…"))
+    assert(not w.doing.contains("  "))
+}
