@@ -179,9 +179,9 @@ fn run(server: Child) ! Error {
     app.send(Obj.new().s("t", String("sound.try")).s("cue", String("routine")).done())
     let tried = try app.until("core.sound", "cue", String("routine"), 5000)
     try check(str_at(tried, "file") == some(String("loom-routine")), "a cue's play button sounds it, though its switch is off")
-    app.send(Obj.new().s("t", String("app.dictation")).b("on", false).done())
+    app.send(Obj.new().s("t", String("sound.try")).s("cue", String("dictation")).b("on", false).done())
     let dictation = try app.until("core.sound", "cue", String("dictation"), 5000)
-    try check(str_at(dictation, "file") == some(String("loom-dictation-off")), "dictation going off sounds with its own file")
+    try check(str_at(dictation, "file") == some(String("loom-dictation-off")), "dictation going off has its own file")
     app.stop()
 }
 
