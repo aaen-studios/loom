@@ -153,14 +153,15 @@ fn run(i: Instance, fake: String) ! Error {
     try check(code(untitled) == "bad_request", "and a card with no title before Acta is asked")
 
     // --- The made card is looked up again as the message's other cards are ---
-    let before = try calls(fake.copy(), "get_task LOO-400")
+    // On its own with get_task, or with the message's other cards on its board with get_tasks.
+    let before = try calls(fake.copy(), "get_task LOO-400") + try calls(fake.copy(), "get_tasks LOO-400")
     unsafe { sleep(5300000000) }
     _ = try app.cmd("q_21", "cards.refresh", Obj.new().j("messages", Json.Array([Json.Str(message.copy())])).done())
     var asked = before
     var tries = 0
     while asked == before and tries < 50 {
         unsafe { sleep(100000000) }
-        asked = try calls(fake.copy(), "get_task LOO-400")
+        asked = try calls(fake.copy(), "get_task LOO-400") + try calls(fake.copy(), "get_tasks LOO-400")
         tries += 1
     }
     try check(asked == before + 1, "once it's 5 minutes old, cards.refresh looks the made card up again")

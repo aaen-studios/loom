@@ -4,15 +4,17 @@ module tests.protocol.acta_cards
 // Acta (tests/fake_acta) that the instance takes for Acta (`--test-acta`).
 // With no Acta connected, a card's id is plain words. Once the person has it
 // as an MCP server, a message's card ids and card links are looked up as the
-// person, one get_task each, and kept on the message as `cards`, which comes
+// person, one get_tasks for each board, or get_task for a board's one card,
+// however many there are (36 here), and kept on the message as `cards`, which comes
 // with message.updated: a bare id only with a prefix of one of the person's
 // boards, so UTF-8 isn't one, and nothing in code. A card that isn't there is
 // kept as missing, and a card's link isn't looked up as a page. A reply naming
 // the same cards has them at once, without asking Acta again. cards.refresh
 // looks a card up again only once it's 5 minutes old (5 s here), and a change
 // comes with message.updated. card.preview gives the composer a card by its id
-// or its link, and acta.boards the person's boards. With Acta gone, ids are
-// plain words again.
+// or its link, and acta.boards the person's boards. A board that fails leaves
+// only its own cards out. An Acta without get_tasks is asked a card at a time.
+// With Acta gone, ids are plain words again.
 //
 //     calx tests/protocol/acta_cards.calx
 import std.fs
@@ -117,12 +119,13 @@ fn run(i: Instance, fake: String) ! Error {
     let reply = try created(mut app, mut seen, chat.copy(), "agent")
     let r = try with_cards(mut app, str_at(reply, "id") ?? String(), ["LOO-206", "CAL-338"])
     try check(str_at(at(at(r, "cards"), "LOO-206"), "status") == some(String("in_progress")), "the agent's reply naming the same cards has them too")
-    try check(try calls(fake.copy(), "list_boards") == 1 and try calls(fake.copy(), "get_task LOO-206") == 1 and try calls(fake.copy(), "get_task CAL-338") == 1 and try calls(fake.copy(), "get_task LOO-999") == 1, "Acta was asked for the boards once and for each card once")
+    try check(try calls(fake.copy(), "list_boards") == 1 and try calls(fake.copy(), "get_tasks aaen-studios/loom") == 1 and try calls(fake.copy(), "get_tasks LOO-206") == 1 and try calls(fake.copy(), "get_tasks LOO-999") == 1, "Acta was asked for the boards once, and for loom's two cards in one get_tasks")
+    try check(try calls(fake.copy(), "get_task CAL-338") == 1 and try calls(fake.copy(), "get_tasks aaen-studios/calcite") == 0, "and for calcite's one card with get_task")
 
     // --- Looked up again once it's old ---
     _ = try fetch_json("{fake}/test/status?task=LOO-206&status=done")
     let early = try app.cmd("q_6", "cards.refresh", Obj.new().j("messages", Json.Array([Json.Str(said_id.copy())])).done())
-    try check(at(early, "ok") == Json.Bool(true) and try calls(fake.copy(), "get_task LOO-206") == 1, "a message shown again within 5 minutes of its card's lookup asks Acta nothing")
+    try check(at(early, "ok") == Json.Bool(true) and try calls(fake.copy(), "get_task LOO-206") == 0 and try calls(fake.copy(), "get_tasks aaen-studios/loom") == 1, "a message shown again within 5 minutes of its card's lookup asks Acta nothing")
     unsafe { sleep(5300000000) }
     _ = try app.cmd("q_7", "cards.refresh", Obj.new().j("messages", Json.Array([Json.Str(said_id.copy())])).done())
     loop {
@@ -132,7 +135,58 @@ fn run(i: Instance, fake: String) ! Error {
         try check(str_at(at(at(changed, "cards"), "LOO-206"), "status") == some(String("done")), "shown again after that, its card is looked up again, and the card that moved comes with message.updated")
         break
     }
-    try check(try calls(fake.copy(), "get_task LOO-206") == 2, "with one more get_task")
+    try check(try calls(fake.copy(), "get_tasks aaen-studios/loom") + try calls(fake.copy(), "get_task LOO-206") == 2, "with one more call")
+
+    // --- Every card a message names ---
+    _ = try fetch_json("{fake}/test/many?n=46")
+    let loom_before = try calls(fake.copy(), "get_tasks aaen-studios/loom")
+    var many = List<String>()
+    for k in 0..36 { many.push("LOO-{500 + k}") }
+    let long = "To do:\n\n| Card | Note |\n|---|---|\n{many.join(" | x |\n| ")} | x |\n\nAnd https://acta.aaenz.no/aaen-studios/calcite#CAL-338, CAL-339 and CAL-340."
+    try app.send(Obj.new().s("t", String("send")).s("cid", String("m_4")).s("conversation", chat.copy()).s("text", long).done())
+    let listed = try created(mut app, mut seen, chat.copy(), "person")
+    var want = List<str>()
+    want.push("CAL-339")
+    want.push("LOO-535")
+    let full = try with_cards(mut app, str_at(listed, "id") ?? String(), want)
+    var shown = 0
+    var titled = true
+    if let Json.Object(o) = at(full.copy(), "cards") {
+        for (k, v) in o {
+            if k.starts_with("LOO-5") {
+                shown += 1
+                if str_at(v.copy(), "title") != some("Card {k[4..]}") { titled = false }
+            }
+        }
+    }
+    try check(shown == 36 and titled, "a message naming 36 cards on one board has all 36, each with its own card")
+    try check(at(at(at(full.copy(), "cards"), "CAL-339"), "missing") == Json.Bool(true) and str_at(at(at(full, "cards"), "CAL-338"), "status") == some(String("review")), "and its cards on another board with them")
+    try check(try calls(fake.copy(), "get_tasks aaen-studios/loom") == loom_before + 1 and try calls(fake.copy(), "get_tasks aaen-studios/calcite") == 1 and try calls(fake.copy(), "get_task LOO-500") == 0, "with one get_tasks for each board")
+    _ = try created(mut app, mut seen, chat.copy(), "agent")
+
+    // --- A board that fails ---
+    _ = try fetch_json("{fake}/test/fail?board=aaen-studios/calcite")
+    try send(app, chat.copy(), "m_5", "LOO-536, LOO-537, CAL-341 and CAL-342.")
+    let mixed = try created(mut app, mut seen, chat.copy(), "person")
+    let mixed_id = str_at(mixed, "id") ?? String()
+    let part = try with_cards(mut app, mixed_id.copy(), ["LOO-536", "LOO-537"])
+    try check(at(at(part.copy(), "cards"), "CAL-341") == Json.Null and at(at(part, "cards"), "CAL-342") == Json.Null, "a board that fails leaves its own cards out, and the other board's come")
+    _ = try created(mut app, mut seen, chat.copy(), "agent")
+    _ = try fetch_json("{fake}/test/fail?board=")
+
+    // --- An Acta without get_tasks ---
+    _ = try fetch_json("{fake}/test/no_bulk?on=1")
+    try send(app, chat.copy(), "m_6", "LOO-538 and LOO-539.")
+    let old = try created(mut app, mut seen, chat.copy(), "person")
+    let o2 = try with_cards(mut app, str_at(old, "id") ?? String(), ["LOO-538", "LOO-539"])
+    try check(str_at(at(at(o2, "cards"), "LOO-539"), "title") == some(String("Card 539")) and try calls(fake.copy(), "get_task LOO-538") == 1 and try calls(fake.copy(), "get_task LOO-539") == 1, "an Acta without get_tasks gets a get_task for each card")
+    _ = try created(mut app, mut seen, chat.copy(), "agent")
+    try send(app, chat.copy(), "m_7", "LOO-540 and LOO-541.")
+    let after_old = try created(mut app, mut seen, chat.copy(), "person")
+    _ = try with_cards(mut app, str_at(after_old, "id") ?? String(), ["LOO-540", "LOO-541"])
+    try check(try calls(fake.copy(), "get_task LOO-540") == 1 and try calls(fake.copy(), "get_tasks LOO-540") == 0, "and is asked a card at a time after that, without trying get_tasks first")
+    _ = try created(mut app, mut seen, chat.copy(), "agent")
+    _ = try fetch_json("{fake}/test/no_bulk?on=0")
 
     // --- The composer ---
     let by_id = try app.cmd("q_8", "card.preview", Obj.new().s("ref", String("LOO-351")).done())
