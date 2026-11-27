@@ -27,6 +27,9 @@ struct VoiceTile: Equatable, Sendable, Identifiable {
     var key: Bool
     var have: Bool
     var inUse: Bool
+    /// A model on the device, as this device's core has it: why it can't run here
+    /// (`unavailable`, which an iPhone always says, or `failed`), or none.
+    var why: String?
 
     init(_ j: JSON) {
         id = j["id"].text
@@ -38,11 +41,14 @@ struct VoiceTile: Equatable, Sendable, Identifiable {
         key = j["key"].bool ?? true
         have = j["have"].bool ?? false
         inUse = j["in_use"].bool ?? false
+        let state = j["model"]["state"].text
+        why = state == "unavailable" || state == "failed" ? j["model"]["why"].text : nil
     }
 
     /// The button beside it: Use, Add key or Change key, or none for one in use that
-    /// needs no key.
+    /// needs no key, or a model that can't run here.
     var button: VoiceTileButton? {
+        if why != nil { return nil }
         if key && !have { return .addKey }
         if inUse { return key ? .changeKey : nil }
         return .use

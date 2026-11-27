@@ -62,6 +62,11 @@ import Testing
         #expect(onDevice.button == .use)
         #expect(VoiceTile(["id": "whisper", "icon": "laptop", "key": false, "have": true, "in_use": true]).button == nil)
         #expect(VoiceTileButton.addKey.words == "Add key" && VoiceTileButton.changeKey.words == "Change key")
+        // One the core says can't run here says why, with no button.
+        let phone = VoiceTile(["id": "parakeet", "icon": "laptop", "mark": "nvidia", "key": false, "have": false, "in_use": false,
+                               "model": ["state": "unavailable", "why": "Runs on your computer, not on iPhone."]])
+        #expect(phone.why == "Runs on your computer, not on iPhone." && phone.button == nil)
+        #expect(VoiceTile(["id": "parakeet", "key": false, "have": true, "in_use": false, "model": ["state": "ready"]]).why == nil)
     }
 
     @Test func useAndKeysSendWhatTheInstanceTakes() {

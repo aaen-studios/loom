@@ -214,6 +214,9 @@ struct VoiceTileView: View {
             VStack(alignment: .leading, spacing: 2) {
                 Text(tile.name).font(Fonts.ui(Tokens.PhoneSize.body, .semibold)).foregroundStyle(P.ink).lineLimit(1)
                 Text(tile.line).font(Fonts.small).foregroundStyle(P.ink3).lineLimit(2)
+                if let why = tile.why {
+                    Text(why).font(Fonts.small).foregroundStyle(P.ink2).lineLimit(2)
+                }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
             VStack(alignment: .trailing, spacing: Tokens.Space.xs + 2) {

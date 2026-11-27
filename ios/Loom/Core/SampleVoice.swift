@@ -15,10 +15,17 @@ struct SampleVoice {
         ("dictation", "deepgram", "Deepgram Nova-3", "Words as you say them", true),
         ("dictation", "openai", "OpenAI", "gpt-4o-transcribe, words as you say them", true),
         ("dictation", "groq", "Groq", "Whisper large v3, writes once you stop", false),
+        ("dictation", "parakeet", "Parakeet v2", "English, 660 MB", true),
+        ("dictation", "whisper", "Whisper large v3 turbo", "99 languages, 1 GB", true),
         ("speech", "elevenlabs", "ElevenLabs", "Flash v2.5, your voices and the library's", false),
         ("speech", "fish", "Fish Audio", "S2.1 Pro, the voice library", false),
         ("speech", "openai", "OpenAI", "gpt-4o-mini-tts, 13 voices", false),
+        ("speech", "kokoro", "Kokoro", "English and Chinese, 350 MB", false),
     ]
+
+    /// The models on the device, which the core says an iPhone can't run, and their makers'
+    /// marks (Kokoro's authors have none).
+    static let onDevice: [String: String] = ["parakeet": "nvidia", "whisper": "openai", "kokoro": ""]
 
     static let languages: [(String, String)] = [
         ("", "Detect"), ("en", "English"), ("no", "Norwegian"), ("sv", "Swedish"), ("da", "Danish"),
@@ -32,6 +39,16 @@ struct SampleVoice {
     /// The engine's tile, as `voice.get` gives it.
     func tile(_ kind: String, _ id: String) -> JSON {
         guard let e = Self.engines.first(where: { $0.kind == kind && $0.id == id }) else { return .null }
+        if let made = Self.onDevice[e.id] {
+            var t: [String: JSON] = ["id": JSON(e.id), "name": JSON(e.name), "line": JSON(e.line), "icon": "laptop", "streams": JSON(e.streams),
+                                     "key": false, "have": false, "in_use": JSON(settings[kind]["engine"].text == e.id),
+                                     "model": ["state": "unavailable", "why": "Runs on your computer, not on iPhone."]]
+            if !made.isEmpty {
+                t["icon_svg"] = "<svg/>"
+                t["mark"] = JSON(made)
+            }
+            return .object(t)
+        }
         // Its maker's mark, as the app has its copy (`voice-deepgram`, from shared/voice).
         let mark = e.id == "fish" ? "fish-audio" : e.id
         return ["id": JSON(e.id), "name": JSON(e.name), "line": JSON(e.line), "icon": "cloud", "icon_svg": "<svg/>", "mark": JSON(mark), "streams": JSON(e.streams),
