@@ -145,6 +145,8 @@ struct Dictation: Equatable, Sendable {
     var n = 0
     var state = ""
     var text = ""
+    /// How `text` starts: the words the engine won't change again (LOO-445).
+    var kept = ""
 
     /// Whether it's over, and the mic is to stop.
     var over: Bool { ["done", "failed", "no_engine"].contains(state) }
@@ -326,6 +328,7 @@ extension Model {
         case "core.dictation":
             voice.heard.state = f["state"].text
             if let text = f["text"].string { voice.heard.text = text }
+            voice.heard.kept = f["kept"].text
             switch voice.heard.state {
             case "no_engine":
                 voice.openKind = "dictation"

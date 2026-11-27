@@ -144,6 +144,19 @@ import Testing
         #expect(m.notice == "Deepgram didn't answer.")
     }
 
+    @Test @MainActor func dictatedWordsKnowWhichAreKept() {
+        let m = caughtUp()
+        m.dictationStarted()
+        m.take(["t": "core.dictation", "state": "listening", "text": "Water the tomatoes", "kept": "Water"])
+        #expect(m.voice.heard.kept == "Water")
+        m.take(["t": "core.dictation", "state": "listening", "text": "Water the"])
+        #expect(m.voice.heard.kept == "")
+        // Each word by its place, for drawing it coming into focus.
+        let spans = HeardWords.spans(" Water  the\ttomatoes ")
+        #expect(spans.map(\.1) == ["Water", "the", "tomatoes"])
+        #expect(spans.map(\.0) == [NSRange(location: 1, length: 5), NSRange(location: 8, length: 3), NSRange(location: 12, length: 8)])
+    }
+
     @Test func dictationGoesInAtTheCaret() {
         // Into empty words, then each time in place of what it put before.
         var (put, text) = dictationSplice("", at: 0, count: 0, words: "Water the")

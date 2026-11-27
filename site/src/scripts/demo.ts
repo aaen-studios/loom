@@ -643,27 +643,30 @@ export function play(app: HTMLElement) {
 	};
 	// The mic: loom's own dictation (PLAN.md, "Voice"), on Deepgram Nova-3, which streams. A click
 	// starts it with Dictation on's sound, and the words come into the composer as they're said,
-	// the last ones still faint until the engine keeps them; another click stops it with Dictation
-	// off's, and the words stay, all kept. With reduced motion they come all at once.
+	// each coming into focus (LOO-445), the last ones still faint until the engine keeps them and
+	// then turning to ink; another click stops it with Dictation off's, and the words stay, all
+	// kept. With reduced motion they come all at once, with no blur or rise.
 	const mic = app.querySelector<HTMLElement>('[data-mic]');
 	const HEARD = 'Remind me to send the October invoice';
 	let dictation = 0;
-	/** What this dictation has put in: the words kept, and the ones still being heard. */
-	let kept: Text | null = null;
-	let hearing: HTMLElement | null = null;
+	/** What this dictation has put in, a span a word, and the space before the first. */
+	let heard: HTMLElement | null = null;
 	let lead = '';
 	const keepAll = () => {
-		if (kept && hearing) kept.data += hearing.textContent ?? '';
-		hearing?.remove();
-		kept = null;
-		hearing = null;
+		heard?.querySelectorAll('.heard').forEach((w) => w.classList.remove('hearing'));
+		heard = null;
 	};
 	/** The words said so far, the last `faint` of them still being heard. */
 	const hear = (said: string[], faint: number) => {
-		if (!kept || !hearing) return;
+		if (!heard) return;
 		const sure = Math.max(0, said.length - faint);
-		kept.data = lead + said.slice(0, sure).join(' ') + (sure > 0 && sure < said.length ? ' ' : '');
-		hearing.textContent = said.slice(sure).join(' ');
+		for (let i = heard.children.length; i < said.length; i++) {
+			const w = document.createElement('span');
+			w.className = 'heard hearing';
+			w.textContent = (i ? ' ' : lead) + said[i];
+			heard.append(w);
+		}
+		[...heard.children].forEach((w, i) => w.classList.toggle('hearing', i >= sure));
 	};
 	mic?.addEventListener('click', () => {
 		const on = !mic.classList.contains('on');
@@ -675,19 +678,17 @@ export function play(app: HTMLElement) {
 		const words = HEARD.split(' ');
 		const before = typed.textContent ?? '';
 		lead = before && !/\s$/.test(before) ? ' ' : '';
-		kept = document.createTextNode('');
-		hearing = document.createElement('span');
-		hearing.className = 'hearing';
+		heard = document.createElement('span');
 		if (matchMedia('(prefers-reduced-motion: reduce)').matches) {
-			typed.append(kept, hearing);
+			typed.append(heard);
 			hear(words, 0);
 			return;
 		}
 		void (async () => {
 			for (let i = 1; i <= words.length; i++) {
 				await new Promise((done) => setTimeout(done, i === 1 ? 300 : 170 + Math.random() * 90));
-				if (id !== dictation || !kept || !hearing) return;
-				if (i === 1) typed.append(kept, hearing);
+				if (id !== dictation || !heard) return;
+				if (i === 1) typed.append(heard);
 				hear(words.slice(0, i), 2);
 			}
 			await new Promise((done) => setTimeout(done, 500));

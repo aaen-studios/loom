@@ -6,6 +6,8 @@
 
 use super::*;
 use crate::model::voice::{self as voice_model, Action, Menu as VoiceMenu, Tab, Tile};
+use gpui_kit::component::input::TextDecoration;
+use std::ops::Range;
 
 /// A menu of languages or voices, as tall as it may be before it scrolls.
 const MENU_MOST: f32 = 240.0;
@@ -1000,6 +1002,7 @@ impl Loom {
     /// Before the window draws: dictation's words into the composer at their place,
     /// Settings › Voice opened when dictation has no engine, and why voice failed.
     pub(super) fn take_voice(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.sample_dictation(window, cx);
         if self.model.voice.words.is_some() {
             let text = self.composer.read(cx).value().to_string();
             if let Some((range, put)) = self.model.voice.composer_words(&text) {
@@ -1007,6 +1010,9 @@ impl Loom {
                     c.set_selected_range(range, cx);
                     c.replace(put, window, cx);
                 });
+            }
+            if let Some(d) = self.model.voice.dictated.take() {
+                self.heard = voice_model::heard(&self.heard, &d, Instant::now());
             }
         }
         if std::mem::take(&mut self.model.voice.open_page) {
@@ -1020,6 +1026,187 @@ impl Loom {
                 self.take_notice(cx);
             }
         }
+    }
+
+    /// The perf build's look at dictation with no mic or service (`LOOM_DICTATE`): once
+    /// a chat is open, made-up `core.dictation` frames put a sentence into the composer a
+    /// word every 0.3 s, all but the last two kept, and start again every 6 s.
+    fn sample_dictation(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !cfg!(feature = "perf")
+            || std::env::var_os("LOOM_DICTATE").is_none()
+            || self.model.selected.is_none()
+        {
+            return;
+        }
+        thread_local! {
+            static START: std::cell::Cell<Option<Instant>> = const { std::cell::Cell::new(None) };
+            static SAID: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+        }
+        const SENTENCE: [&str; 13] = [
+            "can", "you", "check", "why", "the", "deploy", "failed", "and", "tell", "me", "in",
+            "two", "lines",
+        ];
+        let start = START.with(|s| {
+            let at = s.get().unwrap_or_else(Instant::now);
+            s.set(Some(at));
+            at
+        });
+        let t = start.elapsed().as_secs_f32() % 6.0;
+        let n = ((t / 0.3) as usize + 1).min(SENTENCE.len());
+        window.request_animation_frame();
+        if SAID.with(|s| s.replace(n)) == n {
+            return;
+        }
+        if n == 1 {
+            self.composer
+                .update(cx, |c, cx| c.set_value("", window, cx));
+            self.heard.clear();
+            self.model.voice.listen(0);
+        }
+        let over = n == SENTENCE.len();
+        let kept = if over { n } else { n.saturating_sub(2) };
+        self.model.voice.take(&serde_json::json!({
+            "t": "core.dictation",
+            "state": if over { "done" } else { "listening" },
+            "engine": "deepgram",
+            "streams": true,
+            "text": SENTENCE[..n].join(" "),
+            "kept": SENTENCE[..kept].join(" "),
+        }));
+    }
+
+    /// Before the window draws: the composer's colour for each dictated word (LOO-445).
+    /// A word coming into focus is hidden there while `heard_overlay` draws it; one the
+    /// engine may still change is faint; a kept one turns to full ink. Once dictation is
+    /// over and every word has arrived, the words are the composer's own again.
+    pub(super) fn tick_heard(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.heard.is_empty() {
+            if std::mem::take(&mut self.heard_marks) {
+                self.composer
+                    .update(cx, |c, cx| c.set_decorations(Vec::new(), cx));
+            }
+            return;
+        }
+        let now = Instant::now();
+        let calm = cx.reduce_motion();
+        let p = self.p;
+        let mut moving = false;
+        let mut marks = Vec::new();
+        for h in &self.heard {
+            let (focus, ink) = voice_model::focus_at(h, now);
+            let focus = if calm { 1.0 } else { focus };
+            let kept = h.kept.is_some();
+            if focus < 1.0 || (kept && ink < 1.0) {
+                moving = true;
+            }
+            if focus >= 1.0 && kept && ink >= 1.0 {
+                continue;
+            }
+            // A decoration's colour is blended over the text's, so a clear one hides
+            // nothing: a word the overlay draws is faded out instead.
+            let style = HighlightStyle {
+                color: Some(motion::mix(p.ink_3, p.ink, ink)),
+                fade_out: (focus < 1.0).then_some(1.0),
+                ..Default::default()
+            };
+            marks.push(TextDecoration::new(h.range.clone(), style));
+        }
+        if !moving && marks.is_empty() && self.model.voice.dictating.is_none() {
+            self.heard.clear();
+        }
+        self.heard_marks = true;
+        self.composer
+            .update(cx, |c, cx| c.set_decorations(marks, cx));
+        if moving {
+            window.request_animation_frame();
+        }
+    }
+
+    /// The dictated words coming into focus over the composer (LOO-445): each drawn
+    /// where the composer has it, a little low and blurred, rising and sharpening into
+    /// place. GPUI draws no blurred text, so the blur is the word drawn faintly a few
+    /// times around itself, closing in as it sharpens.
+    pub(super) fn heard_overlay(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let p = self.p;
+        let calm = cx.reduce_motion();
+        let composer = self.composer.clone();
+        let now = Instant::now();
+        let words: Vec<(Range<usize>, String, f32, Hsla)> = if calm {
+            Vec::new()
+        } else {
+            self.heard
+                .iter()
+                .filter_map(|h| {
+                    let (focus, ink) = voice_model::focus_at(h, now);
+                    (focus < 1.0).then(|| {
+                        let color = if h.kept.is_some() {
+                            motion::mix(p.ink_3, p.ink, ink)
+                        } else {
+                            p.ink_3
+                        };
+                        (h.range.clone(), h.word.clone(), focus, color)
+                    })
+                })
+                .collect()
+        };
+        canvas(
+            |_, _, _| {},
+            move |_, _, window, cx| {
+                let style = window.text_style();
+                let size = style.font_size.to_pixels(window.rem_size());
+                let font = style.font();
+                for (range, word, focus, color) in &words {
+                    let Some(at) = composer.read(cx).range_to_bounds(range) else {
+                        continue;
+                    };
+                    let rest = 1.0 - focus;
+                    let rise = px(5.0 * rest);
+                    let spread = 3.0 * rest;
+                    // The textarea sets its own text size inside itself, so the word is
+                    // drawn at the size that makes it as wide as the composer has it.
+                    let run = |color: Hsla| TextRun {
+                        len: word.len(),
+                        font: font.clone(),
+                        color,
+                        background_color: None,
+                        underline: None,
+                        strikethrough: None,
+                    };
+                    let measured = window
+                        .text_system()
+                        .shape_line(word.clone().into(), size, &[run(*color)], None)
+                        .width;
+                    let size = if measured > px(0.0) && at.size.width > px(0.0) {
+                        size * (at.size.width / measured)
+                    } else {
+                        size
+                    };
+                    let draw = |dx: f32, dy: f32, alpha: f32, window: &mut Window, cx: &mut App| {
+                        let line = window.text_system().shape_line(
+                            word.clone().into(),
+                            size,
+                            &[run(color.opacity(color.a * alpha))],
+                            None,
+                        );
+                        let origin = at.origin + point(px(dx), rise + px(dy));
+                        let _ =
+                            line.paint(origin, at.size.height, TextAlign::Left, None, window, cx);
+                    };
+                    for (dx, dy) in [(-1.0, 0.0), (1.0, 0.0), (0.0, -1.0), (0.0, 1.0)] {
+                        draw(
+                            dx * spread,
+                            dy * spread,
+                            0.4 * rest * focus.max(0.35),
+                            window,
+                            cx,
+                        );
+                    }
+                    draw(0.0, 0.0, *focus, window, cx);
+                }
+            },
+        )
+        .absolute()
+        .size_0()
     }
 }
 

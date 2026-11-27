@@ -240,6 +240,10 @@ pub struct Voice {
     pub dictating: Option<Dictating>,
     /// What `core.dictation` said last, for the composer: its words, once they changed.
     pub words: Option<String>,
+    /// How its words start: those the engine won't change again (`kept`).
+    pub kept: String,
+    /// Where the words went in the composer last, for drawing them (LOO-445).
+    pub dictated: Option<Dictated>,
     /// Settings › Voice is to open, as dictation has no engine.
     pub open_page: bool,
     /// Why dictation or speech failed, for a notice.
@@ -331,12 +335,14 @@ impl Voice {
                 "failed" => {
                     self.said = Some(s(f, "why"));
                     self.words = Some(s(f, "text"));
+                    self.kept = s(f, "kept");
                     if let Some(d) = &mut self.dictating {
                         d.state = state;
                     }
                 }
                 _ => {
                     self.words = Some(s(f, "text"));
+                    self.kept = s(f, "kept");
                     if let Some(d) = &mut self.dictating {
                         d.state = state;
                     }
@@ -473,6 +479,7 @@ impl Voice {
             started: true,
         });
         self.words = None;
+        self.kept.clear();
         json!({"t": "voice.listen"})
     }
 
@@ -485,11 +492,84 @@ impl Voice {
         let (range, put) = splice(text, d.at, d.len, &words);
         d.at = range.start;
         d.len = put.len();
-        if d.state == "done" || d.state == "failed" {
+        let over = d.state == "done" || d.state == "failed";
+        let words = words.trim();
+        let kept = self.kept.trim();
+        self.dictated = Some(Dictated {
+            at: range.start + put.len() - put.trim_start().len(),
+            words: words.to_string(),
+            // Once it's over, every word is kept.
+            kept: if over {
+                words.len()
+            } else if words.starts_with(kept) {
+                kept.len()
+            } else {
+                0
+            },
+        });
+        if over {
             self.dictating = None;
         }
         Some((range, put))
     }
+}
+
+/// A dictation's words where they went in the composer: from byte `at`, the first
+/// `kept` bytes of them kept.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Dictated {
+    pub at: usize,
+    pub words: String,
+    pub kept: usize,
+}
+
+/// A dictated word in the composer, as it's drawn (LOO-445): it comes into focus from
+/// `came`, faint until it's kept and from `kept` turning to full ink.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Heard {
+    pub range: Range<usize>,
+    pub word: String,
+    pub came: std::time::Instant,
+    pub kept: Option<std::time::Instant>,
+}
+
+/// How long a word takes to come into focus, and to turn from faint to full ink.
+pub const FOCUS_SECS: f32 = 0.38;
+pub const KEPT_SECS: f32 = 0.35;
+
+/// The words of a dictation as `d` has them now, from those drawn `before`: a word that
+/// is where it was, the same, keeps its time, and one that's new or changed comes in
+/// again from `now`. Each word is kept from when `d` first says so.
+pub fn heard(before: &[Heard], d: &Dictated, now: std::time::Instant) -> Vec<Heard> {
+    let mut out = Vec::new();
+    let mut from = 0;
+    for (i, word) in d.words.split_whitespace().enumerate() {
+        let start = from + d.words[from..].find(word).unwrap_or(0);
+        let end = start + word.len();
+        from = end;
+        let same = before.get(i).filter(|h| h.word == word);
+        let kept = end <= d.kept;
+        out.push(Heard {
+            range: d.at + start..d.at + end,
+            word: word.to_string(),
+            came: same.map_or(now, |h| h.came),
+            kept: same
+                .and_then(|h| h.kept)
+                .or_else(|| kept.then_some(now))
+                .filter(|_| kept),
+        });
+    }
+    out
+}
+
+/// How far a word is into focus and into full ink at `now`, each from 0 to 1, eased.
+pub fn focus_at(h: &Heard, now: std::time::Instant) -> (f32, f32) {
+    let ease = |x: f32| 1.0 - (1.0 - x.clamp(0.0, 1.0)).powi(3);
+    let since = |t: std::time::Instant| now.saturating_duration_since(t).as_secs_f32();
+    (
+        ease(since(h.came) / FOCUS_SECS),
+        h.kept.map_or(0.0, |t| ease(since(t) / KEPT_SECS)),
+    )
 }
 
 /// Where `words` go in `text`, in place of the `len` bytes from `at`, and what goes
@@ -839,6 +919,50 @@ mod tests {
             Some((5..13, " how are you".into()))
         );
         assert!(v.dictating.is_none());
+    }
+
+    #[test]
+    fn dictated_words_come_into_focus_and_turn_to_ink_once_kept() {
+        use std::time::{Duration, Instant};
+        let mut v = Voice::default();
+        v.listen(5);
+        v.take(&json!({"t": "core.dictation", "state": "listening", "text": "water the"}));
+        v.composer_words("Hello");
+        let d = v.dictated.take().unwrap();
+        assert_eq!(
+            d,
+            Dictated {
+                at: 6,
+                words: "water the".into(),
+                kept: 0
+            }
+        );
+        let t0 = Instant::now();
+        let a = heard(&[], &d, t0);
+        assert_eq!(a.len(), 2);
+        assert_eq!((a[0].range.clone(), a[1].range.clone()), (6..11, 12..15));
+        assert!(a.iter().all(|h| h.came == t0 && h.kept.is_none()));
+        // "the" is heard again as "tomatoes", and "water" is kept: only the changed word
+        // comes in again.
+        v.take(&json!({"t": "core.dictation", "state": "listening", "text": "Water tomatoes", "kept": "Water"}));
+        v.composer_words("Hello water the");
+        let d = v.dictated.take().unwrap();
+        assert_eq!(d.kept, 5);
+        let t1 = t0 + Duration::from_millis(200);
+        let b = heard(&a, &d, t1);
+        // "water" became "Water": changed, so it comes in again, and it's kept.
+        assert_eq!((b[0].came, b[0].kept), (t1, Some(t1)));
+        assert_eq!((b[1].came, b[1].kept), (t1, None));
+        // The same words again: nothing comes in anew; once it's over, all are kept.
+        v.take(&json!({"t": "core.dictation", "state": "done", "text": "Water tomatoes", "kept": "Water"}));
+        v.composer_words("Hello Water tomatoes");
+        let d = v.dictated.take().unwrap();
+        let t2 = t1 + Duration::from_millis(100);
+        let c = heard(&b, &d, t2);
+        assert_eq!((c[0].came, c[0].kept), (t1, Some(t1)));
+        assert_eq!((c[1].came, c[1].kept), (t1, Some(t2)));
+        assert_eq!(focus_at(&c[1], t2), (focus_at(&c[1], t2).0, 0.0));
+        assert_eq!(focus_at(&c[1], t2 + Duration::from_secs(1)), (1.0, 1.0));
     }
 
     #[test]
