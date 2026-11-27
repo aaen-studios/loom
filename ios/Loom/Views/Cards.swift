@@ -510,6 +510,7 @@ struct CardView: View {
         case "mcp_add": McpAddCard(card: card, tint: tint, agent: agent)
         case "secret_ask": SecretAskCard(card: card, tint: tint)
         case "form": FormCard(card: card, tint: tint)
+        case "draft": DraftCard(card: card)
         case "checklist": checklist
         case "progress": progress
         case "facts":

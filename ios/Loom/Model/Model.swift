@@ -326,6 +326,9 @@ struct Card: Equatable, Sendable {
     var routine = ""
     var why = ""
     var failures = 0
+    /// For `draft` (Drafts.swift): the email or message an agent drafted, for the person
+    /// to send, edit or reject; `message`, `sending` and `error` are its answer's.
+    var draft: Draft?
     /// For choices, the answer the person sent once the chat went on.
     var chosen: Int?
     /// For a form: its fields, the reply it's in (for Send), what's picked on each
@@ -365,7 +368,8 @@ struct Card: Equatable, Sendable {
 
     init?(_ c: JSON) {
         type = c["type"].text
-        guard ["choices", "form", "checklist", "table", "progress", "facts", "sign_in", "mcp_add", "secret_ask", "routine_off"].contains(type) else { return nil }
+        guard ["choices", "form", "checklist", "table", "progress", "facts", "sign_in", "mcp_add", "secret_ask", "routine_off", "draft"].contains(type) else { return nil }
+        draft = type == "draft" ? Draft(c) : nil
         routine = c["routine"].text
         why = c["why"].text
         failures = c["failures"].int ?? 0
@@ -1745,6 +1749,10 @@ final class Model {
     /// (RoutineOff.swift).
     var routineOnSending: Set<String> = []
     var routineOnErrors: [String: String] = [:]
+    /// The answers on draft cards on their way, by `message/card`, and what the instance
+    /// said to ones it refused (Drafts.swift).
+    var draftSending: Set<String> = []
+    var draftErrors: [String: String] = [:]
     /// What's picked on the choices and toggles of forms not sent yet, by
     /// `message/card/field`; the forms whose answers went and haven't come back, by their
     /// send's cid, with their `message/card`; and what the instance said to ones it
@@ -1965,6 +1973,12 @@ final class Model {
                 if c.type == "routine_off" {
                     c.sending = routineOnSending.contains(c.routine)
                     c.error = routineOnErrors[c.routine] ?? ""
+                }
+                if c.type == "draft" {
+                    let key = "\(out[i].id)/\(c.id)"
+                    c.message = out[i].id
+                    c.sending = draftSending.contains(key)
+                    c.error = draftErrors[key] ?? ""
                 }
                 if c.type == "form" {
                     let key = "\(out[i].id)/\(c.id)"
@@ -2403,6 +2417,8 @@ final class Model {
                     pending.append(frame)
                 }
             }
+        case let id where id.hasPrefix(draftAnswer):
+            takeDraftAnswer(id, error: error)
         case let id where id.hasPrefix(routineOnAnswer):
             // The card's own message.updated says it's on; a refusal shows on the card,
             // which still has Turn on.
