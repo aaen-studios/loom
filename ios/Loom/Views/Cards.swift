@@ -509,6 +509,7 @@ struct CardView: View {
         case "sign_in": signIn
         case "mcp_add": McpAddCard(card: card, tint: tint, agent: agent)
         case "secret_ask": SecretAskCard(card: card, tint: tint)
+        case "spool_connect": SpoolConnectCard(card: card)
         case "form": FormCard(card: card, tint: tint)
         case "checklist": checklist
         case "progress": progress
@@ -958,6 +959,138 @@ struct McpAddCard: View {
         UIImpactFeedbackGenerator(style: .light).impactOccurred()
         let secrets = answer == "add" ? typed.filter { name, _ in card.settings.contains { $0.secret == name && $0.wanted } } : [:]
         session.send(session.model.answerMcpAdd(card.call, answer, secrets: secrets))
+    }
+}
+
+/// Loom's own card for one of Spools' entries an agent asked its person to connect
+/// (spool_connect; SpoolCard.swift): Spools' featured card itself, loom's knot tied to
+/// the entry's logo on a tile in ink by a thread that hangs slack and dashed until it's
+/// connected and runs taut in ink once it is; its name and address; then whom it's for
+/// with Sign in (T3's says to finish on a computer), Connecting…, Connected · N tools with
+/// Change…, or why it failed with Try again.
+struct SpoolConnectCard: View {
+    @Environment(Session.self) private var session
+    var card: Card
+    /// What the person typed for each key it takes, by the key's name.
+    @State private var typed: [String: String] = [:]
+    /// Change…: Spools, open on the entry.
+    @State private var spools = false
+
+    var body: some View {
+        let shape = RoundedRectangle(cornerRadius: Tokens.Radius.card, style: .continuous)
+        let foot = spoolFoot(card)
+        VStack(alignment: .leading, spacing: Tokens.Space.m) {
+            HStack(spacing: Tokens.Space.xs) {
+                RoundedRectangle(cornerRadius: Tokens.Radius.card, style: .continuous)
+                    .fill(P.bg)
+                    .overlay(RoundedRectangle(cornerRadius: Tokens.Radius.card, style: .continuous).strokeBorder(P.lineStrong, lineWidth: 1))
+                    .overlay(Knot().frame(width: 20, height: 20))
+                    .frame(width: Tokens.Control.iconLarge, height: Tokens.Control.iconLarge)
+                SpanView(taut: card.state == "connected", tint: card.state == "connected" ? P.ink : P.ink3, dashed: true)
+                inkTile
+            }
+            VStack(alignment: .leading, spacing: 2) {
+                Text(card.name).font(Fonts.ui(Tokens.PhoneSize.body, .semibold)).foregroundStyle(P.ink).lineLimit(1)
+                Text(spoolShortAddress(card.address)).font(Fonts.code).foregroundStyle(P.ink2).lineLimit(1)
+            }
+            if ["asking", "failed"].contains(card.state) && foot != .computer {
+                ForEach(card.keys, id: \.name) { k in
+                    VStack(alignment: .leading, spacing: Tokens.Space.xs) {
+                        Text(k.label).font(Fonts.caption).foregroundStyle(P.ink3)
+                        SecureField(k.placeholder, text: Binding(get: { typed[k.name, default: ""] }, set: { typed[k.name] = $0 }))
+                            .font(Fonts.code)
+                            .textInputAutocapitalization(.never)
+                            .autocorrectionDisabled()
+                            .padding(.horizontal, Tokens.Space.m)
+                            .frame(minHeight: Tokens.Control.buttonSmall)
+                            .background(P.bg, in: RoundedRectangle(cornerRadius: Tokens.Radius.input, style: .continuous))
+                            .overlay(RoundedRectangle(cornerRadius: Tokens.Radius.input, style: .continuous).strokeBorder(P.lineStrong, lineWidth: 1))
+                    }
+                }
+            }
+            HStack(spacing: Tokens.Space.s) {
+                words(foot).font(Fonts.small).lineLimit(1)
+                Spacer(minLength: 0)
+                button(foot)
+            }
+            .frame(minHeight: Tokens.Control.buttonSmall)
+        }
+        .padding(Tokens.Space.l)
+        .frame(maxWidth: 420, alignment: .leading)
+        .background(shape.fill(P.cardFill))
+        .overlay(shape.strokeBorder(P.line, lineWidth: 1))
+        .sheet(isPresented: $spools) {
+            NavigationStack { SpoolsView() }
+        }
+    }
+
+    /// The entry's logo on a tile in ink: its mark, or its initial.
+    private var inkTile: some View {
+        RoundedRectangle(cornerRadius: Tokens.Radius.card, style: .continuous)
+            .fill(P.button)
+            .frame(width: Tokens.Control.iconLarge, height: Tokens.Control.iconLarge)
+            .overlay {
+                if let glyph = UIImage(named: "mark-\(card.entry)") {
+                    Image(uiImage: glyph.withRenderingMode(.alwaysTemplate))
+                        .resizable()
+                        .scaledToFit()
+                        .foregroundStyle(P.buttonInk)
+                        .padding(Tokens.Control.iconLarge * 0.22)
+                } else {
+                    Text(String(card.name.prefix(1)))
+                        .font(Fonts.ui(Tokens.Control.iconLarge * 0.42, .semibold))
+                        .foregroundStyle(P.buttonInk)
+                }
+            }
+            .accessibilityHidden(true)
+    }
+
+    @ViewBuilder
+    private func words(_ foot: SpoolFoot) -> some View {
+        switch foot {
+        case .forAgents(let who): Text(who).foregroundStyle(P.ink3)
+        case .connecting: Text("Connecting…").foregroundStyle(P.ink3)
+        case .signingIn: Text("Waiting for you to sign in…").foregroundStyle(P.ink3)
+        case .computer: Text("Finish on a computer").foregroundStyle(P.ink3)
+        case .failed(let why): Text(why).foregroundStyle(P.bad)
+        case .connected(let n):
+            HStack(spacing: Tokens.Space.xs + 2) {
+                Circle().fill(P.ink).frame(width: 6, height: 6)
+                Text(spoolConnectedLine(n))
+            }
+            .font(Fonts.ui(Tokens.PhoneSize.small, .medium))
+            .foregroundStyle(P.ink)
+        }
+    }
+
+    @ViewBuilder
+    private func button(_ foot: SpoolFoot) -> some View {
+        switch foot {
+        case .connecting, .computer:
+            EmptyView()
+        case .connected:
+            Button("Change…") {
+                session.model.spoolOpen(card.entry)
+                spools = true
+            }
+            .buttonStyle(CardButtonStyle())
+        case .failed where card.state != "sign_in":
+            Button("Try again") { signIn() }.buttonStyle(CardButtonStyle())
+        default:
+            Button(card.sending || card.signing ? "Signing in…" : "Sign in") { signIn() }
+                .buttonStyle(CardButtonStyle(primary: true))
+                .disabled(card.sending)
+        }
+    }
+
+    private func signIn() {
+        UIImpactFeedbackGenerator(style: .light).impactOccurred()
+        if card.state == "sign_in" {
+            session.signIn(card.server)
+            return
+        }
+        let secrets = typed.filter { name, _ in card.keys.contains { $0.name == name } }
+        session.send(session.model.spoolSignIn(message: card.message, card: card.id, server: card.server, secrets: secrets))
     }
 }
 

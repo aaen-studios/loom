@@ -326,6 +326,14 @@ struct Card: Equatable, Sendable {
     var routine = ""
     var why = ""
     var failures = 0
+    /// For `spool_connect` (SpoolCard.swift): the Spools entry, its name, the address it's
+    /// reached at, the agents it's for and the keys the person types. `server`, `state`,
+    /// `said` and `tools` are its server's, and `message`, `sending` and `error` its Sign in's.
+    var entry = ""
+    var name = ""
+    var address = ""
+    var agentNames: [String] = []
+    var keys: [SpoolKey] = []
     /// For choices, the answer the person sent once the chat went on.
     var chosen: Int?
     /// For a form: its fields, the reply it's in (for Send), what's picked on each
@@ -365,7 +373,12 @@ struct Card: Equatable, Sendable {
 
     init?(_ c: JSON) {
         type = c["type"].text
-        guard ["choices", "form", "checklist", "table", "progress", "facts", "sign_in", "mcp_add", "secret_ask", "routine_off"].contains(type) else { return nil }
+        guard ["choices", "form", "checklist", "table", "progress", "facts", "sign_in", "mcp_add", "secret_ask", "routine_off", "spool_connect"].contains(type) else { return nil }
+        entry = c["entry"].text
+        name = c["name"].text
+        address = c["address"].text
+        agentNames = c["agents"].array.map { $0["name"].text }
+        keys = type == "spool_connect" ? c["secrets"].array.map { SpoolKey(name: $0["name"].text, label: $0["label"].text, placeholder: $0["placeholder"].text) } : []
         routine = c["routine"].text
         why = c["why"].text
         failures = c["failures"].int ?? 0
@@ -1779,6 +1792,12 @@ final class Model {
     /// (RoutineOff.swift).
     var routineOnSending: Set<String> = []
     var routineOnErrors: [String: String] = [:]
+    /// Sign in on the cards of spools agents asked to connect (SpoolCard.swift): the ones
+    /// on their way and what the instance said to ones it refused, by card, and the cards
+    /// this phone signed in from, with their server, whose sign-in page opens here.
+    var spoolSending: Set<String> = []
+    var spoolErrors: [String: String] = [:]
+    var spoolWaiting: [String: String] = [:]
     /// What's picked on the choices and toggles of forms not sent yet, by
     /// `message/card/field`; the forms whose answers went and haven't come back, by their
     /// send's cid, with their `message/card`; and what the instance said to ones it
@@ -1996,6 +2015,11 @@ final class Model {
                     c.sending = secretSending.contains(c.call)
                     c.error = secretErrors[c.call] ?? ""
                 }
+                if c.type == "spool_connect" {
+                    c.message = out[i].id
+                    c.sending = spoolSending.contains(c.id)
+                    c.error = spoolErrors[c.id] ?? ""
+                }
                 if c.type == "routine_off" {
                     c.sending = routineOnSending.contains(c.routine)
                     c.error = routineOnErrors[c.routine] ?? ""
@@ -2196,6 +2220,7 @@ final class Model {
             let message = f["message"].text
             let block = f["block"].int ?? 0
             guard let card = Card(f["card"]), block >= 0 else { break }
+            spoolSeen(f["card"])
             // Whether the person signed in since, for a card that signs in.
             if card.signsIn { mcpStale = true }
             // A secret card that's answered waits on nothing, and the secrets are read
@@ -2243,6 +2268,9 @@ final class Model {
     private func event(_ f: JSON) {
         let kind = f["kind"].text
         let family = kind.split(separator: ".").first.map(String.init) ?? kind
+        if kind == "message.updated" {
+            for b in f["message"]["blocks"].array { spoolSeen(b["card"]) }
+        }
         switch family {
         case "agent":
             dirty.insert(.agents)
@@ -2437,6 +2465,8 @@ final class Model {
                     pending.append(frame)
                 }
             }
+        case let id where id.hasPrefix(spoolAnswer):
+            spoolAnswered(id, error: error)
         case let id where id.hasPrefix(routineOnAnswer):
             // The card's own message.updated says it's on; a refusal shows on the card,
             // which still has Turn on.
