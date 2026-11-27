@@ -104,7 +104,8 @@ export function play(app: HTMLElement) {
 	}
 	// A card's pill, or Open in its preview, opens its side preview beside the chat (PLAN.md,
 	// "Acta beside the chat"; acta_ui.rs, card_side). Its status chip's menu moves the card, and
-	// its pill's dot and preview with it; a tick ticks a subtask, and the counts follow.
+	// its pill's dot and preview with it; a tick ticks a subtask, and the counts follow; the tabs
+	// show Details, Comments and Activity, and Comment adds what was typed to the comments.
 	const actaSide = app.querySelector<HTMLElement>('[data-acta-side]');
 	const sidePill = app.querySelector<HTMLElement>('.acta-pill[data-card="SHOP-31"]');
 	if (actaSide && sidePill) {
@@ -118,12 +119,48 @@ export function play(app: HTMLElement) {
 			show(true);
 		});
 		actaSide.querySelector('[data-acta-close]')!.addEventListener('click', () => show(false));
-		// Follow, and Following with its tick, which stops it.
+		// ⋯: Follow, and Following with its tick, which stops it; Copy link, Copy branch and
+		// Make a thread close it.
+		const more = actaSide.querySelector<HTMLButtonElement>('[data-acta-more]')!;
+		const moreMenu = actaSide.querySelector<HTMLElement>('[data-acta-more-menu]')!;
+		const openMore = (open: boolean) => {
+			moreMenu.hidden = !open;
+			more.setAttribute('aria-expanded', String(open));
+		};
+		more.addEventListener('click', () => openMore(moreMenu.hidden === true));
+		for (const item of moreMenu.querySelectorAll<HTMLButtonElement>('button')) item.addEventListener('click', () => openMore(false));
 		const follow = actaSide.querySelector<HTMLButtonElement>('[data-acta-follow]')!;
 		follow.addEventListener('click', () => {
 			const on = follow.getAttribute('aria-pressed') !== 'true';
 			follow.setAttribute('aria-pressed', String(on));
 			follow.querySelector('[data-follow-words]')!.textContent = on ? 'Following' : 'Follow';
+		});
+		document.addEventListener('pointerdown', (e) => {
+			if (!moreMenu.hidden && !more.parentElement!.contains(e.target as Node)) openMore(false);
+		});
+		// The tabs, and the box to comment in under Comments.
+		const reply = actaSide.querySelector<HTMLFormElement>('[data-acta-reply]')!;
+		const tabs = [...actaSide.querySelectorAll<HTMLButtonElement>('[data-acta-tab]')];
+		for (const tab of tabs) {
+			tab.addEventListener('click', () => {
+				for (const t of tabs) t.setAttribute('aria-selected', String(t === tab));
+				for (const pane of actaSide.querySelectorAll<HTMLElement>('[data-acta-pane]')) pane.hidden = pane.dataset.actaPane !== tab.dataset.actaTab;
+				reply.hidden = tab.dataset.actaTab !== 'comments';
+			});
+		}
+		reply.addEventListener('submit', (e) => {
+			e.preventDefault();
+			const box = reply.querySelector<HTMLTextAreaElement>('[data-acta-reply-words]')!;
+			const words = box.value.trim();
+			if (!words) return;
+			const comment = document.createElement('div');
+			comment.className = 'as-comment';
+			comment.innerHTML = '<span class="as-avatar">Y</span><div><div class="as-who"><b>You</b> · now</div><p></p></div>';
+			comment.querySelector('p')!.textContent = words;
+			const list = actaSide.querySelector<HTMLElement>('[data-acta-comments]')!;
+			list.append(comment);
+			actaSide.querySelector('[data-acta-comment-count]')!.textContent = String(list.children.length);
+			box.value = '';
 		});
 		const chip = actaSide.querySelector<HTMLButtonElement>('[data-acta-status]')!;
 		const menu = actaSide.querySelector<HTMLElement>('[data-acta-menu]')!;
@@ -152,7 +189,7 @@ export function play(app: HTMLElement) {
 				tick.setAttribute('aria-checked', String(done));
 				const n = ticks.filter((t) => t.classList.contains('done')).length;
 				const words = `Subtasks ${n} of ${ticks.length}`;
-				actaSide.querySelector('[data-acta-count]')!.textContent = words;
+				actaSide.querySelector('[data-acta-count]')!.textContent = `Subtasks · ${n} of ${ticks.length}`;
 				const line = sidePill.querySelector<HTMLElement>('.cp-subtasks');
 				if (line) {
 					line.firstChild!.textContent = words;
