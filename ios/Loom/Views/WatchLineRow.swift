@@ -1,7 +1,7 @@
 import SwiftUI
 
 /// A watch's line in the chat (PLAN.md, "Watching outside events"), as the desktop draws
-/// it: a quiet row on the left, the board's tile or T3's strand, the card (its id, its
+/// it: a quiet row on the left, Acta's mark or T3's strand, the card (its id, its
 /// title and a dot in its status's colour) or the thread's title, and what happened and
 /// who in quiet ink. Lines one after another sit tight (`stackedLines`).
 struct WatchLineRow: View {
@@ -45,21 +45,14 @@ struct WatchLineRow: View {
     }
 }
 
-/// A line's mark, 14 points across: Acta's board tile, or T3's strand.
+/// A line's mark, 14 points across: Acta's mark, or T3's strand.
 private struct LineMark: View {
     var mark: WatchLine.Mark
 
     var body: some View {
         switch mark {
         case .board:
-            RoundedRectangle(cornerRadius: 3, style: .continuous)
-                .fill(Color.loom(Tokens.ColorLight.board, Tokens.ColorDark.board))
-                .frame(width: 14, height: 14)
-                .overlay(
-                    Image(systemName: "square.3.layers.3d")
-                        .font(.system(size: 8, weight: .semibold))
-                        .foregroundStyle(Color(red: 0.96, green: 0.95, blue: 0.99))
-                )
+            Pill.mark(14)
         case .strand(let lie):
             LineStrand(lie: lie).frame(width: 14, height: 10)
         case .none:
