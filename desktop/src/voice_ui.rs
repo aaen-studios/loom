@@ -121,8 +121,17 @@ fn tile_state(p: Palette, t: &Tile, scale: f32) -> Div {
     }
 }
 
-/// A tile's head: its ink square, its name and its one quiet line.
-fn tile_head(p: Palette, t: &Tile, scale: f32) -> Div {
+/// A tile's head: its ink square, its name and its one quiet line, or in its place the
+/// chip that picks its model (`chip`).
+fn tile_head(p: Palette, t: &Tile, scale: f32, chip: Option<AnyElement>) -> Div {
+    let line = match chip {
+        Some(chip) => div().pt(px(2.0)).flex().child(chip),
+        None => div()
+            .text_size(px(size::SMALL * scale))
+            .text_color(p.ink_2)
+            .line_clamp(2)
+            .child(t.line.clone()),
+    };
     div()
         .flex()
         .items_center()
@@ -143,13 +152,7 @@ fn tile_head(p: Palette, t: &Tile, scale: f32) -> Div {
                         .truncate()
                         .child(t.name.clone()),
                 )
-                .child(
-                    div()
-                        .text_size(px(size::SMALL * scale))
-                        .text_color(p.ink_2)
-                        .line_clamp(2)
-                        .child(t.line.clone()),
-                ),
+                .child(line),
         )
 }
 
@@ -308,7 +311,8 @@ impl Loom {
             .adding
             .as_ref()
             .is_some_and(|(k, id)| *k == tab && *id == t.id);
-        let mut tile = tile_box(p, self.card_fill(), t.in_use).child(tile_head(p, t, 1.0));
+        let chip = t.picks_model().then(|| self.model_chip(tab, t, cx));
+        let mut tile = tile_box(p, self.card_fill(), t.in_use).child(tile_head(p, t, 1.0, chip));
         if adding {
             if let Some(input) = &self.voice_key {
                 let cancel = self
@@ -385,6 +389,143 @@ impl Loom {
         .into_any_element()
     }
 
+    /// The chip in the tile in use's line (design B): its model's name and a chevron,
+    /// bordered as the small controls are, opening a menu of the service's models, newest
+    /// first, each with its one quiet line and a check on the one in use.
+    fn model_chip(&self, tab: Tab, t: &Tile, cx: &mut Context<Self>) -> AnyElement {
+        let p = self.p;
+        let open = self.model.voice.menu == Some(VoiceMenu::Model);
+        let name = t
+            .models
+            .iter()
+            .find(|m| m.id == t.picked)
+            .map(|m| m.name.clone())
+            .unwrap_or_else(|| t.line.clone());
+        let chip = div()
+            .id(SharedString::from(format!("voice-model-{}", t.id)))
+            .role(Role::Button)
+            .aria_label(format!("Model, {name}"))
+            .h(px(control::PILL))
+            .min_w_0()
+            .pl(px(space::S))
+            .pr(px(space::XS + 2.0))
+            .flex()
+            .items_center()
+            .gap(px(space::XS))
+            .rounded(px(radius::CHIP))
+            .border_1()
+            .border_color(p.line_strong)
+            .text_size(px(size::SMALL))
+            .text_color(p.ink)
+            .cursor_pointer()
+            .when(open, |d| d.bg(p.hover))
+            .when(!open, |d| d.soft_hover(transparent_black(), p.hover, None))
+            .child(div().min_w_0().truncate().child(name))
+            .child(
+                div()
+                    .flex_none()
+                    .text_color(p.ink_3)
+                    .child(Icon::new(Ico::ChevronDown).xsmall()),
+            )
+            .on_click(cx.listener(|this, _, _, cx| {
+                this.model.voice.menu = if this.model.voice.menu == Some(VoiceMenu::Model) {
+                    None
+                } else {
+                    Some(VoiceMenu::Model)
+                };
+                cx.notify();
+            }));
+        let menu = open.then(|| {
+            let mut list = div()
+                .id("voice-model-menu")
+                .occlude()
+                .w(px(layout::MENU_WIDE))
+                .p(px(space::XS))
+                .flex()
+                .flex_col()
+                .bg(p.raised)
+                .border_1()
+                .border_color(p.line_strong)
+                .rounded(px(radius::CARD))
+                .shadow_lg()
+                .on_mouse_down_out(cx.listener(|this, _, _, cx| {
+                    this.model.voice.menu = None;
+                    cx.notify();
+                }));
+            for (n, m) in t.models.iter().enumerate() {
+                let on = m.id == t.picked;
+                let id = m.id.clone();
+                list = list.child(
+                    div()
+                        .id(SharedString::from(format!("voice-model-{n}")))
+                        .role(Role::MenuItem)
+                        .aria_label(m.name.clone())
+                        .flex()
+                        .items_center()
+                        .gap(px(space::M))
+                        .px(px(space::M))
+                        .py(px(space::S - 2.0))
+                        .rounded(px(radius::ROW))
+                        .cursor_pointer()
+                        .soft_hover(transparent_black(), p.hover, None)
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .flex()
+                                .flex_col()
+                                .gap(px(1.0))
+                                .child(
+                                    div()
+                                        .text_size(px(size::SMALL))
+                                        .text_color(p.ink)
+                                        .child(m.name.clone()),
+                                )
+                                .child(
+                                    div()
+                                        .text_size(px(size::SMALL - 1.0))
+                                        .text_color(p.ink_3)
+                                        .child(m.line.clone()),
+                                ),
+                        )
+                        .when(on, |d| {
+                            d.child(
+                                div()
+                                    .flex_none()
+                                    .text_color(p.ink_2)
+                                    .child(Icon::new(Ico::Check).xsmall()),
+                            )
+                        })
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            let f = this.model.voice.use_model(tab, &id);
+                            this.send(f);
+                            cx.notify();
+                        })),
+                );
+            }
+            list
+        });
+        div()
+            .relative()
+            .min_w_0()
+            .child(chip)
+            .when_some(menu, |d, menu| {
+                d.child(
+                    div()
+                        .absolute()
+                        .top(px(control::PILL + 4.0))
+                        .left_0()
+                        .child(deferred(
+                            anchored()
+                                .anchor(Anchor::TopLeft)
+                                .snap_to_window_with_margin(px(space::S))
+                                .child(menu),
+                        )),
+                )
+            })
+            .into_any_element()
+    }
+
     /// A row's picker: what's picked and a chevron, with the choices in a menu under it.
     fn voice_picker(
         &self,
@@ -398,7 +539,7 @@ impl Loom {
         let open = self.model.voice.menu == Some(which);
         let id = match which {
             VoiceMenu::Language => "voice-language",
-            VoiceMenu::Voice => "voice-voice",
+            VoiceMenu::Voice | VoiceMenu::Model => "voice-voice",
         };
         let button = div()
             .id(id)
@@ -482,7 +623,7 @@ impl Loom {
                                     .model
                                     .voice
                                     .set(Tab::Dictation, serde_json::json!({"language": value})),
-                                VoiceMenu::Voice => this.model.voice.set(
+                                VoiceMenu::Voice | VoiceMenu::Model => this.model.voice.set(
                                     Tab::Speech,
                                     serde_json::json!({"voice": value, "voice_name": picked_name}),
                                 ),
@@ -938,7 +1079,7 @@ pub(super) fn setup_card(
             ..card.tile.clone()
         };
         tile_box(p, fill, model == "ready")
-            .child(tile_head(p, &card.tile, scale))
+            .child(tile_head(p, &card.tile, scale, None))
             .child(
                 div()
                     .min_h(px(control::BUTTON_SMALL))
@@ -951,7 +1092,7 @@ pub(super) fn setup_card(
             )
     } else {
         tile_box(p, fill, !card.asking)
-            .child(tile_head(p, &card.tile, scale))
+            .child(tile_head(p, &card.tile, scale, None))
             .when(!card.asking, |d| d.child(in_use_mark(p, scale)))
     };
     let mut rows = div().flex().flex_col();

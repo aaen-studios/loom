@@ -96,18 +96,20 @@ Under **Credits**: the emoji are [Twemoji](https://github.com/jdecked/twemoji), 
 
 ## Voice
 
-The composer's mic is loom's own dictation: click it and your words come into the message box as you say them, and click it again to stop. Replies can be read aloud too. Both use a service you have a key for, and **Dictation** and **Speech**, beside the page's title, each list theirs as tiles. The one in use is outlined, with a check and **In use**. **Use** picks another, and **Add key** asks for its key, masked, with an eye to show it; **Change key** replaces it. A key is kept with your secrets on the instance, sealed, so it works on every device of yours. With no service set up, the mic opens this page.
+The composer's mic is loom's own dictation: click it and your words come into the message box as you say them, and click it again to stop. Replies can be read aloud too. Both use a service you have a key for, and **Dictation** and **Speech**, beside the page's title, each list theirs as tiles. The one in use is outlined, with a check and **In use**. A service's tile says the model it uses, its newest to start with, and on the one in use that's a menu of its models, each with a line on how it differs. **Use** picks another, and **Add key** asks for its key, masked, with an eye to show it; **Change key** replaces it. A key is kept with your secrets on the instance, sealed, so it works on every device of yours. With no service set up, the mic opens this page.
 
 Under **Dictation**:
 
-- **ElevenLabs Scribe**, **Deepgram Nova-3** and **OpenAI** (gpt-4o-transcribe) write the words as you say them. **Groq** (Whisper large v3) writes them once you stop.
+- **ElevenLabs** (Scribe v3 Live, or Scribe v2 Realtime), **Deepgram** (Nova-3, Flux English or Flux multilingual) and **OpenAI** (gpt-live-transcribe or gpt-realtime-whisper) write the words as you say them; OpenAI's gpt-transcribe writes them once you stop, as **Groq** does (Whisper large v3 turbo, or Whisper large v3).
+- On your computer, with no key: **Parakeet Ultra** and **Parakeet v3** (25 languages), **Whisper large v3 turbo** (99 languages) and **Parakeet v2** (English), each downloaded once.
 - **Language**: Detect, or one of twenty.
 - **Shortcut**: Ctrl+Shift+Space starts and stops dictation, or Off. Off to start with, as the key is live mode's; picking it here sets Live's Shortcut to Off.
 - **Hold to talk**: the mic records while you hold it, and stops when you let go. Off.
 
 Under **Speech**:
 
-- **ElevenLabs** (Flash v2.5, your own voices and the library's), **Fish Audio** (S2.1 Pro, the voice library) and **OpenAI** (gpt-4o-mini-tts, 13 voices).
+- **ElevenLabs** (v4 Turbo, v4, v3 or Multilingual v2, with your own voices and the library's), **Fish Audio** (Drama 3, S2.1 Pro or S2 Pro, the voice library), **OpenAI** (gpt-realtime-2.1-mini, 10 voices) and **Deepgram** (Flux with 36 English voices, or Aura-2 with 41).
+- On your computer, with no key: **Kokoro v1.1** (Chinese, and 3 English voices), **Supertonic 3** (31 languages, 10 voices), **Pocket TTS** (English, 2 voices) and **Kokoro v1.0** (English and Chinese).
 - **Voice**: one of the service's voices, and its play button to hear it.
 - **Speed**: 0.8× to 1.2×. 1× to start with.
 - **Read replies aloud**: Never, Only in live, or Always, which reads a reply aloud as it comes in the chat in front of you. Never to start with.

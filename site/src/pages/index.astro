@@ -117,36 +117,75 @@ const tiles = [
 // title, as Spools has Find and Installed, Dictation and Speech each its engines as tiles in black
 // and white, an ink tile with its maker's logo in its ink (shared/voice/, as the app draws it), its
 // name, one quiet line and Use, Add key or Change key; the one in use outlined in ink with a check
-// in a ring and In use; then its rows. Live has only its rows. Deepgram Nova-3 dictates and OpenAI
-// speaks, with Marin at 1×, and replies aren't read aloud. Ctrl+Shift+Space is Live's, so
-// Dictation's shortcut is Off; picking it on one tab sets the other's to Off. The models on the
-// device have Download, then a thin bar with its percent and Cancel while it downloads, then Delete
-// and Use (voice_ui.rs, tile_state); Kokoro, whose authors have no logo, has Lucide's laptop.
-// Parakeet is downloading, and carries on when the panel comes into view.
+// in a ring and In use; then its rows. Live has only its rows. A service's line is its model's
+// name, newest by default; on the one in use it's a chip that opens a menu of its models, each
+// with one quiet line and a check on the one in use (voice_ui.rs, model_chip). Deepgram Nova-3
+// dictates and OpenAI speaks, with Marin at 1×, and replies aren't read aloud. Ctrl+Shift+Space
+// is Live's, so Dictation's shortcut is Off; picking it on one tab sets the other's to Off. The
+// models on the device have Download, then a thin bar with its percent and Cancel while it
+// downloads, then Delete and Use (voice_ui.rs, tile_state); Kokoro, Supertonic and Pocket TTS,
+// whose authors have no logo, have Lucide's laptop. Parakeet Ultra is downloading, and carries on
+// when the panel comes into view.
 const LAPTOP =
 	'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 5a2 2 0 0 1 2 2v8.526a2 2 0 0 0 .212.897l1.068 2.127a1 1 0 0 1-.9 1.45H3.62a1 1 0 0 1-.9-1.45l1.068-2.127A2 2 0 0 0 4 15.526V7a2 2 0 0 1 2-2z"></path><path d="M20.054 15.987H3.946"></path></svg>';
-type Engine = { id: string; name: string; line: string; mark: string; key: boolean; on: boolean; model?: 'absent' | 'ready' | number };
+type Model = { name: string; line: string };
+type Engine = { id: string; name: string; line: string; mark: string; key: boolean; on: boolean; model?: 'absent' | 'ready' | number; models?: Model[] };
+// A service's models, newest first, as shared/voice.calx's MODELS has them; its line is the first's
+// name.
+const service = (id: string, name: string, mark: string, key: boolean, on: boolean, models: Model[]): Engine => ({ id, name, line: models[0].name, mark, key, on, models });
 const VOICE: { id: string; name: string; engines: Engine[] }[] = [
 	{
 		id: 'dictation',
 		name: 'Dictation',
 		engines: [
-			{ id: 'elevenlabs-scribe', name: 'ElevenLabs Scribe', line: 'Words as you say them', mark: elevenlabsMark, key: false, on: false },
-			{ id: 'deepgram', name: 'Deepgram Nova-3', line: 'Words as you say them', mark: deepgramMark, key: true, on: true },
-			{ id: 'openai-transcribe', name: 'OpenAI', line: 'gpt-4o-transcribe, words as you say them', mark: openaiMark, key: false, on: false },
-			{ id: 'groq', name: 'Groq', line: 'Whisper large v3, writes once you stop', mark: groqMark, key: false, on: false },
-			{ id: 'parakeet', name: 'Parakeet v2', line: 'English, 660 MB', mark: nvidiaMark, key: true, on: false, model: 62 },
+			service('elevenlabs-scribe', 'ElevenLabs', elevenlabsMark, false, false, [
+				{ name: 'Scribe v3 Live', line: 'Words as you say them' },
+				{ name: 'Scribe v2 Realtime', line: 'The model before' },
+			]),
+			service('deepgram', 'Deepgram', deepgramMark, true, true, [
+				{ name: 'Nova-3', line: 'Words as you say them' },
+				{ name: 'Flux English', line: "English, hears when you're done" },
+				{ name: 'Flux multilingual', line: "Ten languages, hears when you're done" },
+			]),
+			service('openai-transcribe', 'OpenAI', openaiMark, false, false, [
+				{ name: 'gpt-live-transcribe', line: 'Words as you say them' },
+				{ name: 'gpt-transcribe', line: 'Most accurate, writes once you stop' },
+				{ name: 'gpt-realtime-whisper', line: 'Whisper, words as you say them' },
+			]),
+			service('groq', 'Groq', groqMark, false, false, [
+				{ name: 'Whisper large v3 turbo', line: 'Writes once you stop, quicker' },
+				{ name: 'Whisper large v3', line: 'Writes once you stop, more accurate' },
+			]),
+			{ id: 'parakeet-ultra', name: 'Parakeet Ultra', line: '25 languages, 670 MB', mark: nvidiaMark, key: true, on: false, model: 62 },
+			{ id: 'parakeet-v3', name: 'Parakeet v3', line: '25 languages, 670 MB', mark: nvidiaMark, key: true, on: false, model: 'absent' },
 			{ id: 'whisper', name: 'Whisper large v3 turbo', line: '99 languages, 1 GB', mark: openaiMark, key: true, on: false, model: 'absent' },
+			{ id: 'parakeet', name: 'Parakeet v2', line: 'English, 660 MB', mark: nvidiaMark, key: true, on: false, model: 'absent' },
 		],
 	},
 	{
 		id: 'speech',
 		name: 'Speech',
 		engines: [
-			{ id: 'elevenlabs', name: 'ElevenLabs', line: "Flash v2.5, your voices and the library's", mark: elevenlabsMark, key: false, on: false },
-			{ id: 'fish', name: 'Fish Audio', line: 'S2.1 Pro, the voice library', mark: fishAudioMark, key: false, on: false },
-			{ id: 'openai-tts', name: 'OpenAI', line: 'gpt-4o-mini-tts, 13 voices', mark: openaiMark, key: true, on: true },
-			{ id: 'kokoro', name: 'Kokoro', line: 'English and Chinese, 350 MB', mark: LAPTOP, key: true, on: false, model: 'absent' },
+			service('elevenlabs', 'ElevenLabs', elevenlabsMark, false, false, [
+				{ name: 'v4 Turbo', line: "Quickest, your voices and the library's" },
+				{ name: 'v4', line: 'Most expressive' },
+				{ name: 'v3', line: 'The model before' },
+				{ name: 'Multilingual v2', line: 'Steady, and follows Speed' },
+			]),
+			service('fish', 'Fish Audio', fishAudioMark, false, false, [
+				{ name: 'Drama 3', line: 'Most expressive, the voice library' },
+				{ name: 'S2.1 Pro', line: 'Natural and quick' },
+				{ name: 'S2 Pro', line: 'The model before' },
+			]),
+			service('openai-tts', 'OpenAI', openaiMark, true, true, [{ name: 'gpt-realtime-2.1-mini', line: '10 voices' }]),
+			service('deepgram-tts', 'Deepgram', deepgramMark, false, false, [
+				{ name: 'Flux', line: '36 English voices' },
+				{ name: 'Aura-2', line: '41 English voices' },
+			]),
+			{ id: 'kokoro-v1.1', name: 'Kokoro v1.1', line: 'Chinese, 3 English voices, 365 MB', mark: LAPTOP, key: true, on: false, model: 'absent' },
+			{ id: 'supertonic', name: 'Supertonic 3', line: '31 languages, 10 voices, 130 MB', mark: LAPTOP, key: true, on: false, model: 'absent' },
+			{ id: 'pocket', name: 'Pocket TTS', line: 'English, 2 voices, 100 MB', mark: LAPTOP, key: true, on: false, model: 'absent' },
+			{ id: 'kokoro', name: 'Kokoro v1.0', line: 'English and Chinese, 350 MB', mark: LAPTOP, key: true, on: false, model: 'absent' },
 		],
 	},
 	{ id: 'live', name: 'Live', engines: [] },
@@ -155,7 +194,7 @@ const MODEL_BUTTON = { absent: 'Download', downloading: 'Cancel', ready: 'Delete
 const modelState = (e: Engine) => (typeof e.model === 'number' ? 'downloading' : (e.model ?? 'absent'));
 const engineButton = (e: Engine) => (e.on ? 'Change key' : e.key ? 'Use' : 'Add key');
 const LANGUAGES = ['Detect', 'English', 'Norwegian', 'Swedish', 'Danish', 'Finnish', 'German', 'Dutch', 'French', 'Spanish', 'Italian', 'Portuguese', 'Polish', 'Ukrainian', 'Turkish', 'Hindi', 'Japanese', 'Korean', 'Chinese', 'Arabic'];
-const VOICES = ['Alloy', 'Ash', 'Ballad', 'Cedar', 'Coral', 'Echo', 'Fable', 'Marin', 'Nova', 'Onyx', 'Sage', 'Shimmer', 'Verse'];
+const VOICES = ['Alloy', 'Ash', 'Ballad', 'Cedar', 'Coral', 'Echo', 'Marin', 'Sage', 'Shimmer', 'Verse'];
 const SHORTCUTS = ['Ctrl+Shift+Space', 'Off'];
 const SPEEDS = ['0.8×', '0.9×', '1×', '1.1×', '1.2×'];
 const READ_ALOUD = ['Never', 'Only in live', 'Always'];
@@ -531,7 +570,7 @@ const faq = {
 			<div class="copy" data-reveal>
 				<h2 id="f-voice">Dictation, replies read aloud, and live mode</h2>
 				<p>
-					The composer's mic writes your words as you say them, with ElevenLabs Scribe, Deepgram, OpenAI or Groq, and replies can be read aloud with ElevenLabs, Fish Audio or OpenAI. Or download Parakeet, Whisper or Kokoro and run them on your computer, with no key. Live mode is talking with an agent: what you say goes once you stop, the reply is spoken as it's written, and talking over it stops it. A service's key is kept sealed on your instance, so one key works on every device of yours, and an agent can set it up for you.
+					The composer's mic writes your words as you say them, with ElevenLabs, Deepgram, OpenAI or Groq, and replies can be read aloud with ElevenLabs, Fish Audio, OpenAI or Deepgram. Each uses its newest model, and the one in use lets you pick another. Or download Parakeet, Whisper, Kokoro, Supertonic or Pocket TTS and run them on your computer, with no key. Live mode is talking with an agent: what you say goes once you stop, the reply is spoken as it's written, and talking over it stops it. A service's key is kept sealed on your instance, so one key works on every device of yours, and an agent can set it up for you.
 				</p>
 			</div>
 			<div class="visual" data-reveal>
@@ -564,7 +603,27 @@ const faq = {
 											<span class="voice-mark" aria-hidden="true" set:html={e.mark} />
 											<span class="voice-text">
 												<span class="voice-name">{e.name}</span>
-												<span class="voice-line">{e.line}</span>
+												<span class="voice-line" data-line hidden={e.on && (e.models?.length ?? 0) > 1}>
+													{e.line}
+												</span>
+												{(e.models?.length ?? 0) > 1 && (
+													<span class="menu-at voice-model" data-model-chip hidden={!e.on}>
+														<button type="button" class="voice-chip" data-pick aria-haspopup="menu" aria-expanded="false">
+															<span data-pick-value>{e.line}</span>
+															<svg class="i" viewBox="0 0 24 24" aria-hidden="true">
+																<path d={CHEVRON} />
+															</svg>
+														</button>
+														<span class="voice-menu voice-models" role="menu" data-pick-menu hidden>
+															{e.models!.map((m, j) => (
+																<button type="button" role="menuitemradio" class:list={{ on: j === 0 }} aria-checked={j === 0 ? 'true' : 'false'} data-value={m.name}>
+																	<span class="voice-model-name">{m.name}</span>
+																	<span class="voice-model-line">{m.line}</span>
+																</button>
+															))}
+														</span>
+													</span>
+												)}
 											</span>
 											<div class="spool-foot" data-engine-foot>
 												<span class="spool-state" hidden={!e.on}>
@@ -1801,6 +1860,70 @@ const faq = {
 		font-size: var(--size-caption);
 		color: var(--ink-3);
 	}
+	.voice-line[hidden],
+	.voice-model[hidden] {
+		display: none;
+	}
+	/* The model in use, a chip bordered as the small controls are, which opens its menu: each model
+	   with its quiet line, and a check on the one in use. */
+	.voice-model {
+		align-self: flex-start;
+		max-width: 100%;
+		margin-top: 2px;
+	}
+	.voice-chip {
+		display: flex;
+		align-items: center;
+		gap: 4px;
+		min-width: 0;
+		max-width: 100%;
+		height: var(--control-pill);
+		padding: 0 6px 0 8px;
+		border: 1px solid var(--line-strong);
+		border-radius: var(--radius-chip);
+		font-size: var(--size-caption);
+		font-weight: var(--weight-medium);
+		color: var(--ink);
+		transition: background-color 0.12s;
+	}
+	.voice-chip [data-pick-value] {
+		overflow: hidden;
+		white-space: nowrap;
+		text-overflow: ellipsis;
+	}
+	.voice-chip:hover,
+	.voice-chip[aria-expanded='true'] {
+		background: var(--hover);
+	}
+	.voice-chip .i {
+		flex: none;
+		width: 12px;
+		height: 12px;
+		color: var(--ink-3);
+	}
+	.voice-models {
+		left: 0;
+		right: auto;
+		width: 220px;
+		max-height: none;
+	}
+	.voice-models button {
+		display: grid;
+		grid-template-columns: 1fr auto;
+		column-gap: var(--space-s);
+	}
+	.voice-models .on::after {
+		grid-column: 2;
+		grid-row: 1;
+	}
+	.voice-model-name {
+		grid-column: 1;
+	}
+	.voice-model-line {
+		grid-column: 1;
+		font-size: var(--size-caption);
+		color: var(--ink-3);
+	}
 	.voice .spool-foot {
 		flex-wrap: nowrap;
 	}
@@ -2377,6 +2500,14 @@ const faq = {
 				button.hidden = model !== undefined && (model !== 'ready' || on);
 			}
 			if (state) state.hidden = !on;
+			// A service in use has its model's chip in place of its line, which says the model picked.
+			const chip = tile.querySelector<HTMLElement>('[data-model-chip]');
+			const line = tile.querySelector<HTMLElement>('[data-line]');
+			if (chip && line) {
+				chip.hidden = !on;
+				line.hidden = on;
+				line.textContent = chip.querySelector('[data-pick-value]')?.textContent ?? line.textContent;
+			}
 			if (model === undefined) return;
 			const act = tile.querySelector<HTMLElement>('[data-model-btn]');
 			if (act) {
@@ -2471,8 +2602,8 @@ const faq = {
 			}
 		}
 
-		// The language's and the voice's menus: one open at a time, closed by a pick, Esc or a click
-		// outside.
+		// The language's, the voice's and the model chips' menus: one open at a time, closed by a pick,
+		// Esc or a click outside.
 		const picks = [...voice.querySelectorAll<HTMLElement>('.menu-at')];
 		function closeMenus(but?: HTMLElement) {
 			for (const at of picks) {

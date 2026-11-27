@@ -52,6 +52,18 @@ pub struct Tile {
     pub in_use: bool,
     /// A model on the device: where its download is on this computer, as the core says.
     pub model: Option<Model>,
+    /// A service's models, newest first, and the one it uses, by its id; none for a
+    /// model on the device, which is its own.
+    pub models: Vec<Choice>,
+    pub picked: String,
+}
+
+/// One of a service's models, as the tile's menu shows it.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Choice {
+    pub id: String,
+    pub name: String,
+    pub line: String,
 }
 
 /// Where a model on the device is, as the core tells it with the tile.
@@ -91,7 +103,27 @@ impl Tile {
                     .min(100) as u8,
                 why: s(m, "why"),
             }),
+            models: v
+                .get("models")
+                .and_then(Value::as_array)
+                .map(|a| {
+                    a.iter()
+                        .map(|m| Choice {
+                            id: s(m, "id"),
+                            name: s(m, "name"),
+                            line: s(m, "line"),
+                        })
+                        .collect()
+                })
+                .unwrap_or_default(),
+            picked: s(v, "picked"),
         }
+    }
+
+    /// Whether the tile's line is its model, to pick from: the service in use, with more
+    /// than one.
+    pub fn picks_model(&self) -> bool {
+        self.in_use && self.models.len() > 1
     }
 
     /// Where its download is, for a model on the device: `absent`, `downloading`,
@@ -172,11 +204,12 @@ impl Action {
     }
 }
 
-/// A menu open on the page: the language's, or the voice's.
+/// A menu open on the page: the language's, the voice's, or the models of the tile in use.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Menu {
     Language,
     Voice,
+    Model,
 }
 
 /// Dictation on screen: where its words start in the composer, and how many bytes of
@@ -228,9 +261,17 @@ impl Voice {
     /// Takes the settings whole, as `voice.get` and `voice.updated` give them.
     pub fn took(&mut self, v: &Value) {
         self.came = true;
-        // A key added or an engine changed: voices that didn't come are asked for again.
-        self.voices
-            .retain(|_, got| got.as_ref().is_ok_and(|l| !l.is_empty()));
+        // A key added or an engine changed: voices that didn't come are asked for again,
+        // and so are those of an engine whose model changed, as Deepgram's voices are
+        // each model's.
+        let was = self.settings["speech"]["models"].clone();
+        let now = v
+            .pointer("/settings/speech/models")
+            .cloned()
+            .unwrap_or(Value::Null);
+        self.voices.retain(|engine, got| {
+            got.as_ref().is_ok_and(|l| !l.is_empty()) && was.get(engine) == now.get(engine)
+        });
         self.settings = v.get("settings").cloned().unwrap_or(Value::Null);
         let tiles = |k: &str| -> Vec<Tile> {
             v.pointer(&format!("/engines/{k}"))
@@ -373,6 +414,12 @@ impl Voice {
     /// Use, on a tile.
     pub fn use_engine(&mut self, tab: Tab, id: &str) -> Value {
         self.cmd("voice.put", json!({ tab.kind(): {"engine": id} }))
+    }
+
+    /// A model picked in the menu of the tile in use.
+    pub fn use_model(&mut self, tab: Tab, model: &str) -> Value {
+        self.menu = None;
+        self.cmd("voice.put", json!({ tab.kind(): {"model": model} }))
     }
 
     /// Download, Cancel or Delete, on a model's tile or its card.
@@ -594,11 +641,14 @@ mod tests {
                 "speech": {"engine": "openai", "voice": "cedar", "voice_name": "Cedar", "speed": 1.1, "read_aloud": "never"}},
             "engines": {
                 "dictation": [
-                    {"id": "elevenlabs", "name": "ElevenLabs Scribe", "line": "Words as you say them", "icon": "cloud", "streams": true, "key": true, "have": false, "in_use": false},
-                    {"id": "deepgram", "name": "Deepgram Nova-3", "line": "Words as you say them", "icon": "cloud", "icon_svg": "<svg id=\"deepgram\"/>", "mark": "deepgram", "streams": true, "key": true, "have": true, "in_use": true},
-                    {"id": "groq", "name": "Groq", "line": "Whisper large v3, writes once you stop", "icon": "cloud", "streams": false, "key": true, "have": true, "in_use": false}
+                    {"id": "elevenlabs", "name": "ElevenLabs", "line": "Scribe v3 Live", "icon": "cloud", "streams": true, "key": true, "have": false, "in_use": false,
+                        "models": [{"id": "scribe_v3_live", "name": "Scribe v3 Live", "line": "Words as you say them"}, {"id": "scribe_v2_realtime", "name": "Scribe v2 Realtime", "line": "The model before"}], "picked": "scribe_v3_live"},
+                    {"id": "deepgram", "name": "Deepgram", "line": "Nova-3", "icon": "cloud", "icon_svg": "<svg id=\"deepgram\"/>", "mark": "deepgram", "streams": true, "key": true, "have": true, "in_use": true,
+                        "models": [{"id": "nova-3", "name": "Nova-3", "line": "Words as you say them"}, {"id": "flux-general-en", "name": "Flux English", "line": "English, hears when you're done"}], "picked": "nova-3"},
+                    {"id": "groq", "name": "Groq", "line": "Whisper large v3 turbo", "icon": "cloud", "streams": false, "key": true, "have": true, "in_use": false}
                 ],
-                "speech": [{"id": "openai", "name": "OpenAI", "line": "gpt-4o-mini-tts, 13 voices", "icon": "cloud", "streams": false, "key": true, "have": true, "in_use": true}]
+                "speech": [{"id": "openai", "name": "OpenAI", "line": "gpt-realtime-2.1-mini", "icon": "cloud", "streams": false, "key": true, "have": true, "in_use": true,
+                    "models": [{"id": "gpt-realtime-2.1-mini", "name": "gpt-realtime-2.1-mini", "line": "10 voices"}], "picked": "gpt-realtime-2.1-mini"}]
             },
             "languages": [{"code": "", "name": "Detect"}, {"code": "no", "name": "Norwegian"}]
         })
@@ -628,6 +678,40 @@ mod tests {
         changed["settings"]["dictation"]["engine"] = json!("groq");
         assert!(v.take(&json!({"t": "event", "kind": "voice.updated", "voice": changed})));
         assert_eq!(v.engine(Tab::Dictation), "groq");
+    }
+
+    #[test]
+    fn the_tile_in_use_picks_its_model() {
+        let mut v = Voice::default();
+        v.took(&listed());
+        // Only the tile in use with a choice of models has the chip.
+        let picks: Vec<_> = v.dictation.iter().map(Tile::picks_model).collect();
+        assert_eq!(picks, vec![false, true, false]);
+        assert!(!v.speech[0].picks_model());
+        assert_eq!(v.dictation[1].picked, "nova-3");
+        assert_eq!(v.dictation[1].models[1].name, "Flux English");
+        v.menu = Some(Menu::Model);
+        let f = v.use_model(Tab::Dictation, "flux-general-en");
+        assert_eq!(f["name"], "voice.put");
+        assert_eq!(
+            f["args"],
+            json!({"dictation": {"model": "flux-general-en"}})
+        );
+        assert_eq!(v.menu, None);
+        // An engine's voices go once its model changes, as Deepgram's are each model's.
+        let mut l = listed();
+        l["settings"]["speech"]["models"] =
+            json!({"deepgram": "flux", "openai": "gpt-realtime-2.1-mini"});
+        v.took(&l);
+        v.voices.insert(
+            "deepgram".into(),
+            Ok(vec![("flux-kit-en".into(), "Kit".into())]),
+        );
+        v.voices
+            .insert("openai".into(), Ok(vec![("marin".into(), "Marin".into())]));
+        l["settings"]["speech"]["models"]["deepgram"] = json!("aura-2");
+        v.took(&l);
+        assert!(!v.voices.contains_key("deepgram") && v.voices.contains_key("openai"));
     }
 
     #[test]

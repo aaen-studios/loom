@@ -4,8 +4,8 @@ import Foundation
 /// the instance would (shared/voice.calx), the dictation the mic is on for, and live mode.
 struct SampleVoice {
     var settings: JSON = [
-        "dictation": ["engine": "deepgram", "language": ""],
-        "speech": ["engine": "openai", "voice": "marin", "voice_name": "Marin", "speed": 1, "read_aloud": "never"],
+        "dictation": ["engine": "deepgram", "language": "", "models": ["deepgram": "nova-3"]],
+        "speech": ["engine": "openai", "voice": "marin", "voice_name": "Marin", "speed": 1, "read_aloud": "never", "models": [:]],
         "live": ["barge_in": true, "pause": .number(0.8), "captions": true],
     ]
     var keys: Set<String> = ["deepgram", "openai"]
@@ -16,22 +16,46 @@ struct SampleVoice {
     var liveOn: JSON = .null
     var liveMuted = false
 
+    /// Each engine, with its line on the device's models; a service's is its model's name.
     static let engines: [(kind: String, id: String, name: String, line: String, streams: Bool)] = [
-        ("dictation", "elevenlabs", "ElevenLabs Scribe", "Words as you say them", true),
-        ("dictation", "deepgram", "Deepgram Nova-3", "Words as you say them", true),
-        ("dictation", "openai", "OpenAI", "gpt-4o-transcribe, words as you say them", true),
-        ("dictation", "groq", "Groq", "Whisper large v3, writes once you stop", false),
-        ("dictation", "parakeet", "Parakeet v2", "English, 660 MB", true),
+        ("dictation", "elevenlabs", "ElevenLabs", "", true),
+        ("dictation", "deepgram", "Deepgram", "", true),
+        ("dictation", "openai", "OpenAI", "", true),
+        ("dictation", "groq", "Groq", "", false),
+        ("dictation", "parakeet-ultra", "Parakeet Ultra", "25 languages, 670 MB", true),
+        ("dictation", "parakeet-v3", "Parakeet v3", "25 languages, 670 MB", true),
         ("dictation", "whisper", "Whisper large v3 turbo", "99 languages, 1 GB", true),
-        ("speech", "elevenlabs", "ElevenLabs", "Flash v2.5, your voices and the library's", false),
-        ("speech", "fish", "Fish Audio", "S2.1 Pro, the voice library", false),
-        ("speech", "openai", "OpenAI", "gpt-4o-mini-tts, 13 voices", false),
-        ("speech", "kokoro", "Kokoro", "English and Chinese, 350 MB", false),
+        ("dictation", "parakeet", "Parakeet v2", "English, 660 MB", true),
+        ("speech", "elevenlabs", "ElevenLabs", "", false),
+        ("speech", "fish", "Fish Audio", "", false),
+        ("speech", "openai", "OpenAI", "", false),
+        ("speech", "deepgram", "Deepgram", "", false),
+        ("speech", "kokoro-v1.1", "Kokoro v1.1", "Chinese, 3 English voices, 365 MB", false),
+        ("speech", "supertonic", "Supertonic 3", "31 languages, 10 voices, 130 MB", false),
+        ("speech", "pocket", "Pocket TTS", "English, 2 voices, 100 MB", false),
+        ("speech", "kokoro", "Kokoro v1.0", "English and Chinese, 350 MB", false),
+    ]
+
+    /// Each service's models, newest first, the first its default (shared/voice.calx's
+    /// MODELS).
+    static let models: [String: [(id: String, name: String, line: String)]] = [
+        "dictation/elevenlabs": [("scribe_v3_live", "Scribe v3 Live", "Words as you say them"), ("scribe_v2_realtime", "Scribe v2 Realtime", "The model before")],
+        "dictation/deepgram": [("nova-3", "Nova-3", "Words as you say them"), ("flux-general-en", "Flux English", "English, hears when you're done"),
+                               ("flux-general-multi", "Flux multilingual", "Ten languages, hears when you're done")],
+        "dictation/openai": [("gpt-live-transcribe", "gpt-live-transcribe", "Words as you say them"), ("gpt-transcribe", "gpt-transcribe", "Most accurate, writes once you stop"),
+                             ("gpt-realtime-whisper", "gpt-realtime-whisper", "Whisper, words as you say them")],
+        "dictation/groq": [("whisper-large-v3-turbo", "Whisper large v3 turbo", "Writes once you stop, quicker"), ("whisper-large-v3", "Whisper large v3", "Writes once you stop, more accurate")],
+        "speech/elevenlabs": [("eleven_v4_turbo", "v4 Turbo", "Quickest, your voices and the library's"), ("eleven_v4", "v4", "Most expressive"),
+                              ("eleven_v3", "v3", "The model before"), ("eleven_multilingual_v2", "Multilingual v2", "Steady, and follows Speed")],
+        "speech/fish": [("drama-3", "Drama 3", "Most expressive, the voice library"), ("s2.1-pro", "S2.1 Pro", "Natural and quick"), ("s2-pro", "S2 Pro", "The model before")],
+        "speech/openai": [("gpt-realtime-2.1-mini", "gpt-realtime-2.1-mini", "10 voices")],
+        "speech/deepgram": [("flux", "Flux", "36 English voices"), ("aura-2", "Aura-2", "41 English voices")],
     ]
 
     /// The models on the device, which the core says an iPhone can't run, and their makers'
-    /// marks (Kokoro's authors have none).
-    static let onDevice: [String: String] = ["parakeet": "nvidia", "whisper": "openai", "kokoro": ""]
+    /// marks (Kokoro's, Supertonic's and Pocket's authors have none).
+    static let onDevice: [String: String] = ["parakeet-ultra": "nvidia", "parakeet-v3": "nvidia", "whisper": "openai", "parakeet": "nvidia",
+                                             "kokoro-v1.1": "", "supertonic": "", "pocket": "", "kokoro": ""]
 
     static let languages: [(String, String)] = [
         ("", "Detect"), ("en", "English"), ("no", "Norwegian"), ("sv", "Swedish"), ("da", "Danish"),
@@ -40,7 +64,7 @@ struct SampleVoice {
         ("hi", "Hindi"), ("ja", "Japanese"), ("ko", "Korean"), ("zh", "Chinese"), ("ar", "Arabic"),
     ]
 
-    static let openaiVoices = ["marin", "cedar", "alloy", "ash", "ballad", "coral", "echo", "fable", "nova", "onyx", "sage", "shimmer", "verse"]
+    static let openaiVoices = ["marin", "cedar", "alloy", "ash", "ballad", "coral", "echo", "sage", "shimmer", "verse"]
 
     /// The engine's tile, as `voice.get` gives it.
     func tile(_ kind: String, _ id: String) -> JSON {
@@ -55,10 +79,15 @@ struct SampleVoice {
             }
             return .object(t)
         }
-        // Its maker's mark, as the app has its copy (`voice-deepgram`, from shared/voice).
+        // Its maker's mark, as the app has its copy (`voice-deepgram`, from shared/voice),
+        // and the model it uses: the one kept, else its first.
         let mark = e.id == "fish" ? "fish-audio" : e.id
-        return ["id": JSON(e.id), "name": JSON(e.name), "line": JSON(e.line), "icon": "cloud", "icon_svg": "<svg/>", "mark": JSON(mark), "streams": JSON(e.streams),
-                "key": true, "have": JSON(keys.contains(e.id)), "in_use": JSON(settings[kind]["engine"].text == e.id)]
+        let models = Self.models["\(kind)/\(e.id)"] ?? []
+        let kept = settings[kind]["models"][e.id].text
+        let picked = models.first { $0.id == kept } ?? models[0]
+        return ["id": JSON(e.id), "name": JSON(e.name), "line": JSON(picked.name), "icon": "cloud", "icon_svg": "<svg/>", "mark": JSON(mark), "streams": JSON(e.streams),
+                "key": true, "have": JSON(keys.contains(e.id)), "in_use": JSON(settings[kind]["engine"].text == e.id),
+                "models": .array(models.map { ["id": JSON($0.id), "name": JSON($0.name), "line": JSON($0.line)] }), "picked": JSON(picked.id)]
     }
 
     /// What `voice.get` gives.
@@ -72,14 +101,21 @@ struct SampleVoice {
                 "read_aloud": ["never", "live", "always"], "pauses": [.number(0.5), .number(0.8), .number(1.2)], "keys": .object(have)]
     }
 
-    /// The settings with `args`' changes.
+    /// The settings with `args`' changes: a `model` is the engine in use's.
     mutating func put(_ args: JSON) {
         guard case .object(var all) = settings else { return }
         for kind in ["dictation", "speech", "live"] {
-            guard case .object(let change) = args[kind], case .object(var now) = all[kind] ?? [:] else { continue }
+            guard case .object(var change) = args[kind], case .object(var now) = all[kind] ?? [:] else { continue }
             if kind == "speech", let engine = change["engine"], engine != now["engine"], change["voice"] == nil {
                 now["voice"] = ""
                 now["voice_name"] = ""
+            }
+            if let model = change.removeValue(forKey: "model") {
+                let engine = (change["engine"] ?? now["engine"] ?? "").text
+                var models: [String: JSON] = [:]
+                if case .object(let o) = now["models"] ?? [:] { models = o }
+                models[engine] = model
+                now["models"] = .object(models)
             }
             for (k, v) in change { now[k] = v }
             all[kind] = .object(now)

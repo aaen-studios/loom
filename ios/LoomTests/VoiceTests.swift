@@ -12,12 +12,17 @@ import Testing
                      "speech": ["engine": "openai", "voice": "marin", "voice_name": "Marin", "speed": .number(1.1), "read_aloud": "always"]],
         "engines": [
             "dictation": [
-                ["id": "elevenlabs", "name": "ElevenLabs Scribe", "line": "Words as you say them", "icon": "cloud", "streams": true, "key": true, "have": false, "in_use": false],
-                ["id": "deepgram", "name": "Deepgram Nova-3", "line": "Words as you say them", "icon": "cloud", "icon_svg": "<svg/>", "mark": "deepgram", "streams": true, "key": true, "have": true, "in_use": true],
-                ["id": "groq", "name": "Groq", "line": "Whisper large v3, writes once you stop", "icon": "cloud", "streams": false, "key": true, "have": true, "in_use": false],
+                ["id": "elevenlabs", "name": "ElevenLabs", "line": "Scribe v3 Live", "icon": "cloud", "streams": true, "key": true, "have": false, "in_use": false,
+                 "models": [["id": "scribe_v3_live", "name": "Scribe v3 Live", "line": "Words as you say them"], ["id": "scribe_v2_realtime", "name": "Scribe v2 Realtime", "line": "The model before"]], "picked": "scribe_v3_live"],
+                ["id": "deepgram", "name": "Deepgram", "line": "Nova-3", "icon": "cloud", "icon_svg": "<svg/>", "mark": "deepgram", "streams": true, "key": true, "have": true, "in_use": true,
+                 "models": [["id": "nova-3", "name": "Nova-3", "line": "Words as you say them"], ["id": "flux-general-en", "name": "Flux English", "line": "English, hears when you're done"]], "picked": "nova-3"],
+                ["id": "groq", "name": "Groq", "line": "Whisper large v3 turbo", "icon": "cloud", "streams": false, "key": true, "have": true, "in_use": false],
             ],
             "speech": [
-                ["id": "openai", "name": "OpenAI", "line": "gpt-4o-mini-tts, 13 voices", "icon": "cloud", "streams": false, "key": true, "have": true, "in_use": true],
+                ["id": "openai", "name": "OpenAI", "line": "gpt-realtime-2.1-mini", "icon": "cloud", "streams": false, "key": true, "have": true, "in_use": true,
+                 "models": [["id": "gpt-realtime-2.1-mini", "name": "gpt-realtime-2.1-mini", "line": "10 voices"]], "picked": "gpt-realtime-2.1-mini"],
+                ["id": "deepgram", "name": "Deepgram", "line": "Flux", "icon": "cloud", "streams": false, "key": true, "have": true, "in_use": false,
+                 "models": [["id": "flux", "name": "Flux", "line": "36 English voices"], ["id": "aura-2", "name": "Aura-2", "line": "41 English voices"]], "picked": "flux"],
             ],
         ],
         "languages": [["code": "", "name": "Detect"], ["code": "en", "name": "English"], ["code": "no", "name": "Norwegian"]],
@@ -35,7 +40,7 @@ import Testing
         #expect(v.came)
         #expect(v.settings.dictationEngine == "deepgram" && v.settings.language == "no")
         #expect(v.settings.speechEngine == "openai" && v.settings.voice == "marin" && v.settings.voiceName == "Marin" && v.settings.speed == 1.1 && v.settings.readAloud == "always")
-        #expect(v.dictation.map(\.id) == ["elevenlabs", "deepgram", "groq"] && v.speech.map(\.id) == ["openai"])
+        #expect(v.dictation.map(\.id) == ["elevenlabs", "deepgram", "groq"] && v.speech.map(\.id) == ["openai", "deepgram"])
         #expect(v.languageName("no") == "Norwegian" && v.languageName("") == "Detect")
         #expect(v.speeds == [0.8, 0.9, 1, 1.1, 1.2] && v.keys["fish"] == false && v.keys["groq"] == true)
     }
@@ -67,6 +72,29 @@ import Testing
                                "model": ["state": "unavailable", "why": "Runs on your computer, not on iPhone."]])
         #expect(phone.why == "Runs on your computer, not on iPhone." && phone.button == nil)
         #expect(VoiceTile(["id": "parakeet", "key": false, "have": true, "in_use": false, "model": ["state": "ready"]]).why == nil)
+    }
+
+    @Test func theTileInUsePicksItsModel() {
+        let m = caughtUp()
+        m.take(["t": "result", "id": "app.voice_get", "ok": true, "value": ["voice": Self.listed]])
+        // The one in use with more than one model has the chip; one not in use, or with one
+        // model, says its model in its line.
+        #expect(m.voice.dictation.map(\.picksModel) == [false, true, false])
+        #expect(m.voice.speech.map(\.picksModel) == [false, false])
+        let deepgram = m.voice.dictation[1]
+        #expect(deepgram.models.map(\.id) == ["nova-3", "flux-general-en"] && deepgram.picked == "nova-3" && deepgram.line == "Nova-3")
+        #expect(deepgram.models[1] == VoiceModelChoice(id: "flux-general-en", name: "Flux English", line: "English, hears when you're done"))
+        #expect(m.voiceModel("dictation", "flux-general-en")["args"] == ["dictation": ["model": "flux-general-en"]])
+        // A speech engine on another model drops the voices it had.
+        m.take(["t": "core.voices", "engine": "deepgram", "voices": [["id": "flux-thalia-en", "name": "Thalia"]]])
+        m.take(["t": "core.voices", "engine": "openai", "voices": [["id": "marin", "name": "Marin"]]])
+        guard case .object(var v) = Self.listed, case .object(var e) = v["engines"]!, case .array(var speech) = e["speech"]!, case .object(var dg) = speech[1] else { return }
+        dg["picked"] = "aura-2"
+        speech[1] = .object(dg)
+        e["speech"] = .array(speech)
+        v["engines"] = .object(e)
+        m.take(["t": "event", "kind": "voice.updated", "seq": 3, "voice": .object(v), "by": "d_1"])
+        #expect(m.voice.voices["deepgram"] == nil && m.voice.voices["openai"] != nil)
     }
 
     @Test func useAndKeysSendWhatTheInstanceTakes() {
@@ -140,7 +168,7 @@ import Testing
     /// A reply with a voice_setup card, as the instance stores it.
     func reply(_ state: String) -> JSON {
         let c: JSON = ["id": "voice_tc_4", "type": "voice_setup", "title": "Set up dictation", "call": "tc_4", "kind": "dictation", "agent": "a_1",
-                       "engine": ["id": "deepgram", "name": "Deepgram Nova-3", "line": "Words as you say them", "icon": "cloud", "streams": true, "key": true, "have": JSON(state == "set"), "in_use": JSON(state == "set")],
+                       "engine": ["id": "deepgram", "name": "Deepgram", "line": "Nova-3", "icon": "cloud", "streams": true, "key": true, "have": JSON(state == "set"), "in_use": JSON(state == "set")],
                        "settings": ["engine": "deepgram", "language": "no"], "service": "deepgram", "state": JSON(state), "said": ""]
         return ["id": "msg_9", "conversation": "c_1", "role": "agent", "at": 1_795_187_000_000, "blocks": [["kind": "card", "card": c]]]
     }
@@ -157,7 +185,7 @@ import Testing
         let c = try shown(m)
         let v = try #require(c.voice)
         #expect(c.type == "voice_setup" && c.title == "Set up dictation" && c.state == "asking" && c.message == "msg_9")
-        #expect(v.kind == "dictation" && v.service == "deepgram" && v.tile.name == "Deepgram Nova-3" && !v.tile.inUse && v.tile.button == .addKey)
+        #expect(v.kind == "dictation" && v.service == "deepgram" && v.tile.name == "Deepgram" && !v.tile.inUse && v.tile.button == .addKey)
         #expect(v.settings.language == "no")
         m.take(["t": "result", "id": "app.voice_get", "ok": true, "value": ["voice": Self.listed]])
         #expect(v.rows(m.voice).map { [$0.0, $0.1] } == [["Language", "Norwegian"]])
