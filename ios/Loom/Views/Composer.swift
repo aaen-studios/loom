@@ -33,6 +33,8 @@ struct Composer: View {
     @State private var dictated: NSRange?
     @State private var dictReplaced = NSAttributedString()
     @State private var holding = false
+    /// The dictated words as they're drawn (LOO-445).
+    @State private var heard = HeardWords()
 
     var body: some View {
         let model = session.model
@@ -357,6 +359,7 @@ struct Composer: View {
             dictated = nil
         }
         dictating = session.model.voice.heard.n + 1
+        heard.reset()
         session.startDictation()
     }
 
@@ -375,7 +378,9 @@ struct Composer: View {
         }
         let now = NSRange(location: at, length: (put as NSString).length)
         dictated = now
+        heard.draw(v, at: at, put: put, kept: d.over ? put : d.kept)
         if d.over {
+            heard.reset()
             let before = dictReplaced
             if now.length > 0 || before.length > 0 {
                 v.undoManager?.registerUndo(withTarget: v) { v in
@@ -1432,5 +1437,135 @@ private struct MentionPicker: View {
         .lineLimit(1)
         .truncationMode(.tail)
         .accessibilityElement(children: .combine)
+    }
+}
+
+/// The dictated words in the composer as they're drawn (LOO-445). Each new or changed
+/// word comes into focus over its place, a little low and blurred, rising and sharpening,
+/// while the field's own glyphs for it are clear; the blur is the label's shadow, as UIKit
+/// blurs no text. The words the engine may still change are faint, and turn to the
+/// field's ink once it keeps them. With Reduce Motion only the colour changes.
+@MainActor final class HeardWords {
+    private var words: [String] = []
+    private var kept = 0
+    private var rising: Set<Int> = []
+    private var ink: UIColor = .label
+
+    private static let focus = 0.38
+    private static let settle = 0.35
+    private var faint: UIColor { ink.withAlphaComponent(0.4) }
+
+    /// A new dictation: no words drawn yet.
+    func reset() {
+        words = []
+        kept = 0
+    }
+
+    /// The words this dictation has put in from `at`, the first of them as many as
+    /// `keptText` has kept.
+    func draw(_ v: UITextView, at: Int, put: String, kept keptText: String) {
+        ink = (v.typingAttributes[.foregroundColor] as? UIColor) ?? .label
+        let spans = HeardWords.spans(put)
+        let keptNow = keptText.split(whereSeparator: \.isWhitespace).count
+        let newlyKept = keptNow > kept
+        let calm = UIAccessibility.isReduceMotionEnabled
+        let before = words
+        words = spans.map(\.1)
+        kept = keptNow
+        var colour: [(NSRange, UIColor)] = []
+        for (i, (r, w)) in spans.enumerated() {
+            let range = NSRange(location: at + r.location, length: r.length)
+            let c = i < keptNow ? ink : faint
+            let fresh = i >= before.count || before[i] != w
+            if fresh && !calm {
+                focusIn(v, range, w, i)
+            } else if !rising.contains(i) {
+                colour.append((range, c))
+            }
+        }
+        let paint = {
+            for (range, c) in colour where NSMaxRange(range) <= v.textStorage.length {
+                v.textStorage.addAttribute(.foregroundColor, value: c, range: range)
+            }
+        }
+        if newlyKept && !calm {
+            UIView.transition(with: v, duration: HeardWords.settle, options: [.transitionCrossDissolve, .allowUserInteraction], animations: paint)
+        } else {
+            paint()
+        }
+    }
+
+    /// Each word in `text`, by its range there.
+    static func spans(_ text: String) -> [(NSRange, String)] {
+        let ns = text as NSString
+        var out: [(NSRange, String)] = []
+        var start = -1
+        for i in 0...ns.length {
+            let space = i == ns.length || (UnicodeScalar(ns.character(at: i)).map { CharacterSet.whitespacesAndNewlines.contains($0) } ?? false)
+            if space, start >= 0 {
+                let r = NSRange(location: start, length: i - start)
+                out.append((r, ns.substring(with: r)))
+                start = -1
+            } else if !space, start < 0 {
+                start = i
+            }
+        }
+        return out
+    }
+
+    private func focusIn(_ v: UITextView, _ range: NSRange, _ word: String, _ i: Int) {
+        v.layoutIfNeeded()
+        guard let start = v.position(from: v.beginningOfDocument, offset: range.location),
+              let end = v.position(from: start, offset: range.length),
+              let span = v.textRange(from: start, to: end)
+        else { return }
+        let rect = v.firstRect(for: span)
+        let colour = i < kept ? ink : faint
+        guard !rect.isNull, !rect.isInfinite, rect.width > 0 else {
+            v.textStorage.addAttribute(.foregroundColor, value: colour, range: range)
+            return
+        }
+        rising.insert(i)
+        v.textStorage.addAttribute(.foregroundColor, value: UIColor.clear, range: range)
+        let label = UILabel()
+        label.font = (v.typingAttributes[.font] as? UIFont) ?? v.font ?? .preferredFont(forTextStyle: .body)
+        label.text = word
+        label.textColor = colour
+        label.sizeToFit()
+        label.center = CGPoint(x: rect.midX, y: rect.midY)
+        label.isUserInteractionEnabled = false
+        label.isAccessibilityElement = false
+        label.alpha = 0
+        label.transform = CGAffineTransform(translationX: 0, y: 5)
+        label.layer.shadowColor = colour.cgColor
+        label.layer.shadowOffset = .zero
+        label.layer.shadowRadius = 0
+        label.layer.shadowOpacity = 0
+        let blur = CABasicAnimation(keyPath: "shadowRadius")
+        blur.fromValue = 4
+        blur.toValue = 0
+        let haze = CABasicAnimation(keyPath: "shadowOpacity")
+        haze.fromValue = 1
+        haze.toValue = 0
+        let both = CAAnimationGroup()
+        both.animations = [blur, haze]
+        both.duration = HeardWords.focus
+        both.timingFunction = CAMediaTimingFunction(name: .easeOut)
+        label.layer.add(both, forKey: "focus")
+        v.addSubview(label)
+        UIView.animate(withDuration: HeardWords.focus, delay: 0, options: [.curveEaseOut, .allowUserInteraction]) {
+            label.alpha = 1
+            label.transform = .identity
+        } completion: { [weak self, weak v] _ in
+            label.removeFromSuperview()
+            guard let self, let v else { return }
+            self.rising.remove(i)
+            guard NSMaxRange(range) <= v.textStorage.length,
+                  (v.textStorage.string as NSString).substring(with: range) == word
+            else { return }
+            // Once the dictation is over every word is kept.
+            let now = self.words.isEmpty || i < self.kept ? self.ink : self.faint
+            v.textStorage.addAttribute(.foregroundColor, value: now, range: range)
+        }
     }
 }

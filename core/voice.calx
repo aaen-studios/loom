@@ -227,14 +227,8 @@ impl Voice {
         return self.next
     }
 
-    // `text` is every word so far; `kept`, once there is any, is how it starts: the words
-    // the engine won't change again, so the composer draws the rest as still being said
-    // (LOO-445).
     fn tell(mut self, l: Listening, state: str, why: String) {
-        var m = Obj.new().s("t", String("core.dictation")).s("state", String(state)).s("engine", l.service.copy()).b("streams", l.streams).s("text", engines.joined(l.kept.copy(), l.saying.copy()))
-        if l.kept.len() > 0 { m = m.s("kept", l.kept.copy()) }
-        if why.len() > 0 { m = m.s("why", why) }
-        self.to_app.push(m.done())
+        self.to_app.push(dictation_frame(state, l.service.copy(), l.streams, l.kept.copy(), l.saying.copy(), why))
     }
 
     /// The person pressed the mic: dictation starts with the engine in use, once its key
@@ -994,6 +988,24 @@ pub fn reads_aloud(settings: Json, message: Json, active: bool, front: String) -
     if str_at(message.copy(), "role") != some(String("agent")) { return false }
     if bool_at(message.copy(), "quiet") == some(true) { return false }
     return str_at(message, "conversation") == some(front.copy())
+}
+
+// A `core.dictation` frame. `text` is every word so far; `kept`, once there is any, is
+// how it starts: the words the engine won't change again, so the composer draws the
+// rest as still being said (LOO-445).
+fn dictation_frame(state: str, service: String, streams: bool, kept: String, saying: String, why: String) -> Json {
+    var m = Obj.new().s("t", String("core.dictation")).s("state", String(state)).s("engine", service).b("streams", streams).s("text", engines.joined(kept.copy(), saying))
+    if kept.len() > 0 { m = m.s("kept", kept) }
+    if why.len() > 0 { m = m.s("why", why) }
+    return m.done()
+}
+
+@test
+fn dictation_says_which_words_are_kept() {
+    let none_yet = dictation_frame("listening", String("deepgram"), true, String(), String("can you"), String())
+    assert("{none_yet}" == #"{"t":"core.dictation","state":"listening","engine":"deepgram","streams":true,"text":"can you"}"#)
+    let partly = dictation_frame("listening", String("deepgram"), true, String("can you check"), String("why the"), String())
+    assert("{partly}" == #"{"t":"core.dictation","state":"listening","engine":"deepgram","streams":true,"text":"can you check why the","kept":"can you check"}"#)
 }
 
 @test

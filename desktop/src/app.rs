@@ -635,6 +635,9 @@ pub struct Loom {
     /// The words dictation put in the composer while they're drawn coming into focus
     /// and turning to full ink (LOO-445).
     heard: Vec<model::voice::Heard>,
+    /// The composer's colours for those words: hidden while the overlay draws them
+    /// coming into focus, faint while they may still change, then turning to ink.
+    heard_marks: bool,
     /// Live mode: the mic while it listens, whether the perf build's made-up frames
     /// drive it (`LOOM_LIVE`), and the clock its thread waves by.
     live_mic: Option<crate::voice::Mic>,
@@ -1833,6 +1836,7 @@ ACTA_KEY=secret:ACTA_KEY",
             voice_key: None,
             dictate_held: false,
             heard: Vec::new(),
+            heard_marks: false,
             live_mic: None,
             live_sample: false,
             live_t0: Instant::now(),
@@ -11845,7 +11849,8 @@ ACTA_KEY=secret:ACTA_KEY",
                                         this.composer_escape(cx)
                                     }
                                 }))
-                                .child(self.composer_textarea(cx)),
+                                .child(self.composer_textarea(cx))
+                                .child(self.heard_overlay(cx)),
                         )
                         .when_some(emoji_button, |d, b| d.child(b))
                         // Dictation: loom's own, into the composer at the caret; then the
@@ -27085,6 +27090,7 @@ impl Render for Loom {
         }
         // Dictation's words, and what else voice asked for, and live mode's.
         self.take_voice(window, cx);
+        self.tick_heard(window, cx);
         self.take_live(cx);
         let signed_out = self.model.conn == Some(Conn::SignedOut);
         // The opening weave plays once the app knows it's signed in. Signed out, the

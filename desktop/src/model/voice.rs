@@ -929,7 +929,14 @@ mod tests {
         v.take(&json!({"t": "core.dictation", "state": "listening", "text": "water the"}));
         v.composer_words("Hello");
         let d = v.dictated.take().unwrap();
-        assert_eq!(d, Dictated { at: 6, words: "water the".into(), kept: 0 });
+        assert_eq!(
+            d,
+            Dictated {
+                at: 6,
+                words: "water the".into(),
+                kept: 0
+            }
+        );
         let t0 = Instant::now();
         let a = heard(&[], &d, t0);
         assert_eq!(a.len(), 2);

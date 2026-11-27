@@ -3620,9 +3620,33 @@ const DRAFT_BODY = "Hi Ana,\nThanks for paying the October invoice so quickly. I
 	.typed:not(:empty) + .placeholder {
 		display: none;
 	}
-	/* Dictation's words still being heard, faint until the engine keeps them. */
-	.typed :global(.hearing) {
+	/* Dictation's words (LOO-445): each comes into focus, blurred and a little low, then
+	   sharp; those still being heard are faint until the engine keeps them, then turn to ink. */
+	.typed :global(.heard) {
+		display: inline-block;
+		white-space: pre;
+		transition: color 0.35s ease-out;
+		animation: heard-focus 0.38s ease-out both;
+	}
+	.typed :global(.heard.hearing) {
 		color: var(--ink-3);
+	}
+	@keyframes heard-focus {
+		from {
+			opacity: 0;
+			filter: blur(6px);
+			transform: translateY(5px);
+		}
+		to {
+			opacity: 1;
+			filter: none;
+			transform: none;
+		}
+	}
+	@media (prefers-reduced-motion: reduce) {
+		.typed :global(.heard) {
+			animation: none;
+		}
 	}
 	.typed:not(:empty)::after {
 		content: '';
