@@ -10,11 +10,20 @@ module core.live
 //   person's pause (Send when I stop talking) ends it.
 // - **The turn** is heard by the dictation engine in use, through core/voice.calx's
 //   dictation: it starts as speech starts and stops as it ends, and its last words go
-//   to the agent as the person's message (`send`), in the chat, as any other.
+//   to the agent as the person's message (`send`, with `live`, so the agent is told
+//   its reply is spoken: server/spoken.calx), in the chat, as any other.
 // - **The reply** streams in as deltas. Its words are cut into sentences as they come,
 //   said as words (no code, no marks), and spoken by the speech engine in use a few
 //   sentences at a time: the first as soon as it's whole, the next while the one
-//   before plays. Each is played when the one before ends, by its own length.
+//   before plays. Each is played when the one before ends, by its own length. What
+//   the agent wrote before a tool call is said as the call starts, whole or not.
+// - **Progress.** While the run works and nothing is said, a step that starts is said
+//   in plain words (its `doing`), at most every 15 s, and with nothing said for 20 s,
+//   a short update ("Still checking the board."); so is what the agent gives `say`.
+//   They're spoken and shown as the view's words, never kept as messages. They never
+//   start while the person talks or their turn is being sent, wait behind speech that
+//   plays, and are dropped once stale: the run ended, or a newer step started. Talking
+//   over one stops it, but not the run.
 // - **Barge-in.** With Talk over a reply on, speech louder than the room by more, for
 //   300 ms, while the agent speaks, stops what plays, drops what's waiting, stops the
 //   run (`cancel`), and starts the person's turn.
@@ -43,6 +52,9 @@ const LEARNING: u32 = 10           // frames that only learn the room: 200 ms
 const SAY_MOST: usize = 280        // the most text spoken in one request
 const SENTENCE_LEAST: usize = 8    // a shorter sentence goes with the next
 const LIVE_ID: str = "live:"       // the id speech for live mode goes with
+const STEP_MS: i64 = 15000         // a new step is said at most this often
+const STILL_MS: i64 = 20000        // and with nothing said for this long, a short update
+const SAY_STALE_MS: i64 = 10000    // what the agent gave say, dropped once it waited this long
 
 /// What live mode asks of the core's Voice (core/voice.calx).
 pub enum Do {
@@ -67,6 +79,7 @@ struct Piece {
     at: List<i64>      // when each word starts, ms into it
     levels: List<f64>  // its level each 20 ms, 0 to 1
     ms: i64
+    update: bool       // a progress update, not the reply
 }
 
 // A text block of the reply being cut into sentences.
@@ -118,6 +131,18 @@ pub struct Live {
     playing: Piece?
     ends: i64              // when the piece playing ends, ms
     played: bool           // this reply has played something
+    // Progress while the run works.
+    run_at: i64            // when the run started, ms
+    step: String           // the step it's on, in plain words, or ""
+    step_call: String      // that step's call
+    step_said: bool        // it was said, or the agent's own words before it said it
+    update_at: i64         // when the last update was said this run, or 0
+    voice_at: i64          // when the agent's voice last ended this run, or 0
+    asked: String          // what the agent gave say, waiting to be said
+    asked_at: i64
+    saying_update: bool    // the speech being written is an update
+    saying_for: String     // and the step it was said at, which a newer step makes stale
+    update_before: i64     // when the update before it was said, for one dropped as stale
     told: String           // the state the app was last told
     pub to_voice: List<Do>
     pub sends: List<Json>
@@ -193,7 +218,19 @@ fn piece_of(file: own String, wav: List<u8>, text: String) -> Piece {
         at_ms.push(from_ms + if weights == 0 { 0i64 } else { i64.wrap(so_far) * span / i64.wrap(weights) })
         so_far += w.len() + 2
     }
-    return Piece { file: file, words: words, at: at_ms, levels: levels, ms: ms }
+    return Piece { file: file, words: words, at: at_ms, levels: levels, ms: ms, update: false }
+}
+
+// "Checking the board" as it goes after "Still": "checking the board". A word in
+// capitals stays as it is.
+fn after_still(doing: String) -> String {
+    if doing.len() < 2 { return doing.to_lower_root() }
+    let first = doing.byte_at(0)
+    let second = doing.byte_at(1)
+    if first >= b'A' and first <= b'Z' and not (second >= b'A' and second <= b'Z') {
+        return "{doing[0..1].to_lower_root()}{doing[1..]}"
+    }
+    return doing.copy()
 }
 
 /// Where a whole sentence ends in `text`, the last such place: just after a `.`, `!`
@@ -248,7 +285,7 @@ fn cut(b: mut Block, end: bool) -> List<String> {
 
 impl Live {
     pub fn new() -> Live {
-        return Live { on: false, agent: String(), name: String(), conversation: String(), started: 0, muted: false, barge_in: true, pause_ms: 800, captions: true, speaks: true, floor: -60.0, frames: 0, rest: List<i16>(), run: 0, quiet_ms: 0, talking: false, before: List<List<i16>>(), ear: Ear.Idle, held: List<u8>(), draining: false, discard: false, heard: String(), waiting: false, run_id: String(), going: false, reply: String(), caption: String(), blocks: List<Block>(), gen: 0, next: 0, queue: List<String>(), saying: String(), saying_text: String(), ready: List<Piece>(), playing: none, ends: 0, played: false, told: String(), to_voice: List<Do>(), sends: List<Json>(), to_app: List<Json>() }
+        return Live { on: false, agent: String(), name: String(), conversation: String(), started: 0, muted: false, barge_in: true, pause_ms: 800, captions: true, speaks: true, floor: -60.0, frames: 0, rest: List<i16>(), run: 0, quiet_ms: 0, talking: false, before: List<List<i16>>(), ear: Ear.Idle, held: List<u8>(), draining: false, discard: false, heard: String(), waiting: false, run_id: String(), going: false, reply: String(), caption: String(), blocks: List<Block>(), gen: 0, next: 0, queue: List<String>(), saying: String(), saying_text: String(), ready: List<Piece>(), playing: none, ends: 0, played: false, run_at: 0, step: String(), step_call: String(), step_said: false, update_at: 0, voice_at: 0, asked: String(), asked_at: 0, saying_update: false, saying_for: String(), update_before: 0, told: String(), to_voice: List<Do>(), sends: List<Json>(), to_app: List<Json>() }
     }
 
     /// Whether the dictation Voice is doing is live mode's, whose core.dictation is
@@ -478,15 +515,33 @@ impl Live {
     }
 
     // The person talked over the reply: what plays stops, what's waiting goes, and the
-    // run is stopped, its words so far kept in the chat.
+    // run is stopped, its words so far kept in the chat. Over a progress update alone,
+    // only the update stops: the run goes on, and their turn goes to it as any message
+    // sent while it works.
     fn barge(mut self) {
+        let replying = self.replying()
         self.drop_speech()
-        if self.going and self.run_id.len() > 0 {
-            self.sends.push(Obj.new().s("t", String("cancel")).s("run", self.run_id.copy()).done())
+        if replying {
+            if self.going and self.run_id.len() > 0 {
+                self.sends.push(Obj.new().s("t", String("cancel")).s("run", self.run_id.copy()).done())
+            }
+            self.blocks = List<Block>()
+            self.reply = String()
         }
-        self.blocks = List<Block>()
-        self.reply = String()
         self.tell(Obj.new().b("stop", true).done())
+    }
+
+    // Whether any of what plays or waits to is the reply, not an update.
+    fn replying(self) -> bool {
+        if self.queue.len() > 0 { return true }
+        if self.saying.len() > 0 and not self.saying_update { return true }
+        if let p = self.playing {
+            if not p.update { return true }
+        }
+        for p in self.ready {
+            if not p.update { return true }
+        }
+        return false
     }
 
     fn drop_speech(mut self) {
@@ -495,6 +550,7 @@ impl Live {
         self.ready = List<Piece>()
         self.playing = none
         self.saying = String()
+        self.saying_update = false
         self.played = false
         self.gen += 1
         if had { self.to_voice.push(Do.Hush) }
@@ -538,7 +594,7 @@ impl Live {
             self.tell(Obj.new().s("why", str_at(f, "why") ?? String("Dictation stopped.")).done())
         } else if text.len() > 0 {
             self.next += 1
-            self.sends.push(Obj.new().s("t", String("send")).s("cid", "live_{self.started}_{self.next}").s("conversation", self.conversation.copy()).s("text", text).done())
+            self.sends.push(Obj.new().s("t", String("send")).s("cid", "live_{self.started}_{self.next}").s("conversation", self.conversation.copy()).s("text", text).b("live", true).done())
             self.waiting = true
             self.caption = String()
             self.tell(Json.Null)
@@ -574,6 +630,34 @@ impl Live {
             self.going = true
             self.waiting = false
             self.caption = String()
+            self.run_at = now
+            self.step = String()
+            self.step_call = String()
+            self.step_said = false
+            self.update_at = 0
+            self.voice_at = 0
+            self.asked = String()
+            self.retell()
+            return
+        }
+        // A step starts: what the agent wrote before it is said now, whole or not, and
+        // the step is said in plain words once nothing else is. A subagent's steps,
+        // and say's own call, aren't.
+        if kind == "tool.started" or kind == "tool.updated" {
+            if str_at(f.copy(), "run") != some(self.run_id.copy()) or self.run_id.len() == 0 { return }
+            if str_at(f.copy(), "parent") != none or str_at(f.copy(), "name") == some(String("say")) { return }
+            let call = str_at(f.copy(), "call") ?? String()
+            let doing = str_at(f.copy(), "doing") ?? String()
+            if kind == "tool.started" {
+                self.flush()
+                self.step = doing
+                self.step_call = call
+                self.step_said = bool_at(f, "said") == some(true)
+            } else if call == self.step_call and not self.step_said and doing.len() > 0 {
+                self.step = doing
+            }
+            self.pump(now)
+            self.progress(now)
             self.retell()
             return
         }
@@ -619,8 +703,81 @@ impl Live {
             if str_at(f, "run") != some(self.run_id.copy()) { return }
             self.going = false
             self.waiting = false
+            self.asked = String()
             self.retell()
         }
+    }
+
+    // What the reply wrote that isn't a whole sentence yet, said now: a tool call
+    // comes after it, so nothing more comes to it soon.
+    fn flush(mut self) {
+        if not self.speaks { return }
+        for k in 0..self.blocks.len() {
+            if self.blocks[k].message == self.reply {
+                for s in cut(mut self.blocks[k], true) { self.say(s.copy()) }
+            }
+        }
+    }
+
+    /// What the agent gave `say` (the instance's `say` frame): said once nothing else
+    /// is, if its run still works by then and it hasn't waited 10 s.
+    pub fn said(mut self, f: Json, now: i64) {
+        if not self.on or not self.going { return }
+        if str_at(f.copy(), "conversation") != some(self.conversation.copy()) or str_at(f.copy(), "run") != some(self.run_id.copy()) { return }
+        let text = (str_at(f, "text") ?? String()).trim().copy()
+        if text.len() == 0 { return }
+        self.asked = text
+        self.asked_at = now
+        self.progress(now)
+    }
+
+    // The update due next while the run works and nothing is said, when it's due and
+    // what it says: what the agent gave say, at once; a step not said yet, at once
+    // when nothing was said this run, else 15 s after the last thing said; or with
+    // nothing said for 20 s, that it's still at its step. None while anything plays
+    // or waits to, while the person talks or their turn is being sent, and once the
+    // reply is whole.
+    fn next_update(self, now: i64) -> (i64, String)? {
+        if not self.on or not self.going or self.reply.len() == 0 { return none }
+        if self.speaking() or self.talking or self.ear != Ear.Idle { return none }
+        if self.asked.len() > 0 and now - self.asked_at <= SAY_STALE_MS { return some((self.asked_at, self.asked.copy())) }
+        let last = if self.update_at > self.voice_at { self.update_at } else { self.voice_at }
+        if self.step.len() > 0 and not self.step_said {
+            return some((if last == 0 { 0i64 } else { last + STEP_MS }, "{self.step}."))
+        }
+        let quiet = if last > self.run_at { last } else { self.run_at }
+        let still = if self.step.len() > 0 { "Still {after_still(self.step.copy())}." } else { String("Still working on it.") }
+        return some((quiet + STILL_MS, still))
+    }
+
+    // Says the update that's due, if one is.
+    fn progress(mut self, now: i64) {
+        if self.asked.len() > 0 and now - self.asked_at > SAY_STALE_MS { self.asked = String() }
+        let (due, text) = self.next_update(now) else return
+        if now < due { return }
+        // What the agent said itself isn't made stale by its next step.
+        let agents_own = self.asked.len() > 0
+        if agents_own {
+            self.asked = String()
+        } else if self.step.len() > 0 and not self.step_said {
+            self.step_said = true
+        }
+        self.update_before = self.update_at
+        self.update_at = now
+        if not self.speaks {
+            self.caption = text
+            self.tell(Json.Null)
+            return
+        }
+        let words = engines.speakable(text)
+        if words.len() == 0 { return }
+        self.next += 1
+        self.saying = "{LIVE_ID}{self.gen}.{self.next}"
+        self.saying_text = words.copy()
+        self.saying_update = true
+        self.saying_for = if agents_own { String() } else { self.step_call.copy() }
+        self.to_voice.push(Do.Speak(words, self.saying.copy()))
+        self.retell()
     }
 
     fn block_at(self, message: String, index: i64) -> usize? {
@@ -672,6 +829,7 @@ impl Live {
             self.next += 1
             self.saying = "{LIVE_ID}{self.gen}.{self.next}"
             self.saying_text = text.copy()
+            self.saying_update = false
             self.to_voice.push(Do.Speak(text, self.saying.copy()))
         }
     }
@@ -682,6 +840,8 @@ impl Live {
         let id = str_at(f.copy(), "id") ?? String()
         if not self.on or id != self.saying { return }
         self.saying = String()
+        let update = self.saying_update
+        self.saying_update = false
         let file = str_at(f.copy(), "file") ?? String()
         let why = str_at(f, "error") ?? failed.copy()
         if why.len() > 0 {
@@ -690,27 +850,48 @@ impl Live {
             self.retell()
             return
         }
+        // An update gone stale while it was written isn't played: its run ended, or a
+        // newer step started.
+        if update and (not self.going or (self.saying_for.len() > 0 and self.saying_for != self.step_call)) {
+            self.update_at = self.update_before
+            self.pump(now)
+            self.progress(now)
+            self.retell()
+            return
+        }
         let text = self.saying_text.copy()
-        self.ready.push(piece_of(file, wav, text))
+        var piece = piece_of(file, wav, text)
+        piece.update = update
+        self.ready.push(piece)
         self.pump(now)
     }
 
-    /// Time going by: the piece playing ends, and the next plays.
+    /// Time going by: the piece playing ends, and the next plays, or an update is due.
     pub fn tick(mut self, now: i64) {
         if not self.on { return }
         if self.playing != none and now >= self.ends {
             self.playing = none
+            self.voice_at = now
             self.pump(now)
             if self.playing == none and not self.speaking() { self.played = false }
             self.retell()
         }
+        self.progress(now)
     }
 
-    /// How long until the piece playing ends.
+    /// How long until the piece playing ends, or the next update is due.
     pub fn due_ms(self, now: i64) -> i64? {
-        if not self.on or self.playing == none { return none }
-        let left = self.ends - now
-        return some(if left < 0 { 0i64 } else { left + 1 })
+        if not self.on { return none }
+        var due: i64? = none
+        if self.playing != none {
+            let left = self.ends - now
+            due = some(if left < 0 { 0i64 } else { left + 1 })
+        }
+        if let (when, _) = self.next_update(now) {
+            let left = if when <= now { 0i64 } else { when - now }
+            if due == none or left < (due ?? 0) { due = some(left) }
+        }
+        return due
     }
 }
 
@@ -829,7 +1010,7 @@ fn a_turn_is_heard_and_sent_after_a_pause() {
     l.audio(tone(300, 0.0), 24000, 1)
     assert(asked(mut l) == [String("hear"), String("stop")])
     l.dictation(json(#"{"t":"core.dictation","state":"done","text":" hello there "}"#))
-    assert("{l.sends[0]}" == #"{"t":"send","cid":"live_1000_1","conversation":"c_1","text":"hello there"}"#)
+    assert("{l.sends[0]}" == #"{"t":"send","cid":"live_1000_1","conversation":"c_1","text":"hello there","live":true}"#)
     assert(str_at(last_told(l), "state") == some(String("thinking")))
 }
 
@@ -934,6 +1115,119 @@ fn without_engines_the_settings_open() {
     never.delta(String("m_2"), 0, String("text"), false, String("It **passed**. Yes"), 2000)
     never.event(json(#"{"kind":"message.created","message":{"id":"m_2","role":"agent","blocks":[{"kind":"text","text":"It **passed**. Yes."}]}}"#), 2100)
     assert(asked(mut never) == [String("hush")] and str_at(last_told(never), "words") == some(String("It passed. Yes.")))
+}
+
+// A step of run r_1 starting: its call, its words, and whether the agent's words
+// before it said them.
+fn step_started(l: mut Live, call: str, doing: str, said: bool, now: i64) {
+    l.event(Obj.new().s("kind", String("tool.started")).s("run", String("r_1")).s("call", String(call)).s("name", String("Bash")).s("doing", String(doing)).b("said", said).done(), now)
+}
+
+// The person said a turn, and its run started at 10 s.
+fn working() -> Live {
+    var l = talked()
+    l.event(json(#"{"kind":"run.started","run":"r_1","conversation":"c_1","message":"m_2"}"#), 10000)
+    _ = asked(mut l)
+    return l
+}
+
+@test
+fn progress_is_said_while_it_works() {
+    var l = working()
+    // The first step is said at once, nothing having been said yet.
+    step_started(mut l, "c1", "Reading the board", false, 11000)
+    assert(asked(mut l) == [String("speak live:1.2 Reading the board.")])
+    l.spoke(json(#"{"t":"core.speak","id":"live:1.2","file":"u1.wav"}"#), wav_of(1000), String(), 11200)
+    assert("{at(at(last_told(l), "play"), "words")}" == #"["Reading","the","board."]"#)
+    l.tick(12200)
+    // A new step waits until 15 s after the last thing said.
+    step_started(mut l, "c2", "Writing the card", false, 13000)
+    assert(asked(mut l).len() == 0 and l.due_ms(13000) == some(14200i64))
+    l.tick(27199)
+    assert(asked(mut l).len() == 0)
+    l.tick(27200)
+    assert(asked(mut l) == [String("speak live:1.3 Writing the card.")])
+    l.spoke(json(#"{"t":"core.speak","id":"live:1.3","file":"u2.wav"}"#), wav_of(500), String(), 27300)
+    l.tick(27800)
+    // Still busy with it, a short update 20 s after the last.
+    l.tick(47799)
+    assert(asked(mut l).len() == 0)
+    l.tick(47800)
+    assert(asked(mut l) == [String("speak live:1.4 Still writing the card.")])
+    // None of it is a message: the one send is the person's turn.
+    assert(l.sends.len() == 1 and str_at(l.sends[0].copy(), "t") == some(String("send")))
+    for f in l.to_app {
+        assert(str_at(f.copy(), "t") == some(String("core.live")))
+    }
+    // Once the run ends, nothing more is said, and what was being written is dropped.
+    l.event(json(#"{"kind":"run.finished","run":"r_1","status":"done"}"#), 48000)
+    l.spoke(json(#"{"t":"core.speak","id":"live:1.4","file":"u3.wav"}"#), wav_of(500), String(), 48100)
+    assert(l.playing == none)
+    l.tick(90000)
+    assert(asked(mut l).len() == 0 and l.due_ms(90000) == none)
+}
+
+@test
+fn what_it_wrote_before_a_step_is_said_at_once() {
+    var l = working()
+    l.delta(String("m_2"), 0, String("text"), false, String("On it, checking the board"), 10200)
+    assert(asked(mut l).len() == 0)
+    // The step's words were the agent's own, so they aren't said again.
+    step_started(mut l, "c1", "Checking the board", true, 10300)
+    assert(asked(mut l) == [String("speak live:1.2 On it, checking the board")])
+    l.spoke(json(#"{"t":"core.speak","id":"live:1.2","file":"s1.wav"}"#), wav_of(1000), String(), 10400)
+    l.tick(11400)
+    l.tick(26400)
+    assert(asked(mut l).len() == 0)
+    l.tick(31400)
+    assert(asked(mut l) == [String("speak live:1.3 Still checking the board.")])
+}
+
+@test
+fn progress_waits_while_the_person_talks() {
+    var l = working()
+    l.audio(tone(400, 0.3), 24000, 1)
+    _ = asked(mut l)
+    step_started(mut l, "c1", "Reading the board", false, 11000)
+    l.tick(30000)
+    assert(asked(mut l) == List<String>() and l.due_ms(30000) == none)
+    // Not within the pause before their turn goes, nor while its words come.
+    l.audio(tone(300, 0.0), 24000, 1)
+    l.tick(30300)
+    assert(asked(mut l) == [String("hear")])
+    l.audio(tone(300, 0.0), 24000, 1)
+    l.tick(30600)
+    assert(asked(mut l) == [String("hear"), String("stop")])
+    l.dictation(json(#"{"t":"core.dictation","state":"done","text":"and the tests"}"#))
+    l.tick(31000)
+    assert(asked(mut l) == [String("speak live:1.3 Reading the board.")])
+    assert(l.sends.len() == 2)
+}
+
+@test
+fn talking_over_an_update_stops_only_it() {
+    var l = working()
+    step_started(mut l, "c1", "Reading the board", false, 11000)
+    _ = asked(mut l)
+    l.spoke(json(#"{"t":"core.speak","id":"live:1.2","file":"u1.wav"}"#), wav_of(3000), String(), 11100)
+    l.audio(tone(400, 0.3), 24000, 1)
+    assert(asked(mut l) == [String("hush"), String("listen"), String("hear"), String("hear")])
+    assert(l.sends.len() == 1 and l.playing == none and l.going)
+}
+
+@test
+fn what_the_agent_says_is_said_unless_stale() {
+    var l = working()
+    l.said(json(#"{"t":"say","run":"r_1","conversation":"c_1","text":"Found the card, writing it now."}"#), 10500)
+    assert(asked(mut l) == [String("speak live:1.2 Found the card, writing it now.")])
+    // Another while that plays waits for it, and goes once it has waited 10 s.
+    l.spoke(json(#"{"t":"core.speak","id":"live:1.2","file":"u1.wav"}"#), wav_of(15000), String(), 10600)
+    l.said(json(#"{"t":"say","run":"r_1","conversation":"c_1","text":"Almost there."}"#), 11000)
+    l.tick(25600)
+    assert(asked(mut l).len() == 0)
+    // Another chat's isn't said here.
+    l.said(json(#"{"t":"say","run":"r_9","conversation":"c_2","text":"Elsewhere."}"#), 26000)
+    assert(asked(mut l).len() == 0)
 }
 
 @test

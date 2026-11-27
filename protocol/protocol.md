@@ -321,6 +321,7 @@ A message from the person into a conversation.
 - `form`: the person's answers to a `form` card (below): `{message, card, answers}`, the reply the card is in, the card's `id`, and the answers, by each field's label. The instance checks them against the card (`server/cards.calx`): a text answer is cut at 1,000 bytes, a choice is one of its options, a toggle `true` or `false`, a number a number or text that reads as one; a required field left empty, or a form already answered, is refused with `bad_form`, saying why, and the core takes the send out of its outbox. The message's `text` is then the instance's, one line a field, `Label: answer` (a toggle `Yes` or `No`, an optional field left empty left out), and it keeps `form` with the answers as they were checked. The card keeps them as `answers`, and the reply comes again in `message.updated`. The agent reads the text, with a note after it: `[loom: This message is your person's answer to your form card_1, by each field's label: {"Name":"Ada","Size":"Large"}]`.
 
 - `reply`: the message it replies to ([PLAN.md](../PLAN.md#replying-to-a-message)), `{message, quote?, ask?}`: a message's `id` in the same conversation; `quote`, the words the person selected in it, for a reply to that part alone; and `ask: true` with a `quote`, for asking about it. Other fields are ignored: the core fills in the rest from its cache, as the instance will keep it, so the message waiting in the outbox shows its quote. One whose message isn't there or is in another chat is refused with `bad_reply`, and the core takes the send out of its outbox. The message keeps it as its own `reply`, below, and the agent reads it with the message, quoted line by line after `> `, in a note: `[loom: This message replies to your message msg_311 (with log.txt):`, `to this part of your message msg_311`, `to their own message msg_9`, or `Your person asks about this part of your message msg_311`.
+- `live`: `true` for a turn the person said in live mode, which the core's live mode sends ([PLAN.md](../PLAN.md#live-mode)). The agent's prompt gets, with this turn only, a note that its reply is spoken and how to answer (`server/spoken.calx`'s `NOTE`, starting `[loom: Your person is in live voice mode`), so a typed message, or any after live mode ends, gets none. A turn of plain talk runs at low effort where the session offers it (ACP's `thought_level` with a `low` value), and the session goes back to its effort before its next turn that isn't one; the agent's `config` is never changed. A message that waits in the queue keeps it, as `live` on its item. During the turn, the agent's [`say`](#say) reaches the person's devices.
 
 Answered by [`ack`](#ack), or [`error`](#error) with `ref` set to the `cid`.
 
@@ -447,6 +448,16 @@ Live text for a reply that's still being written. No `seq`; it isn't in the log.
 ```
 
 See [Messages and streaming](#messages-and-streaming).
+
+### `say`
+
+A short update an agent says aloud while it works, with its `say` tool, during a turn the person said in live mode (`send`'s `live`). Every live session of the person's gets it. No `seq`; it isn't in the log, and no message keeps it.
+
+```json
+{ "t": "say", "run": "run_77", "conversation": "c_9", "agent": "a_2", "text": "Found the card, writing it now." }
+```
+
+`text` is one line, cut at 240 bytes at a word. The core in live mode in that conversation, with that run working, says it as its progress updates are said ([PLAN.md](../PLAN.md#live-mode)); any other drops it, and the app never sees it. In a turn that wasn't said in live mode, `say` sends nothing and tells the agent so.
 
 ### `synced`
 
@@ -605,7 +616,7 @@ Beside its permission mode, an agent works under the person's rules on what an a
 
 A conversation has one turn at a time. A `send` while its agent is still answering waits in the conversation's queue ([PLAN.md](../PLAN.md#work-that-waits-its-turn)), kept in the instance's database, and goes once the turn ends: as the person's message, with the id the `ack` gave, and a run of its own. One goes at a time, first first. A turn that ends `done` or `failed` lets the next go. One the person stops (`cancel`) or that runs out (`limit`) leaves the queue waiting, until they send again or steer. A turn the instance's restart cut short finished `failed`, so once it's running again the next goes. A routine's run, or a step of its flow, isn't a turn in the chat: it goes on beside it in a session of its own, and a `send` during it goes at once ([PLAN.md](../PLAN.md#routines)).
 
-- Every change to a queue is a `queue.changed` event: `conversation`, and `queue`, the whole queue, first first, each item its `id`, `text`, `files`, `from` (the device that sent it), `at`, and `steered` once it's been steered.
+- Every change to a queue is a `queue.changed` event: `conversation`, and `queue`, the whole queue, first first, each item its `id`, `text`, `files`, `from` (the device that sent it), `at`, `steered` once it's been steered, and `live` for one said in live mode.
 - `queue.list` (`conversation`) gives it as `queue`. `queue.edit` (`id`, `text`) changes an item's text, in its place; it can't leave one with nothing. `queue.order` (`conversation`, `ids`) puts the items in that order, the ones it names first and the rest after, as they were. `queue.drop` (`id`) drops one. `not_found` is an item that's gone, sent or dropped.
 - `queue.steer` (`id`) sends one now: it goes first, and the running turn is stopped (`session/cancel`, so its run finishes `cancelled`). Then it goes, in the same ACP session, so the agent has what it did so far, and its prompt starts with a `[loom: …]` block that says it was stopped for this message. With no turn running, it goes at once.
 

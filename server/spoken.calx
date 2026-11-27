@@ -1,0 +1,143 @@
+module server.spoken
+
+// A turn the person said in live mode (PLAN.md, "Live mode"; LOO-444). Its `send`
+// says `live`, and the instance tells the agent its reply is spoken (NOTE), with
+// that turn only, so a typed message, or any after live mode ends, is told nothing.
+// A turn of plain talk runs at low effort, where the agent's program offers a
+// reasoning effort that is low (`effort_for`), so the first word comes sooner; one
+// that asks for work keeps the agent's own effort.
+import std.json.{Json, parse}
+import server.acp
+
+/// What the agent is told with a turn the person said in live mode.
+pub const NOTE: str = "[loom: Your person is in live voice mode: your reply is spoken aloud as you write it. Lead with the answer in one to three short spoken sentences. Don't read out tables, code, long lists or links: put them in your message and say \"details are in the chat\". Ask at most one question. When the work takes tools, say one short line first of what you're doing, such as \"On it, checking the board.\", and end with the result in a sentence. say speaks a short update while you work, without adding it to your reply. Drop this style when they ask for detail.]"
+
+// The most words a turn of plain talk has. A longer one is a request with
+// something in it to do.
+const PLAIN_MOST: usize = 40
+
+// Words a request opens with before its verb: "Can you please fix…".
+const OPENERS: str = "please|can you|could you|would you|will you|can we|could we|i want you to|i'd like you to|i need you to|i want to|i need to|let's|lets|go ahead and|now|ok|okay|so|and|then|also|just|hey|alright"
+
+// Verbs that ask for work, not talk.
+const WORK: str = "add analyse analyze audit build change clean commit compare compile configure create debug delete deploy design draft edit email find fix generate implement improve install investigate look make merge migrate move open organise organize plan prepare publish push refactor remove rename repair research review rewrite run schedule search send set ship sort start summarise summarize test tidy translate update upgrade write"
+
+/// Whether what the person said is plain talk: a question, an answer or a remark,
+/// not work. A sentence that opens with a verb of work (after "please", "can you"
+/// and the like) asks for work, and so does a turn of more than 40 words.
+pub fn plain(text: String) -> bool {
+    let words = text.split_whitespace()
+    if words.len() > PLAIN_MOST { return false }
+    for sentence in sentences(text.to_lower_root()) {
+        if asks_for_work(sentence) { return false }
+    }
+    return true
+}
+
+// The sentences of `text`, at `.`, `!`, `?` and line ends.
+fn sentences(text: String) -> List<String> {
+    var out = List<String>()
+    var from: usize = 0
+    for i in 0..text.len() {
+        let c = text.byte_at(i)
+        if c == b'.' or c == b'!' or c == b'?' or c == b'\n' or c == b';' {
+            let part = text[from..i].trim().copy()
+            if part.len() > 0 { out.push(part) }
+            from = i + 1
+        }
+    }
+    let last = text[from..].trim().copy()
+    if last.len() > 0 { out.push(last) }
+    return out
+}
+
+// Whether a sentence, in lowercase, opens with a verb of work.
+fn asks_for_work(sentence: String) -> bool {
+    var rest = sentence.replace(",", " ").trim().copy()
+    var again = true
+    while again {
+        again = false
+        for o in OPENERS.split("|") {
+            if rest == o {
+                return false
+            }
+            if rest.starts_with("{o} ") {
+                rest = rest[o.len() + 1..].trim().copy()
+                again = true
+            }
+        }
+    }
+    let first = rest.split_whitespace()
+    if first.len() == 0 { return false }
+    return " {WORK} ".contains(" {first[0]} ")
+}
+
+// The most bytes of what `say` speaks, cut at a word.
+const SAY_MOST: usize = 240
+
+/// What `say` speaks: `text` on one line, cut at 240 bytes, at a word.
+pub fn update_text(text: String) -> String {
+    let line = text.split_whitespace().join(" ")
+    if line.len() <= SAY_MOST { return line }
+    var end = SAY_MOST
+    while end > 0 and line.byte_at(end) != b' ' { end -= 1 }
+    return line[..end].copy()
+}
+
+/// Whether an effort is low already, so a turn of plain talk leaves it.
+pub fn low(value: String) -> bool {
+    return value == "low" or value == "minimal" or value == "none" or value == "off"
+}
+
+/// The effort a turn of plain talk runs at, in a session whose config options are
+/// `config`, when its effort would be `wanted` ("" for the session's own): its
+/// effort option's id and "low", or none where the session offers no effort, no
+/// low one, or is low already.
+pub fn effort_for(config: Json, wanted: String) -> (String, String)? {
+    let id = acp.option_in(config.copy(), "thought_level") else return none
+    if not acp.offers(config.copy(), id.copy(), String("low")) { return none }
+    let would = if wanted.len() > 0 { wanted.copy() } else { acp.current(config, id.copy()) ?? String() }
+    if low(would) { return none }
+    return some((id, String("low")))
+}
+
+@test
+fn plain_talk_is_told_from_work() {
+    assert(plain(String("What's the weather like tomorrow?")))
+    assert(plain(String("Did the build pass?")))
+    assert(plain(String("Thanks, that's great.")))
+    assert(plain(String("Okay. Yes please.")))
+    assert(not plain(String("Can you fix the login bug?")))
+    assert(not plain(String("Okay, please write the release notes.")))
+    assert(not plain(String("That's fine. Now deploy it to the VPS.")))
+    assert(not plain(String("Let's refactor the store")))
+    let long = "So I was thinking about the plan for next week and the things we said yesterday and whether it would be worth it to go over all of them again when we have some time to sit down and talk it through properly"
+    assert(not plain(String(long)))
+}
+
+@test
+fn updates_are_one_short_line() {
+    assert(update_text(String("  Found the card,\n writing it now. ")) == "Found the card, writing it now.")
+    let long = update_text("word ".repeat(80))
+    assert(long.len() <= SAY_MOST and long.ends_with("word"))
+}
+
+@test
+fn plain_talk_runs_at_low_effort() {
+    let config = Json.Array([acp_option(String("medium"))])
+    assert(effort_for(config.copy(), String()) == some((String("effort"), String("low"))))
+    assert(effort_for(config.copy(), String("high")) == some((String("effort"), String("low"))))
+    // Low already, or a session with no low one, is left as it is.
+    assert(effort_for(config.copy(), String("minimal")) == none)
+    assert(effort_for(Json.Array([acp_option(String("low"))]), String()) == none)
+    assert(effort_for(Json.Array(List<Json>()), String()) == none)
+}
+
+// A session's effort option, on `value`, offering low, medium and high.
+fn acp_option(value: String) -> Json {
+    let text = "\{\"id\":\"effort\",\"name\":\"Effort\",\"category\":\"thought_level\",\"type\":\"select\",\"currentValue\":\"{value}\",\"options\":[\{\"value\":\"low\",\"name\":\"Low\"\},\{\"value\":\"medium\",\"name\":\"Medium\"\},\{\"value\":\"high\",\"name\":\"High\"\}]\}"
+    return match parse(text) {
+        ok(j) => j,
+        err(_) => Json.Null,
+    }
+}
