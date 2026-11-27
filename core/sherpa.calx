@@ -1,0 +1,505 @@
+module core.sherpa
+
+// sherpa-onnx's C API, which runs the voice models on this device (PLAN.md, "Voice",
+// "On the device"), opened from the library core/models.calx downloaded (std.c), and
+// run on a thread of its own, so the core's loop goes on while a model loads, writes or
+// speaks. The core sends it jobs and hears what came of them, and the thread wakes the
+// loop when there's something.
+//
+// Dictation is cut into pieces by Silero's voice detector: each piece the person
+// finished saying is written once and kept, and while they're still saying one, what
+// they've said of it so far is written again every so often, in place of the last, so
+// words appear as they're said.
+//
+// The config structs are laid out as sherpa-onnx v2.0.3's c-api.h lays them out on a
+// 64-bit system, checked against clang's offsetof; a newer release is checked again
+// when it's pinned (core/models.calx, SHERPA).
+import std.c.{CLibrary}
+import std.json.{parse}
+import std.net.{Waker}
+import std.thread.{Task}
+import shared.obj.{str_at}
+import shared.voice as audio
+import core.models
+
+extern "C" fn strlen(s: *const u8) -> usize
+
+/// The rate the models hear at.
+pub const HEARD_RATE: i32 = 16000
+
+// How much of a piece still being said comes between writing it again, in 16 kHz
+// samples: often for Parakeet, which writes a few seconds in a tenth of one, and less
+// often for Whisper, which takes longer.
+const AGAIN_PARAKEET: usize = 12800    // 0.8 s
+const AGAIN_WHISPER: usize = 32000     // 2 s
+
+// The samples Silero's voice detector takes at once.
+const VAD_WINDOW: usize = 512
+
+/// What the thread is asked.
+pub enum Job {
+    /// Dictation `n` starts with `engine` (`parakeet` or `whisper`), from the models in
+    /// `root`, hearing `language` ("" to detect it, for Whisper).
+    Hear(u64, String, String, String)
+    /// More of what dictation `n` heard: 16 kHz samples from -1 to 1.
+    Audio(u64, List<f32>)
+    /// The person stopped: the last words, then `Done`.
+    Stop(u64)
+    /// Speech `n`: `text` in Kokoro's voice number `speaker`, at `speed`, from `root`.
+    Say(u64, String, i32, f32, String)
+    /// What's loaded goes, as no engine on the device is in use.
+    Unload
+}
+
+/// What came of a job.
+pub enum Came {
+    Partial(u64, String)     // the words of the piece being said, in place of the last
+    Final(u64, String)       // a piece's words, kept
+    Done(u64)
+    Failed(u64, String)
+    Spoken(u64, List<u8>)    // 16-bit mono PCM at 24 kHz
+}
+
+// The functions of sherpa-onnx's that loom calls, found once the library is open.
+struct Api {
+    create_recognizer: extern "C" fn(*const u8) -> *u8
+    destroy_recognizer: extern "C" fn(*u8)
+    create_stream: extern "C" fn(*u8) -> *u8
+    destroy_stream: extern "C" fn(*u8)
+    accept: extern "C" fn(*u8, i32, *const f32, i32)
+    decode: extern "C" fn(*u8, *u8)
+    result_json: extern "C" fn(*u8) -> *const u8
+    destroy_json: extern "C" fn(*const u8)
+    create_vad: extern "C" fn(*const u8, f32) -> *u8
+    destroy_vad: extern "C" fn(*u8)
+    vad_accept: extern "C" fn(*u8, *const f32, i32)
+    vad_empty: extern "C" fn(*u8) -> i32
+    vad_detected: extern "C" fn(*u8) -> i32
+    vad_front: extern "C" fn(*u8) -> *u8
+    vad_pop: extern "C" fn(*u8)
+    vad_flush: extern "C" fn(*u8)
+    destroy_segment: extern "C" fn(*u8)
+    create_tts: extern "C" fn(*const u8) -> *u8
+    destroy_tts: extern "C" fn(*u8)
+    generate: extern "C" fn(*u8, *const u8, *const u8, *u8, *u8) -> *u8
+    destroy_audio: extern "C" fn(*u8)
+}
+
+unsafe impl Send for Api {}
+
+// The functions Api holds, which the library must have.
+const FUNCTIONS: [str; 21] = [
+    "SherpaOnnxCreateOfflineRecognizer", "SherpaOnnxDestroyOfflineRecognizer", "SherpaOnnxCreateOfflineStream",
+    "SherpaOnnxDestroyOfflineStream", "SherpaOnnxAcceptWaveformOffline", "SherpaOnnxDecodeOfflineStream",
+    "SherpaOnnxGetOfflineStreamResultAsJson", "SherpaOnnxDestroyOfflineStreamResultJson", "SherpaOnnxCreateVoiceActivityDetector",
+    "SherpaOnnxDestroyVoiceActivityDetector", "SherpaOnnxVoiceActivityDetectorAcceptWaveform", "SherpaOnnxVoiceActivityDetectorEmpty",
+    "SherpaOnnxVoiceActivityDetectorDetected", "SherpaOnnxVoiceActivityDetectorFront", "SherpaOnnxVoiceActivityDetectorPop",
+    "SherpaOnnxVoiceActivityDetectorFlush", "SherpaOnnxDestroySpeechSegment", "SherpaOnnxCreateOfflineTts",
+    "SherpaOnnxDestroyOfflineTts", "SherpaOnnxOfflineTtsGenerateWithConfig", "SherpaOnnxDestroyOfflineTtsGeneratedAudio",
+]
+
+// Opens sherpa-onnx at `path` and finds its functions.
+fn open_api(path: String) -> (Api, CLibrary) ! String {
+    let lib = match unsafe { CLibrary.open(path.copy()) } {
+        ok(l) => l,
+        err(e) => fail e,
+    }
+    for name in FUNCTIONS {
+        if not lib.has(name) { fail "{path} has no {name}: it isn't sherpa-onnx {models.SHERPA}" }
+    }
+    let api = unsafe {
+        Api {
+            create_recognizer: lib.symbol("SherpaOnnxCreateOfflineRecognizer").to_fn<extern "C" fn(*const u8) -> *u8>(),
+            destroy_recognizer: lib.symbol("SherpaOnnxDestroyOfflineRecognizer").to_fn<extern "C" fn(*u8)>(),
+            create_stream: lib.symbol("SherpaOnnxCreateOfflineStream").to_fn<extern "C" fn(*u8) -> *u8>(),
+            destroy_stream: lib.symbol("SherpaOnnxDestroyOfflineStream").to_fn<extern "C" fn(*u8)>(),
+            accept: lib.symbol("SherpaOnnxAcceptWaveformOffline").to_fn<extern "C" fn(*u8, i32, *const f32, i32)>(),
+            decode: lib.symbol("SherpaOnnxDecodeOfflineStream").to_fn<extern "C" fn(*u8, *u8)>(),
+            result_json: lib.symbol("SherpaOnnxGetOfflineStreamResultAsJson").to_fn<extern "C" fn(*u8) -> *const u8>(),
+            destroy_json: lib.symbol("SherpaOnnxDestroyOfflineStreamResultJson").to_fn<extern "C" fn(*const u8)>(),
+            create_vad: lib.symbol("SherpaOnnxCreateVoiceActivityDetector").to_fn<extern "C" fn(*const u8, f32) -> *u8>(),
+            destroy_vad: lib.symbol("SherpaOnnxDestroyVoiceActivityDetector").to_fn<extern "C" fn(*u8)>(),
+            vad_accept: lib.symbol("SherpaOnnxVoiceActivityDetectorAcceptWaveform").to_fn<extern "C" fn(*u8, *const f32, i32)>(),
+            vad_empty: lib.symbol("SherpaOnnxVoiceActivityDetectorEmpty").to_fn<extern "C" fn(*u8) -> i32>(),
+            vad_detected: lib.symbol("SherpaOnnxVoiceActivityDetectorDetected").to_fn<extern "C" fn(*u8) -> i32>(),
+            vad_front: lib.symbol("SherpaOnnxVoiceActivityDetectorFront").to_fn<extern "C" fn(*u8) -> *u8>(),
+            vad_pop: lib.symbol("SherpaOnnxVoiceActivityDetectorPop").to_fn<extern "C" fn(*u8)>(),
+            vad_flush: lib.symbol("SherpaOnnxVoiceActivityDetectorFlush").to_fn<extern "C" fn(*u8)>(),
+            destroy_segment: lib.symbol("SherpaOnnxDestroySpeechSegment").to_fn<extern "C" fn(*u8)>(),
+            create_tts: lib.symbol("SherpaOnnxCreateOfflineTts").to_fn<extern "C" fn(*const u8) -> *u8>(),
+            destroy_tts: lib.symbol("SherpaOnnxDestroyOfflineTts").to_fn<extern "C" fn(*u8)>(),
+            generate: lib.symbol("SherpaOnnxOfflineTtsGenerateWithConfig").to_fn<extern "C" fn(*u8, *const u8, *const u8, *u8, *u8) -> *u8>(),
+            destroy_audio: lib.symbol("SherpaOnnxDestroyOfflineTtsGeneratedAudio").to_fn<extern "C" fn(*u8)>(),
+        }
+    }
+    return (api, lib)
+}
+
+/// A C struct being filled in: zeros, 8-byte aligned, with the strings its pointers
+/// point at kept alive beside it until it's been used.
+struct Config {
+    words: List<u64>
+    texts: List<String>
+}
+
+impl Config {
+    fn new(size: usize) -> Config {
+        var words = List<u64>()
+        for _ in 0..(size + 7) / 8 { words.push(0) }
+        return Config { words: words, texts: List<String>() }
+    }
+
+    fn text(mut self, at: usize, value: String) {
+        self.texts.push("{value}\0")
+        let i = self.texts.len() - 1
+        unsafe {
+            let p = self.texts[i].as_ptr().addr()
+            self.words.as_mut_ptr().cast<u8>().add(at).cast<usize>().write(p)
+        }
+    }
+
+    fn int(mut self, at: usize, value: i32) {
+        unsafe { self.words.as_mut_ptr().cast<u8>().add(at).cast<i32>().write(value) }
+    }
+
+    fn float(mut self, at: usize, value: f32) {
+        unsafe { self.words.as_mut_ptr().cast<u8>().add(at).cast<f32>().write(value) }
+    }
+}
+
+// Text C gave, read up to its NUL.
+unsafe fn c_text(p: *const u8) -> String {
+    if unsafe { p.is_null() } { return String() }
+    let n = unsafe { strlen(p) }
+    var b = List<u8>()
+    for i in 0..n { b.push(unsafe { p.add(i).read() }) }
+    return String.from_utf8(b) ?? String()
+}
+
+// A recognizer for `engine`, from the models in `root`.
+fn recognizer_config(engine: String, root: String, language: String) -> Config {
+    // SherpaOnnxOfflineRecognizerConfig: 624 bytes.
+    var c = Config.new(624)
+    let threads = 4
+    if engine == "whisper" {
+        let dir = "{root}/whisper"
+        c.text(48, "{dir}/turbo-encoder.int8.onnx")    // model_config.whisper.encoder
+        c.text(56, "{dir}/turbo-decoder.int8.onnx")    // .decoder
+        c.text(64, language)                            // .language, "" to detect it
+        c.text(72, String("transcribe"))                // .task
+        c.int(80, -1)                                   // .tail_paddings, its own
+        c.text(104, "{dir}/turbo-tokens.txt")           // model_config.tokens
+        c.text(128, String("whisper"))                  // model_config.model_type
+    } else {
+        let dir = "{root}/parakeet"
+        c.text(8, "{dir}/encoder.int8.onnx")            // model_config.transducer.encoder
+        c.text(16, "{dir}/decoder.int8.onnx")           // .decoder
+        c.text(24, "{dir}/joiner.int8.onnx")            // .joiner
+        c.text(104, "{dir}/tokens.txt")                 // model_config.tokens
+        c.text(128, String("nemo_transducer"))          // model_config.model_type
+    }
+    c.int(112, threads)                                 // model_config.num_threads
+    c.text(120, String("cpu"))                          // model_config.provider
+    c.text(528, String("greedy_search"))                // decoding_method
+    return c
+}
+
+// Silero's voice detector, at 16 kHz: a piece ends after half a second of quiet, and
+// is cut at 20 seconds, which Whisper's 30 leaves room for.
+fn vad_config(root: String) -> Config {
+    // SherpaOnnxVadModelConfig: 88 bytes.
+    var c = Config.new(88)
+    c.text(0, "{root}/vad/silero_vad.onnx")    // silero_vad.model
+    c.float(8, 0.5)                             // .threshold
+    c.float(12, 0.5)                            // .min_silence_duration
+    c.float(16, 0.25)                           // .min_speech_duration
+    c.int(20, 512)                              // .window_size
+    c.float(24, 20.0)                           // .max_speech_duration
+    c.int(32, HEARD_RATE)                       // sample_rate
+    c.int(36, 1)                                // num_threads
+    c.text(40, String("cpu"))                   // provider
+    return c
+}
+
+// Kokoro, English and Chinese.
+fn tts_config(root: String) -> Config {
+    // SherpaOnnxOfflineTtsConfig: 456 bytes.
+    var c = Config.new(456)
+    let dir = "{root}/kokoro"
+    c.int(56, 4)                                                            // model.num_threads
+    c.text(64, String("cpu"))                                               // model.provider
+    c.text(128, "{dir}/model.onnx")                                         // model.kokoro.model
+    c.text(136, "{dir}/voices.bin")                                         // .voices
+    c.text(144, "{dir}/tokens.txt")                                         // .tokens
+    c.float(160, 1.0)                                                       // .length_scale
+    c.text(168, "{dir}/dict")                                               // .dict_dir
+    c.text(176, "{dir}/lexicon-us-en.txt,{dir}/lexicon-zh.txt")             // .lexicon
+    c.int(432, 1)                                                           // max_num_sentences
+    return c
+}
+
+/// The thread that runs the models: what it's asked comes on `jobs`, and what came of
+/// it goes on `out`, waking the core.
+pub struct Runner {
+    pub jobs: Receiver<Job>
+    pub out: Sender<Came>
+    pub waker: Waker?
+}
+
+// Something sherpa-onnx made, which the thread gives back once it's done with it.
+struct Made {
+    p: *u8
+}
+
+unsafe impl Send for Made {}
+
+impl Made {
+    fn null(self) -> bool {
+        return unsafe { self.p.is_null() }
+    }
+}
+
+// What the thread holds: the library, a recognizer for one engine, the voice detector
+// and the dictation it hears, and Kokoro.
+struct Held {
+    api: Api?
+    lib: CLibrary?           // kept open while the thread runs
+    engine: String
+    recognizer: Made?
+    vad: Made?
+    tts: Made?
+    n: u64                   // the dictation being heard
+    since: List<f32>         // what it heard since the last piece it kept
+    since_from: i64          // where `since` starts, in samples from the dictation's start
+    again: usize             // samples since a piece being said was last written
+    window: List<f32>        // what the voice detector hasn't taken yet, less than its window
+}
+
+impl Task for Runner {
+    fn run(own self) {
+        var me = self
+        var h = Held { api: none, lib: none, engine: String(), recognizer: none, vad: none, tts: none, n: 0, since: List<f32>(), since_from: 0, again: 0, window: List<f32>() }
+        var held: Job? = none
+        loop {
+            let next = if let j = held.take() { some(j) } else { me.jobs.wait() }
+            let job = next else break
+            match job {
+                Job.Hear(n, engine, root, language) => {
+                    if let err(why) = hear(mut h, n, engine, root, language) {
+                        h.n = 0
+                        me.say(Came.Failed(n, why))
+                    }
+                },
+                Job.Audio(n, samples) => {
+                    // Everything heard since, at once, so a slow write doesn't fall behind.
+                    var all = samples
+                    loop {
+                        let more = me.jobs.next() else break
+                        if let Job.Audio(m, s) = more {
+                            if m == n { for x in s { all.push(x) } }
+                        } else {
+                            held = some(more)
+                            break
+                        }
+                    }
+                    if h.n == n and h.n != 0 { me.heard_more(mut h, all) }
+                },
+                Job.Stop(n) => {
+                    if h.n == n and h.n != 0 { me.finish(mut h) }
+                    me.say(Came.Done(n))
+                },
+                Job.Say(n, text, speaker, speed, root) => {
+                    match speak(mut h, text, speaker, speed, root) {
+                        ok(pcm) => me.say(Came.Spoken(n, pcm)),
+                        err(why) => me.say(Came.Failed(n, why)),
+                    }
+                },
+                Job.Unload => unload(mut h),
+            }
+        }
+        unload(mut h)
+    }
+}
+
+// Lets go of the models. The library stays open, as a program's libraries do.
+fn unload(h: mut Held) {
+    let api = h.api else return
+    if let v = h.vad.take() { unsafe { (api.destroy_vad)(v.p) } }
+    if let r = h.recognizer.take() { unsafe { (api.destroy_recognizer)(r.p) } }
+    if let t = h.tts.take() { unsafe { (api.destroy_tts)(t.p) } }
+    h.engine = String()
+    h.n = 0
+}
+
+fn opened(h: mut Held, root: String) ! String {
+    if h.api != none { return }
+    let (api, lib) = try open_api(try models.library(root))
+    h.api = some(api)
+    h.lib = some(lib)
+}
+
+fn hear(h: mut Held, n: u64, engine: String, root: String, language: String) ! String {
+    try opened(mut h, root.copy())
+    let api = h.api else fail String("sherpa-onnx isn't open")
+    if h.engine != engine {
+        if let r = h.recognizer.take() { unsafe { (api.destroy_recognizer)(r.p) } }
+    }
+    if match h.recognizer { some(_) => false, none => true } {
+        let c = recognizer_config(engine.copy(), root.copy(), language)
+        let made = unsafe { Made { p: (api.create_recognizer)(c.words.as_ptr().cast<u8>()) } }
+        if made.null() { fail "{engine} couldn't start: its model didn't load" }
+        h.recognizer = some(made)
+        h.engine = engine.copy()
+    }
+    if let v = h.vad.take() { unsafe { (api.destroy_vad)(v.p) } }
+    let v = vad_config(root)
+    let made = unsafe { Made { p: (api.create_vad)(v.words.as_ptr().cast<u8>(), 60.0) } }
+    if made.null() { fail String("The voice detector didn't load") }
+    h.vad = some(made)
+    h.n = n
+    h.since = List<f32>()
+    h.since_from = 0
+    h.again = 0
+    h.window = List<f32>()
+}
+
+// Writes `samples` with the recognizer.
+fn written(h: Held, samples: List<f32>) -> String {
+    if samples.len() == 0 { return String() }
+    let api = h.api else return String()
+    let r = h.recognizer else return String()
+    let text = unsafe {
+        let s = (api.create_stream)(r.p)
+        (api.accept)(s, HEARD_RATE, samples.as_ptr(), i32.wrap(samples.len()))
+        (api.decode)(r.p, s)
+        let j = (api.result_json)(s)
+        let t = c_text(j)
+        (api.destroy_json)(j)
+        (api.destroy_stream)(s)
+        t
+    }
+    return match parse(text) {
+        ok(v) => (str_at(v, "text") ?? String()).trim().copy(),
+        err(_) => String(),
+    }
+}
+
+// `text` in Kokoro's voice, as 16-bit PCM at 24 kHz.
+fn speak(h: mut Held, text: String, speaker: i32, speed: f32, root: String) -> List<u8> ! String {
+    try opened(mut h, root.copy())
+    let api = h.api else fail String("sherpa-onnx isn't open")
+    if match h.tts { some(_) => false, none => true } {
+        let c = tts_config(root)
+        let made = unsafe { Made { p: (api.create_tts)(c.words.as_ptr().cast<u8>()) } }
+        if made.null() { fail String("Kokoro couldn't start: its model didn't load") }
+        h.tts = some(made)
+    }
+    let tts = h.tts else fail String("Kokoro isn't loaded")
+    // SherpaOnnxGenerationConfig: 104 bytes; no progress callback, so its two are null.
+    var g = Config.new(104)
+    g.float(4, speed)    // speed
+    g.int(8, speaker)    // sid
+    let words = "{text}\0"
+    var nothing = List<u8>()
+    var out = List<f32>()
+    let said = unsafe {
+        let a = (api.generate)(tts.p, words.as_ptr(), g.words.as_ptr().cast<u8>(), nothing.as_mut_ptr(), nothing.as_mut_ptr())
+        if not a.is_null() {
+            // SherpaOnnxGeneratedAudio: the samples, how many, and their rate.
+            let data = a.cast<*const f32>().read()
+            let n = a.add(8).cast<i32>().read()
+            for i in 0..(usize.try_from(n) ?? 0) { out.push(data.add(i).read()) }
+            (api.destroy_audio)(a)
+        }
+        not a.is_null()
+    }
+    if not said { fail String("Kokoro couldn't say it") }
+    return audio.from_floats(out)
+}
+
+impl Runner {
+    fn say(mut self, c: own Came) {
+        self.out.send(c)
+        if let w = self.waker { w.wake() }
+    }
+
+    // The pieces the voice detector finished, each written and kept.
+    fn pieces(mut self, h: mut Held) {
+        let api = h.api else return
+        let vad = h.vad else return
+        loop {
+            if unsafe { (api.vad_empty)(vad.p) } != 0 { break }
+            var samples = List<f32>()
+            // SherpaOnnxSpeechSegment: its start, in samples, then the samples and how many.
+            let end = unsafe {
+                let seg = (api.vad_front)(vad.p)
+                let start = seg.cast<i64>().read()
+                let data = seg.add(8).cast<*const f32>().read()
+                let n = seg.add(16).cast<i32>().read()
+                for i in 0..(usize.try_from(n) ?? 0) { samples.push(data.add(i).read()) }
+                (api.destroy_segment)(seg)
+                (api.vad_pop)(vad.p)
+                start + i64(n)
+            }
+            let words = written(h, samples)
+            if words.len() > 0 { self.say(Came.Final(h.n, words)) }
+            // What came before the piece's end is kept, or was quiet.
+            if end > h.since_from {
+                let gone = usize.try_from(end - h.since_from) ?? 0
+                var rest = List<f32>()
+                for i in gone..h.since.len() { rest.push(h.since[i]) }
+                h.since = rest
+                h.since_from = end
+            }
+            h.again = 0
+        }
+    }
+
+    fn heard_more(mut self, h: mut Held, samples: List<f32>) {
+        let api = h.api else return
+        let vad = h.vad else return
+        h.again += samples.len()
+        for s in samples {
+            h.since.push(s)
+            h.window.push(s)
+        }
+        // The detector takes its own window at a time: given more, it would mark where
+        // speech starts only once for all of it.
+        var from: usize = 0
+        while h.window.len() - from >= VAD_WINDOW {
+            unsafe { (api.vad_accept)(vad.p, h.window.as_ptr().add(from), i32.wrap(VAD_WINDOW)) }
+            from += VAD_WINDOW
+            self.pieces(mut h)
+        }
+        var left = List<f32>()
+        for i in from..h.window.len() { left.push(h.window[i]) }
+        h.window = left
+        // A piece still being said: what's been said of it, again.
+        let speaking = unsafe { (api.vad_detected)(vad.p) } != 0
+        let every = if h.engine == "whisper" { AGAIN_WHISPER } else { AGAIN_PARAKEET }
+        if speaking and h.again >= every {
+            h.again = 0
+            let words = written(h, h.since.copy())
+            if words.len() > 0 { self.say(Came.Partial(h.n, words)) }
+        }
+        // Quiet a long while: what's held of it goes, but the last second.
+        let most: usize = 16000 * 30
+        if not speaking and h.since.len() > most {
+            let keep: usize = 16000
+            var rest = List<f32>()
+            for i in h.since.len() - keep..h.since.len() { rest.push(h.since[i]) }
+            h.since_from += i64.wrap(h.since.len() - keep)
+            h.since = rest
+        }
+    }
+
+    fn finish(mut self, h: mut Held) {
+        let api = h.api else return
+        let vad = h.vad else return
+        unsafe { (api.vad_flush)(vad.p) }
+        self.pieces(mut h)
+        h.n = 0
+        h.since = List<f32>()
+        h.window = List<f32>()
+    }
+}

@@ -19,6 +19,7 @@ import deepgramMark from '../../../shared/voice/deepgram.svg?raw';
 import openaiMark from '../../../shared/voice/openai.svg?raw';
 import groqMark from '../../../shared/voice/groq.svg?raw';
 import fishAudioMark from '../../../shared/voice/fish-audio.svg?raw';
+import nvidiaMark from '../../../shared/voice/nvidia.svg?raw';
 
 // The Brains page as the app draws it (desktop/src/app.rs, programs_page): one column, Your brains
 // with a row for each brain, its tile, name, version and settings, and Claude Agent open in place
@@ -117,8 +118,12 @@ const tiles = [
 // its maker's logo in its ink (shared/voice/, as the app draws it), its name, one quiet line and
 // Use, Add key or Change key; the one in use outlined in ink with a check in a ring and In use; then
 // its rows. Deepgram Nova-3 dictates and OpenAI speaks, with Marin at 1×, and replies aren't read
-// aloud.
-type Engine = { id: string; name: string; line: string; mark: string; key: boolean; on: boolean };
+// aloud. The models on the device have Download, then a thin bar with its percent and Cancel while
+// it downloads, then Delete and Use (voice_ui.rs, tile_state); Kokoro, whose authors have no logo,
+// has Lucide's laptop. Parakeet is downloading, and carries on when the panel comes into view.
+const LAPTOP =
+	'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 5a2 2 0 0 1 2 2v8.526a2 2 0 0 0 .212.897l1.068 2.127a1 1 0 0 1-.9 1.45H3.62a1 1 0 0 1-.9-1.45l1.068-2.127A2 2 0 0 0 4 15.526V7a2 2 0 0 1 2-2z"></path><path d="M20.054 15.987H3.946"></path></svg>';
+type Engine = { id: string; name: string; line: string; mark: string; key: boolean; on: boolean; model?: 'absent' | 'ready' | number };
 const VOICE: { id: string; name: string; engines: Engine[] }[] = [
 	{
 		id: 'dictation',
@@ -128,6 +133,8 @@ const VOICE: { id: string; name: string; engines: Engine[] }[] = [
 			{ id: 'deepgram', name: 'Deepgram Nova-3', line: 'Words as you say them', mark: deepgramMark, key: true, on: true },
 			{ id: 'openai-transcribe', name: 'OpenAI', line: 'gpt-4o-transcribe, words as you say them', mark: openaiMark, key: false, on: false },
 			{ id: 'groq', name: 'Groq', line: 'Whisper large v3, writes once you stop', mark: groqMark, key: false, on: false },
+			{ id: 'parakeet', name: 'Parakeet v2', line: 'English, 660 MB', mark: nvidiaMark, key: true, on: false, model: 62 },
+			{ id: 'whisper', name: 'Whisper large v3 turbo', line: '99 languages, 1 GB', mark: openaiMark, key: true, on: false, model: 'absent' },
 		],
 	},
 	{
@@ -137,9 +144,12 @@ const VOICE: { id: string; name: string; engines: Engine[] }[] = [
 			{ id: 'elevenlabs', name: 'ElevenLabs', line: "Flash v2.5, your voices and the library's", mark: elevenlabsMark, key: false, on: false },
 			{ id: 'fish', name: 'Fish Audio', line: 'S2.1 Pro, the voice library', mark: fishAudioMark, key: false, on: false },
 			{ id: 'openai-tts', name: 'OpenAI', line: 'gpt-4o-mini-tts, 13 voices', mark: openaiMark, key: true, on: true },
+			{ id: 'kokoro', name: 'Kokoro', line: 'English and Chinese, 350 MB', mark: LAPTOP, key: true, on: false, model: 'absent' },
 		],
 	},
 ];
+const MODEL_BUTTON = { absent: 'Download', downloading: 'Cancel', ready: 'Delete' };
+const modelState = (e: Engine) => (typeof e.model === 'number' ? 'downloading' : (e.model ?? 'absent'));
 const engineButton = (e: Engine) => (e.on ? 'Change key' : e.key ? 'Use' : 'Add key');
 const LANGUAGES = ['Detect', 'English', 'Norwegian', 'Swedish', 'Danish', 'Finnish', 'German', 'Dutch', 'French', 'Spanish', 'Italian', 'Portuguese', 'Polish', 'Ukrainian', 'Turkish', 'Hindi', 'Japanese', 'Korean', 'Chinese', 'Arabic'];
 const VOICES = ['Alloy', 'Ash', 'Ballad', 'Cedar', 'Coral', 'Echo', 'Fable', 'Marin', 'Nova', 'Onyx', 'Sage', 'Shimmer', 'Verse'];
@@ -517,7 +527,7 @@ const faq = {
 			<div class="copy" data-reveal>
 				<h2 id="f-voice">Dictation, and replies read aloud</h2>
 				<p>
-					The composer's mic writes your words as you say them, with ElevenLabs Scribe, Deepgram, OpenAI or Groq, and replies can be read aloud with ElevenLabs, Fish Audio or OpenAI. A service's key is kept sealed on your instance, so one key works on every device of yours, and an agent can set it up for you.
+					The composer's mic writes your words as you say them, with ElevenLabs Scribe, Deepgram, OpenAI or Groq, and replies can be read aloud with ElevenLabs, Fish Audio or OpenAI. Or download Parakeet, Whisper or Kokoro and run them on your computer, with no key. A service's key is kept sealed on your instance, so one key works on every device of yours, and an agent can set it up for you.
 				</p>
 			</div>
 			<div class="visual" data-reveal>
@@ -539,7 +549,13 @@ const faq = {
 							<div class="voice-pane" data-voice-pane={t.id} role="tabpanel" aria-label={t.name} hidden={i !== 0}>
 								<div class="voice-tiles">
 									{t.engines.map((e) => (
-										<div class:list={['voice-tile', { on: e.on }]} data-engine={e.id} data-key={e.key ? '' : undefined}>
+										<div
+											class:list={['voice-tile', { on: e.on }]}
+											data-engine={e.id}
+											data-key={e.key ? '' : undefined}
+											data-model={e.model === undefined ? undefined : modelState(e)}
+											data-percent={typeof e.model === 'number' ? e.model : undefined}
+										>
 											<span class="voice-mark" aria-hidden="true" set:html={e.mark} />
 											<span class="voice-text">
 												<span class="voice-name">{e.name}</span>
@@ -554,8 +570,21 @@ const faq = {
 													</span>
 													In use
 												</span>
+												{e.model !== undefined && (
+													<span class="voice-bar" data-bar hidden={typeof e.model !== 'number'}>
+														<span class="voice-bar-track">
+															<span class="voice-bar-fill" style={`width: ${typeof e.model === 'number' ? e.model : 0}%`} />
+														</span>
+														<span data-bar-percent>{typeof e.model === 'number' ? e.model : 0}%</span>
+													</span>
+												)}
 												<span class="spool-actions">
-													<button type="button" class="btn-small" data-engine-btn>
+													{e.model !== undefined && (
+														<button type="button" class:list={['btn-small', { primary: modelState(e) === 'absent' }]} data-model-btn>
+															{MODEL_BUTTON[modelState(e)]}
+														</button>
+													)}
+													<button type="button" class="btn-small" data-engine-btn hidden={e.model !== undefined && (e.model !== 'ready' || e.on)}>
 														{engineButton(e)}
 													</button>
 												</span>
@@ -1727,8 +1756,35 @@ const faq = {
 		flex-wrap: nowrap;
 	}
 	.voice .spool-foot[hidden],
-	.voice-key[hidden] {
+	.voice .btn-small[hidden],
+	.voice-key[hidden],
+	.voice-bar[hidden] {
 		display: none;
+	}
+	/* A model's download: a thin bar, filled in ink as far as it's come, and its percent. */
+	.voice-bar {
+		flex: 1;
+		min-width: 0;
+		display: flex;
+		align-items: center;
+		gap: var(--space-s);
+		font-size: var(--size-small);
+		color: var(--ink-2);
+		font-variant-numeric: tabular-nums;
+	}
+	.voice-bar-track {
+		flex: 1;
+		height: 3px;
+		border-radius: 999px;
+		background: var(--line);
+		overflow: hidden;
+	}
+	.voice-bar-fill {
+		display: block;
+		height: 100%;
+		border-radius: inherit;
+		background: var(--ink);
+		transition: width 0.2s linear;
 	}
 	.voice .tile-check .i {
 		width: 10px;
@@ -1896,7 +1952,8 @@ const faq = {
 	}
 	@media (prefers-reduced-motion: reduce) {
 		.knob,
-		.voice-tile {
+		.voice-tile,
+		.voice-bar-fill {
 			transition: none;
 		}
 	}
@@ -2264,9 +2321,58 @@ const faq = {
 		const draw = (tile: HTMLElement) => {
 			const button = tile.querySelector<HTMLElement>('[data-engine-btn]');
 			const state = tile.querySelector<HTMLElement>('.spool-state');
-			if (button) button.textContent = label(tile);
-			if (state) state.hidden = !tile.classList.contains('on');
+			const on = tile.classList.contains('on');
+			const model = tile.dataset.model;
+			if (button) {
+				button.textContent = label(tile);
+				button.hidden = model !== undefined && (model !== 'ready' || on);
+			}
+			if (state) state.hidden = !on;
+			if (model === undefined) return;
+			const act = tile.querySelector<HTMLElement>('[data-model-btn]');
+			if (act) {
+				act.textContent = model === 'absent' ? 'Download' : model === 'downloading' ? 'Cancel' : 'Delete';
+				act.classList.toggle('primary', model === 'absent');
+			}
+			const bar = tile.querySelector<HTMLElement>('[data-bar]');
+			if (bar) {
+				const percent = `${tile.dataset.percent ?? 0}%`;
+				bar.hidden = model !== 'downloading';
+				bar.querySelector<HTMLElement>('.voice-bar-fill')!.style.width = percent;
+				bar.querySelector<HTMLElement>('[data-bar-percent]')!.textContent = percent;
+			}
 		};
+		// A model's download: a percent at a time, then Delete and Use. Cancel and Delete start over.
+		const downloads = new Map<HTMLElement, number>();
+		const download = (tile: HTMLElement) => {
+			tile.dataset.model = 'downloading';
+			tile.dataset.percent ??= '0';
+			draw(tile);
+			downloads.set(
+				tile,
+				window.setInterval(() => {
+					const percent = Number(tile.dataset.percent) + 1;
+					tile.dataset.percent = String(percent);
+					if (percent >= 100) {
+						window.clearInterval(downloads.get(tile));
+						downloads.delete(tile);
+						tile.dataset.model = 'ready';
+						delete tile.dataset.percent;
+					}
+					draw(tile);
+				}, 150),
+			);
+		};
+		const forget = (tile: HTMLElement) => {
+			window.clearInterval(downloads.get(tile));
+			downloads.delete(tile);
+			tile.dataset.model = 'absent';
+			delete tile.dataset.percent;
+			tile.classList.remove('on');
+			draw(tile);
+		};
+		const downloading = voice.querySelector<HTMLElement>('.voice-tile[data-model="downloading"]');
+		if (downloading) whenShown(voice.closest('[data-reveal]'), () => download(downloading));
 		const keyForm = (tile: HTMLElement, open: boolean) => {
 			const foot = tile.querySelector<HTMLElement>('[data-engine-foot]');
 			const form = tile.querySelector<HTMLElement>('[data-key-form]');
@@ -2291,6 +2397,7 @@ const faq = {
 						draw(t);
 					}
 				});
+				tile.querySelector('[data-model-btn]')?.addEventListener('click', () => (tile.dataset.model === 'absent' ? download(tile) : forget(tile)));
 				tile.querySelector('[data-key-cancel]')?.addEventListener('click', () => keyForm(tile, false));
 				const input = tile.querySelector<HTMLInputElement>('[data-key-input]');
 				const save = () => {

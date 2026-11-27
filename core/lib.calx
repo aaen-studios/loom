@@ -220,6 +220,10 @@ impl Task for Boot {
         conn.local = str_at(cfg.copy(), "mode") == some(String("local"))
         // Fake voice services in place of the real ones, for tests (core/voice.calx).
         conn.voice.at = str_at(cfg.copy(), "voice_at")
+        // Where the voice models this device downloads go, which the app gives: one
+        // folder for every server it talks to (core/models.calx). None on an iPhone.
+        conn.voice.models.root = str_at(cfg.copy(), "voice_models")
+        conn.voice.models.place = str_at(cfg.copy(), "voice_models_at")
         // The first core gathers what's behind across the app, for the update icon.
         if bool_at(cfg.copy(), "hub") == some(true) {
             let hub = Hub.new(str_at(cfg.copy(), "version") ?? String())

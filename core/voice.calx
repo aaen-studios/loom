@@ -12,18 +12,21 @@ module core.voice
 // one in use and its key (`voice.start`, only from a device), so a key set up anywhere
 // works on every device, and an agent never sees one.
 //
-// Where an engine runs is a `Hearing` and a `Saying`: today a service, by its wire
-// format in shared/voice.calx. A model on the device (LOO-439) is one more of each,
-// fed the same 24 kHz samples and giving the same words and PCM, and live mode
-// (LOO-440) drives the same two.
+// Where an engine runs is a service, by its wire format in shared/voice.calx, or a
+// model on the device (core/models.calx downloads them, core/sherpa.calx runs them on a
+// thread of its own), which needs no key and so starts without asking the instance. A
+// model hears the same samples, at 16 kHz, and gives the same words and PCM, and live
+// mode (LOO-440) drives the same two.
 import std.fs
 import std.http.{Request, get, post, post_form}
 import std.http.websocket.{Message, WebSocket, open}
 import std.json.{Json, parse}
 import std.net.{Waker}
 import std.time.{Instant}
-import shared.obj.{Obj, at, bool_at, str_at}
+import shared.obj.{Obj, at, bool_at, merge, str_at}
 import shared.voice as engines
+import core.models
+import core.sherpa
 
 /// The id the core's own `voice.start` and `voice.get` go with, which their answers
 /// come back with.
@@ -58,6 +61,8 @@ struct Listening {
     heard_since: bool       // whether words were kept since they stopped
     ended: bool             // the stream's end was sent
     key: String
+    local: bool             // a model on the device hears it
+    carry: List<i16>        // 24 kHz samples not yet brought to 16 kHz, fewer than 3
 }
 
 /// A reply to read aloud, a voice's preview, or an engine's voices for the picker. It
@@ -74,6 +79,7 @@ struct Job {
     key: String
     listing: Request?
     saying: Request?
+    local: bool             // Kokoro speaks it, on the device
 }
 
 pub struct Voice {
@@ -81,11 +87,15 @@ pub struct Voice {
     pub waker: Waker?       // the core's loop, which streams and requests wake
     pub files: String?      // where speech is written
     pub settings: Json      // the person's voice settings, as the instance last said them
+    pub models: models.Models    // the models on this device
     listening: Listening?
     jobs: List<Job>
     voices: Map<String, List<Json>>    // each speech engine's voices, once asked for
     next: u64
     spoken: List<String>    // the WAVs written, the newest last, of which only the last few are kept
+    listed: Json            // what voice.get last gave, which the app is told again as a download goes
+    runner: Sender<sherpa.Job>?        // the thread that runs the models, once one is used
+    came: Receiver<sherpa.Came>
     pub to_instance: List<Json>    // commands for the instance
     pub to_app: List<Json>         // what the app is told
     pub cues: List<bool>           // dictation's sound, on or off, for the core to play
@@ -149,7 +159,39 @@ fn received(l: Listening) -> (List<String>, String?) {
 
 impl Voice {
     pub fn new() -> Voice {
-        return Voice { at: none, waker: none, files: none, settings: engines.settings(Json.Null), listening: none, jobs: List<Job>(), voices: Map<String, List<Json>>(), next: 0, spoken: List<String>(), to_instance: List<Json>(), to_app: List<Json>(), cues: List<bool>() }
+        return Voice { at: none, waker: none, files: none, settings: engines.settings(Json.Null), models: models.Models.new(), listening: none, jobs: List<Job>(), voices: Map<String, List<Json>>(), next: 0, spoken: List<String>(), listed: Json.Null, runner: none, came: Receiver<sherpa.Came>(), to_instance: List<Json>(), to_app: List<Json>(), cues: List<bool>() }
+    }
+
+    /// The thread that runs the models, started the first time one is used.
+    fn run(mut self, job: own sherpa.Job) {
+        if self.runner == none {
+            let jobs = Receiver<sherpa.Job>()
+            self.runner = some(jobs.sender())
+            let t = unsafe { Thread.spawn(sherpa.Runner { jobs: jobs, out: self.came.sender(), waker: self.waker }) }
+            _ = t
+        }
+        if let r = mut self.runner { r.send(job) }
+    }
+
+    // The engine of `kind` in use, if it's a model on the device.
+    fn local_engine(self, kind: str) -> String? {
+        let id = str_at(at(self.settings.copy(), kind), "engine") ?? String()
+        let e = engines.engine(String(kind), id.copy()) else return none
+        return if e.on_device { some(id) } else { none }
+    }
+
+    // Why a model on the device can't be used yet, or "".
+    fn not_ready(self, engine: String, kind: str) -> String {
+        let name = match engines.engine(String(kind), engine.copy()) {
+            some(e) => String(e.name),
+            none => engine.copy(),
+        }
+        return match self.models.state(engine, String(kind)) {
+            models.State.Ready => String(),
+            models.State.Downloading(_, _) => "{name} is still downloading.",
+            models.State.Unavailable(why) => why,
+            _ => "Download {name} in Settings › Voice first.",
+        }
     }
 
     fn ask(mut self, kind: str, engine: String) -> u64 {
@@ -180,8 +222,26 @@ impl Voice {
             some(e) => e.streams,
             none => false,
         }
+        let language = str_at(at(self.settings.copy(), "dictation"), "language") ?? String()
+        // A model on the device needs no key, so it hears at once, once it's here.
+        if let local = self.local_engine("dictation") {
+            let why = self.not_ready(local.copy(), "dictation")
+            if why.len() > 0 {
+                self.to_app.push(Obj.new().s("t", String("core.dictation")).s("state", String("no_engine")).s("engine", local).s("why", why).done())
+                return
+            }
+            self.next += 1
+            let n = self.next
+            let root = self.models.root.copy() ?? String()
+            self.run(sherpa.Job.Hear(n, local.copy(), root, language.copy()))
+            let l = Listening { n: n, service: local, language: language, streams: true, keyed: true, ws: none, sending: none, held: List<u8>(), kept: String(), saying: String(), stopped: none, heard_since: false, ended: false, key: String(), local: true, carry: List<i16>() }
+            self.cues.push(true)
+            self.tell(l, "listening", String())
+            self.listening = some(l)
+            return
+        }
         let n = self.ask("dictation", String())
-        let l = Listening { n: n, service: service, language: str_at(at(self.settings.copy(), "dictation"), "language") ?? String(), streams: streams, keyed: false, ws: none, sending: none, held: List<u8>(), kept: String(), saying: String(), stopped: none, heard_since: false, ended: false, key: String() }
+        let l = Listening { n: n, service: service, language: language, streams: streams, keyed: false, ws: none, sending: none, held: List<u8>(), kept: String(), saying: String(), stopped: none, heard_since: false, ended: false, key: String(), local: false, carry: List<i16>() }
         self.cues.push(true)
         self.tell(l, "listening", String())
         self.listening = some(l)
@@ -191,6 +251,21 @@ impl Voice {
     pub fn audio(mut self, pcm: List<u8>, rate: u32, channels: u32) {
         let taken = self.listening.take() else return
         var l = taken
+        if l.local {
+            // The model hears 16 kHz, three samples of 24 kHz making two.
+            if l.stopped == none {
+                var samples = l.carry.copy()
+                for s in engines.to_24k(pcm, rate, channels) { samples.push(s) }
+                let whole = samples.len() - samples.len() % 3
+                var rest = List<i16>()
+                for i in whole..samples.len() { rest.push(samples[i]) }
+                l.carry = rest
+                samples.truncate(whole)
+                self.run(sherpa.Job.Audio(l.n, engines.to_16k(samples)))
+            }
+            self.listening = some(l)
+            return
+        }
         if l.stopped == none {
             let piece = engines.le_bytes(engines.to_24k(pcm, rate, channels))
             if l.held.len() + piece.len() <= RECORDING_MOST {
@@ -217,6 +292,12 @@ impl Voice {
         }
         l.stopped = some(unsafe { Instant.now() })
         self.cues.push(false)
+        if l.local {
+            self.run(sherpa.Job.Stop(l.n))
+            self.tell(l, "finishing", String())
+            self.listening = some(l)
+            return
+        }
         if l.keyed and not l.streams {
             self.write_recording(l)
             return
@@ -270,7 +351,10 @@ impl Voice {
         let refused = if error != Json.Null or bool_at(f.copy(), "ok") == some(false) { some(str_at(error.copy(), "message") ?? String("The instance refused.")) } else { none }
         let code = str_at(error, "code") ?? String()
         if id == SETTINGS_ID {
-            if refused == none { self.settings = engines.settings(at(at(value, "voice"), "settings")) }
+            if refused == none {
+                self.settings = engines.settings(at(at(value.copy(), "voice"), "settings"))
+                self.keep_listed(at(value, "voice"))
+            }
             return true
         }
         let n = u64.parse(id[ASKING.len()..].copy()) ?? 0
@@ -347,10 +431,166 @@ impl Voice {
         self.listening = some(m)
     }
 
-    /// What's come from the engines: words, ends, and speech to play.
+    /// What's come from the engines: words, ends, and speech to play; and how the
+    /// downloads went, which the app is told with the tiles.
     pub fn poll(mut self) {
+        self.poll_local()
         self.poll_listening()
         self.poll_jobs()
+        if self.models.poll().len() > 0 { self.tell_listed() }
+    }
+
+    // What the models on the device said.
+    fn poll_local(mut self) {
+        while let c = self.came.next() {
+            match c {
+                sherpa.Came.Partial(n, words) => self.local_words(n, words, false),
+                sherpa.Came.Final(n, words) => self.local_words(n, words, true),
+                sherpa.Came.Done(n) => {
+                    if let l = self.listening.take() {
+                        if l.n == n { self.finish(l) } else { self.listening = some(l) }
+                    }
+                },
+                sherpa.Came.Failed(n, why) => {
+                    if let l = self.listening.take() {
+                        if l.n == n {
+                            self.give_up(l, why)
+                            continue
+                        }
+                        self.listening = some(l)
+                    }
+                    var i: usize = 0
+                    while i < self.jobs.len() {
+                        if self.jobs[i].n == n {
+                            let job = self.jobs.remove(i)
+                            self.job_failed(job, why.copy())
+                            break
+                        }
+                        i += 1
+                    }
+                },
+                sherpa.Came.Spoken(n, pcm) => {
+                    var i: usize = 0
+                    while i < self.jobs.len() {
+                        if self.jobs[i].n == n {
+                            let job = self.jobs.remove(i)
+                            self.play(job, pcm)
+                            break
+                        }
+                        i += 1
+                    }
+                },
+            }
+        }
+    }
+
+    // Words from a model: the piece being said, in place of the last, or a piece kept.
+    fn local_words(mut self, n: u64, words: String, kept: bool) {
+        let taken = self.listening.take() else return
+        var l = taken
+        if l.n == n {
+            if kept {
+                l.kept = engines.joined(l.kept.copy(), words)
+                l.saying = String()
+            } else {
+                l.saying = words.copy()
+            }
+            self.tell(l, if l.stopped != none { "finishing" } else { "listening" }, String())
+        }
+        self.listening = some(l)
+    }
+
+    /// What `voice.get` gave, as the app is to see it: each tile of a model on the
+    /// device with where its download is (`model`), and `have` once it's here.
+    pub fn shown(self, voice: Json) -> Json {
+        let kinds = at(voice.copy(), "engines")
+        if kinds == Json.Null { return voice.copy() }
+        var out = Obj.new()
+        for kind in ["dictation", "speech"] {
+            var tiles = List<Json>()
+            if let Json.Array(list) = at(kinds.copy(), kind) {
+                for t in list {
+                    if str_at(t.copy(), "icon") != some(String("laptop")) {
+                        tiles.push(t.copy())
+                        continue
+                    }
+                    let id = str_at(t.copy(), "id") ?? String()
+                    let model = self.models.shown(id.copy(), String(kind))
+                    let here = str_at(model.copy(), "state") == some(String("ready"))
+                    tiles.push(merge(t, Obj.new().b("have", here).j("model", model).done()))
+                }
+            }
+            out = out.j(kind, Json.Array(tiles))
+        }
+        return merge(voice, Obj.new().j("engines", out.done()).done())
+    }
+
+    /// A frame from the instance with the voice settings and tiles in it, a result of
+    /// `voice.get`, `voice.put` or `voice.key` or a `voice.updated` event, as the app is
+    /// to see it, with the models' downloads on their tiles; none for any other frame.
+    pub fn shown_frame(mut self, f: Json) -> Json? {
+        let t = str_at(f.copy(), "t") ?? String()
+        if t == "event" and str_at(f.copy(), "kind") == some(String("voice.updated")) {
+            let v = at(f.copy(), "voice")
+            self.keep_listed(v.copy())
+            return some(merge(f, Obj.new().j("voice", self.shown(v)).done()))
+        }
+        if t != "result" { return none }
+        let value = at(f.copy(), "value")
+        let v = at(value.copy(), "voice")
+        if at(v.copy(), "engines") == Json.Null { return none }
+        self.keep_listed(v.copy())
+        return some(merge(f, Obj.new().j("value", merge(value, Obj.new().j("voice", self.shown(v)).done())).done()))
+    }
+
+    /// Keeps what the instance said of the settings and tiles, which a download's
+    /// progress is told with.
+    pub fn keep_listed(mut self, voice: Json) {
+        if at(voice.copy(), "engines") != Json.Null { self.listed = voice.copy() }
+    }
+
+    // The tiles again, as a download goes: `core.voice`, as `voice.get` gives it.
+    fn tell_listed(mut self) {
+        if self.listed == Json.Null { return }
+        let v = self.shown(self.listed.copy())
+        self.to_app.push(Obj.new().s("t", String("core.voice")).j("voice", v).done())
+    }
+
+    /// Download, Cancel or Delete, on a model's tile (`voice.model`).
+    pub fn model(mut self, engine: String, kind: String, act: String) {
+        let e = engines.engine(kind.copy(), engine.copy()) else return
+        if not e.on_device { return }
+        if act == "download" {
+            self.models.download(engine, kind)
+        } else if act == "cancel" {
+            self.models.cancel(engine)
+        } else if act == "delete" {
+            if let err(why) = self.models.delete(engine) { self.to_app.push(Obj.new().s("t", String("core.speak")).s("id", String("app.voice_model")).s("error", why).done()) }
+            // Nothing of it stays loaded.
+            if self.runner != none { self.run(sherpa.Job.Unload) }
+        }
+        self.tell_listed()
+    }
+
+    /// A voice_setup card that came in the chat in front of the person, for a model
+    /// on the device: this computer downloads it, as the agent set it up.
+    pub fn card_came(mut self, message: Json) {
+        let Json.Array(blocks) = at(message, "blocks") else return
+        for b in blocks {
+            if str_at(b.copy(), "kind") != some(String("card")) { continue }
+            let c = at(b, "card")
+            if str_at(c.copy(), "type") != some(String("voice_setup")) { continue }
+            let engine = at(c.copy(), "engine")
+            if str_at(engine.copy(), "icon") != some(String("laptop")) { continue }
+            let kind = str_at(c, "kind") ?? String()
+            let id = str_at(engine, "id") ?? String()
+            match self.models.state(id.copy(), kind.copy()) {
+                models.State.Absent => self.models.download(id, kind),
+                models.State.Failed(_) => self.models.download(id, kind),
+                _ => {},
+            }
+            self.tell_listed()
+        }
     }
 
     fn poll_listening(mut self) {
@@ -441,8 +681,30 @@ impl Voice {
         let words = engines.speakable(text)
         if words.len() == 0 { return }
         self.drop_speech()
+        // Kokoro, on the device, needs no key: it speaks at once, once it's here.
+        let in_use = str_at(at(self.settings.copy(), "speech"), "engine") ?? String()
+        let engine = if service.len() > 0 { service.copy() } else { in_use.copy() }
+        if engine == "kokoro" {
+            let why = self.not_ready(engine.copy(), "speech")
+            if why.len() > 0 {
+                self.to_app.push(Obj.new().s("t", String("core.speak")).s("id", id.copy()).s("error", why).done())
+                return
+            }
+            let kept = at(self.settings.copy(), "speech")
+            let picked = if voice.len() > 0 { voice.copy() } else if in_use == "kokoro" { str_at(kept.copy(), "voice") ?? String() } else { String() }
+            let speed = match kept.get(String("speed")) {
+                some(Json.Float(s)) => s,
+                _ => 1.0,
+            }
+            self.next += 1
+            let n = self.next
+            self.jobs.push(Job { n: n, list: false, service: engine, text: words.copy(), id: id.copy(), voice: picked.copy(), speed: speed, key: String(), listing: none, saying: none, local: true })
+            let root = self.models.root.copy() ?? String()
+            self.run(sherpa.Job.Say(n, words, engines.kokoro_speaker(picked), f32.nearest(speed), root))
+            return
+        }
         let n = self.ask("speech", service.copy())
-        self.jobs.push(Job { n: n, list: false, service: service.copy(), text: words, id: id.copy(), voice: voice.copy(), speed: 0.0, key: String(), listing: none, saying: none })
+        self.jobs.push(Job { n: n, list: false, service: service.copy(), text: words, id: id.copy(), voice: voice.copy(), speed: 0.0, key: String(), listing: none, saying: none, local: false })
     }
 
     fn drop_speech(mut self) {
@@ -456,7 +718,7 @@ impl Voice {
     /// An engine's voices, for the Voice row's picker: OpenAI's at once, the others'
     /// from the service, once its key comes.
     pub fn list_voices(mut self, service: String) {
-        if service == "openai" {
+        if service == "openai" or service == "kokoro" {
             self.to_app.push(Obj.new().s("t", String("core.voices")).s("engine", service.copy()).j("voices", Json.Array(engines.voices(service, List<u8>()))).done())
             return
         }
@@ -466,7 +728,7 @@ impl Voice {
             return
         }
         let n = self.ask("speech", service.copy())
-        self.jobs.push(Job { n: n, list: true, service: service.copy(), text: String(), id: String(), voice: String(), speed: 1.0, key: String(), listing: none, saying: none })
+        self.jobs.push(Job { n: n, list: true, service: service.copy(), text: String(), id: String(), voice: String(), speed: 1.0, key: String(), listing: none, saying: none, local: false })
     }
 
     /// Stops speaking: what's waiting is dropped, and the app stops what it plays.

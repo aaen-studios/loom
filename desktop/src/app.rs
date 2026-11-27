@@ -27804,6 +27804,11 @@ fn core_config(dir: &str, server: Option<&str>) -> String {
     let folder = server_folder(dir);
     let _ = std::fs::create_dir_all(&folder);
     let mut config = serde_json::json!({"data": folder.to_string_lossy()});
+    // The voice models this computer downloads, in one folder for every server.
+    config["voice_models"] = std::path::PathBuf::from(data_dir())
+        .join("models")
+        .to_string_lossy()
+        .into();
     // The system's time zone, which the core tells the instance, so routines at a time of
     // day keep this clock.
     if let Ok(tz) = iana_time_zone::get_timezone() {

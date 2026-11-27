@@ -24,8 +24,9 @@ import shared.obj.{Obj, at, merge, str_at}
 
 /// A dictation engine, or a speech one. `streams` says whether the words come as
 /// they're said; one that doesn't writes them once the person stops. `on_device` is a
-/// model the device runs itself (LOO-439), which needs no key. `mark` is its maker's
-/// logo, a file in voice/ without its .svg (mark_svg), or "" for none.
+/// model the device downloads and runs itself (core/models.calx), which needs no key;
+/// one that dictates writes its words in short pieces as they're said. `mark` is its
+/// maker's logo, a file in voice/ without its .svg (mark_svg), or "" for none.
 pub struct Engine {
     pub id: str
     pub kind: str    // dictation or speech
@@ -65,15 +66,62 @@ pub fn mark_svg(name: String) -> String? {
 }
 
 /// The engines, in the order their tiles show.
-pub const ENGINES: [Engine; 7] = [
+pub const ENGINES: [Engine; 10] = [
     Engine { id: "elevenlabs", kind: "dictation", name: "ElevenLabs Scribe", line: "Words as you say them", streams: true, on_device: false, mark: "elevenlabs" },
     Engine { id: "deepgram", kind: "dictation", name: "Deepgram Nova-3", line: "Words as you say them", streams: true, on_device: false, mark: "deepgram" },
     Engine { id: "openai", kind: "dictation", name: "OpenAI", line: "gpt-4o-transcribe, words as you say them", streams: true, on_device: false, mark: "openai" },
     Engine { id: "groq", kind: "dictation", name: "Groq", line: "Whisper large v3, writes once you stop", streams: false, on_device: false, mark: "groq" },
+    Engine { id: "parakeet", kind: "dictation", name: "Parakeet v2", line: "English, 660 MB", streams: true, on_device: true, mark: "nvidia" },
+    Engine { id: "whisper", kind: "dictation", name: "Whisper large v3 turbo", line: "99 languages, 1 GB", streams: true, on_device: true, mark: "openai" },
     Engine { id: "elevenlabs", kind: "speech", name: "ElevenLabs", line: "Flash v2.5, your voices and the library's", streams: false, on_device: false, mark: "elevenlabs" },
     Engine { id: "fish", kind: "speech", name: "Fish Audio", line: "S2.1 Pro, the voice library", streams: false, on_device: false, mark: "fish-audio" },
     Engine { id: "openai", kind: "speech", name: "OpenAI", line: "gpt-4o-mini-tts, 13 voices", streams: false, on_device: false, mark: "openai" },
+    Engine { id: "kokoro", kind: "speech", name: "Kokoro", line: "English and Chinese, 350 MB", streams: false, on_device: true, mark: "" },
 ]
+
+/// Kokoro's voices that speak English or Chinese, the two its sherpa-onnx model reads:
+/// each id, its speaker number in `voices.bin` and its name. The numbers are sherpa-onnx's
+/// map for kokoro-multi-lang-v1_0 (k2-fsa.github.io/sherpa/onnx/tts/pretrained_models/kokoro.html).
+pub const KOKORO_VOICES: [(str, i32, str); 36] = [
+    ("af_heart", 3, "Heart"), ("af_alloy", 0, "Alloy"), ("af_aoede", 1, "Aoede"), ("af_bella", 2, "Bella"),
+    ("af_jessica", 4, "Jessica"), ("af_kore", 5, "Kore"), ("af_nicole", 6, "Nicole"), ("af_nova", 7, "Nova"),
+    ("af_river", 8, "River"), ("af_sarah", 9, "Sarah"), ("af_sky", 10, "Sky"), ("am_adam", 11, "Adam"),
+    ("am_echo", 12, "Echo"), ("am_eric", 13, "Eric"), ("am_fenrir", 14, "Fenrir"), ("am_liam", 15, "Liam"),
+    ("am_michael", 16, "Michael"), ("am_onyx", 17, "Onyx"), ("am_puck", 18, "Puck"), ("am_santa", 19, "Santa"),
+    ("bf_alice", 20, "Alice, British"), ("bf_emma", 21, "Emma, British"), ("bf_isabella", 22, "Isabella, British"), ("bf_lily", 23, "Lily, British"),
+    ("bm_daniel", 24, "Daniel, British"), ("bm_fable", 25, "Fable, British"), ("bm_george", 26, "George, British"), ("bm_lewis", 27, "Lewis, British"),
+    ("zf_xiaobei", 45, "Xiaobei, Chinese"), ("zf_xiaoni", 46, "Xiaoni, Chinese"), ("zf_xiaoxiao", 47, "Xiaoxiao, Chinese"), ("zf_xiaoyi", 48, "Xiaoyi, Chinese"),
+    ("zm_yunjian", 49, "Yunjian, Chinese"), ("zm_yunxi", 50, "Yunxi, Chinese"), ("zm_yunxia", 51, "Yunxia, Chinese"), ("zm_yunyang", 52, "Yunyang, Chinese"),
+]
+
+/// Kokoro's speaker number for a voice, by its id or its name, or Heart's.
+pub fn kokoro_speaker(voice: String) -> i32 {
+    let w = voice.trim().to_lower_root()
+    for (id, n, name) in KOKORO_VOICES {
+        if w == id or w == String(name).to_lower_root() { return n }
+    }
+    return 3
+}
+
+/// Whether `voice` is one of Kokoro's, by its id or its name.
+fn kokoro_voice(voice: String) -> bool {
+    let w = voice.trim().to_lower_root()
+    for (id, _, name) in KOKORO_VOICES {
+        if w == id or w == String(name).to_lower_root() { return true }
+    }
+    return false
+}
+
+/// The ids of the engines of `kind`, as an error lists them: "a, b and c".
+fn engine_ids(kind: str) -> String {
+    var ids = List<String>()
+    for e in ENGINES {
+        if e.kind == kind { ids.push(String(e.id)) }
+    }
+    if ids.len() < 2 { return ids.join("") }
+    let last = ids.pop() ?? String()
+    return "{ids.join(", ")} and {last}"
+}
 
 /// The services a key is kept for, each the person's secret `voice.SERVICE`.
 pub const SERVICES: [str; 5] = ["elevenlabs", "deepgram", "openai", "groq", "fish"]
@@ -173,7 +221,7 @@ pub fn apply(old: Json, args: Json) -> Json ! String {
     var s = at(next.copy(), "speech")
     let dc = at(args.copy(), "dictation")
     if let e = str_at(dc.copy(), "engine") {
-        if e.len() > 0 and engine(String("dictation"), e.copy()) == none { fail "There's no dictation engine {e}. Pick one of elevenlabs, deepgram, openai and groq." }
+        if e.len() > 0 and engine(String("dictation"), e.copy()) == none { fail "There's no dictation engine {e}. Pick one of {engine_ids("dictation")}." }
         d = merge_str(d, "engine", e)
     }
     if let l = str_at(dc, "language") {
@@ -182,7 +230,7 @@ pub fn apply(old: Json, args: Json) -> Json ! String {
     }
     let sc = at(args, "speech")
     if let e = str_at(sc.copy(), "engine") {
-        if e.len() > 0 and engine(String("speech"), e.copy()) == none { fail "There's no speech engine {e}. Pick one of elevenlabs, fish and openai." }
+        if e.len() > 0 and engine(String("speech"), e.copy()) == none { fail "There's no speech engine {e}. Pick one of {engine_ids("speech")}." }
         if some(e.copy()) != str_at(s.copy(), "engine") and str_at(sc.copy(), "voice") == none {
             s = merge_str(merge_str(s, "voice", String()), "voice_name", String())
         }
@@ -191,9 +239,20 @@ pub fn apply(old: Json, args: Json) -> Json ! String {
     if let v = str_at(sc.copy(), "voice") {
         let e = str_at(s.copy(), "engine") ?? String()
         if e == "openai" and v.len() > 0 and not openai_voice(v.to_lower_root()) { fail "OpenAI has no voice {v}. Its voices are {OPENAI_VOICES.join(", ")}." }
-        let id = if e == "openai" { v.to_lower_root() } else { v.copy() }
+        if e == "kokoro" and v.len() > 0 and not kokoro_voice(v.copy()) { fail "Kokoro has no voice {v}. Its voices are its English and Chinese ones, such as Heart, Michael, Emma, British, and Xiaoxiao, Chinese." }
+        var id = if e == "openai" { v.to_lower_root() } else { v.copy() }
+        var shown = if e == "openai" { title(id.copy()) } else { v.copy() }
+        if e == "kokoro" and v.len() > 0 {
+            for (k, _, name) in KOKORO_VOICES {
+                if kokoro_speaker(v.copy()) == kokoro_speaker(String(k)) {
+                    id = String(k)
+                    shown = String(name)
+                    break
+                }
+            }
+        }
         s = merge_str(s, "voice", id.copy())
-        s = merge_str(s, "voice_name", str_at(sc.copy(), "voice_name") ?? if e == "openai" { title(id) } else { v })
+        s = merge_str(s, "voice_name", str_at(sc.copy(), "voice_name") ?? shown)
     }
     if let given = sc.get(String("speed")) {
         let n = number(given) else fail "speed is a number, from 0.8 to 1.2."
@@ -472,6 +531,10 @@ pub fn voices(service: String, body: List<u8>) -> List<Json> {
         for v in OPENAI_VOICES { out.push(Obj.new().s("id", String(v)).s("name", title(String(v))).done()) }
         return out
     }
+    if service == "kokoro" {
+        for (id, _, name) in KOKORO_VOICES { out.push(Obj.new().s("id", String(id)).s("name", String(name)).done()) }
+        return out
+    }
     let m = match parse(String.from_utf8(body.copy()) ?? String()) {
         ok(j) => j,
         err(_) => return out,
@@ -569,6 +632,38 @@ pub fn to_24k(pcm: List<u8>, rate: u32, channels: u32) -> List<i16> {
         let b = if i + 1 < frames { mono[i + 1] } else { a }
         out.push(i16.wrap(i32.saturate((a + (b - a) * frac + 0.5).floor())))
         t += step
+    }
+    return out
+}
+
+/// 24 kHz samples as the on-device models hear them: 16 kHz, from -1 to 1, each
+/// between two of the input's.
+pub fn to_16k(samples: List<i16>) -> List<f32> {
+    var out = List<f32>()
+    let n = samples.len()
+    if n == 0 { return out }
+    // Two of every three 24 kHz samples' places: 0, 1.5, 3, 4.5, ...
+    var i: usize = 0
+    while i < n {
+        out.push(f32.nearest(f64(samples[i]) / 32768.0))
+        if i + 1 < n {
+            let mid = (f64(samples[i + 1]) + f64(if i + 2 < n { samples[i + 2] } else { samples[i + 1] })) / 2.0
+            out.push(f32.nearest(mid / 32768.0))
+        }
+        i += 3
+    }
+    return out
+}
+
+/// Samples from -1 to 1, as a model speaks them, as 16-bit little-endian PCM.
+pub fn from_floats(samples: List<f32>) -> List<u8> {
+    var out = List<u8>()
+    for s in samples {
+        let v = f64(s) * 32767.0
+        let c = if v > 32767.0 { 32767.0 } else if v < -32768.0 { -32768.0 } else { v }
+        let u = u32.wrap(i16.wrap(i32.saturate((c + 0.5).floor())))
+        out.push(u8.wrap(u))
+        out.push(u8.wrap(u >> 8))
     }
     return out
 }
@@ -705,6 +800,29 @@ fn audio_comes_to_24k_mono() {
 }
 
 @test
+fn models_on_the_device_need_no_key() {
+    let t = tiles(String("dictation"), List<String>(), String("parakeet"))
+    assert("{t}".contains(#"{"id":"parakeet","name":"Parakeet v2","line":"English, 660 MB","icon":"laptop","icon_svg":"<svg "#))
+    assert("{t}".contains(#""mark":"nvidia","streams":true,"key":false,"have":true,"in_use":true}"#))
+    // Kokoro's makers have no mark, so its tile has the Laptop.
+    assert("{tiles(String("speech"), List<String>(), String())}".contains(#"{"id":"kokoro","name":"Kokoro","line":"English and Chinese, 350 MB","icon":"laptop","streams":false"#))
+    assert(match apply(Json.Null, parse(#"{"dictation":{"engine":"siri"}}"#)!) { ok(_) => false, err(e) => e.contains("groq, parakeet and whisper") })
+    // Kokoro's voices go by id, its name kept for the picker.
+    let k = apply(Json.Null, parse(#"{"speech":{"engine":"kokoro","voice":"emma, british"}}"#)!)!
+    assert(str_at(at(k.copy(), "speech"), "voice") == some(String("bf_emma")) and str_at(at(k.copy(), "speech"), "voice_name") == some(String("Emma, British")))
+    assert(kokoro_speaker(String("bf_emma")) == 21 and kokoro_speaker(String("")) == 3)
+    assert(match apply(k, parse(#"{"speech":{"voice":"robot"}}"#)!) { ok(_) => false, err(_) => true })
+    assert(voices(String("kokoro"), List<u8>()).len() == 36)
+}
+
+@test
+fn the_models_hear_16k_floats() {
+    let f = to_16k([0i16, 3000, 6000, 9000, 12000, 15000])
+    assert(f.len() == 4 and f[0] == 0.0 and (f64(f[1]) - 4500.0 / 32768.0).abs() < 0.0001 and (f64(f[2]) - 9000.0 / 32768.0).abs() < 0.0001)
+    assert(from_floats([0.0f32, 1.0, -1.0, 2.0]) == [0u8, 0, 0xff, 0x7f, 0x01, 0x80, 0xff, 0x7f])
+}
+
+@test
 fn a_reply_is_said_as_words() {
     assert(speakable(String("# Done\n\nI fixed **the build** in [CI](https://x.y/z).\n```\ncode\n```\n- one\n- two")) == "Done I fixed the build in CI. one two")
 }
@@ -712,6 +830,7 @@ fn a_reply_is_said_as_words() {
 @test
 fn each_engine_has_its_makers_mark() {
     for e in ENGINES {
+        if e.mark.len() == 0 { continue }
         let svg = mark_svg(String(e.mark)) ?? String()
         assert(svg.starts_with("<svg ") and svg.contains("fill=\"currentColor\"") and not svg.contains("#"))
     }

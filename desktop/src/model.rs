@@ -9931,8 +9931,17 @@ impl Model {
                         *sending = self.form_sending.values().any(|v| *v == key);
                         *error = self.form_errors.get(&key).cloned().unwrap_or_default();
                     }
-                    // A voice card's Add goes with the reply it's in.
-                    Some(CardBody::VoiceSetup(c)) => c.message = reply.clone(),
+                    // A voice card's Add goes with the reply it's in, and a model's card
+                    // shows its download as this computer has it.
+                    Some(CardBody::VoiceSetup(c)) => {
+                        c.message = reply.clone();
+                        if let Some(t) = self.voice.tile(c.kind, &c.tile.id) {
+                            if t.model.is_some() {
+                                c.tile.model = t.model.clone();
+                                c.tile.have = t.have;
+                            }
+                        }
+                    }
                     // A spool card's Sign in goes with the reply it's in.
                     Some(CardBody::SpoolConnect {
                         message,

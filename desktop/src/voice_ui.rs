@@ -73,6 +73,54 @@ fn in_use_mark(p: Palette, scale: f32) -> Div {
         .child("In use")
 }
 
+/// A model's download: a thin bar, filled in ink as far as it's come, and its percent.
+fn download_bar(p: Palette, percent: u8, scale: f32) -> Div {
+    let done = f32::from(percent.min(100)) / 100.0;
+    div()
+        .flex_1()
+        .min_w_0()
+        .flex()
+        .items_center()
+        .gap(px(space::S))
+        .child(
+            div()
+                .flex_1()
+                .h(px(3.0))
+                .rounded_full()
+                .bg(p.line)
+                .child(div().h_full().w(relative(done)).rounded_full().bg(p.ink)),
+        )
+        .child(
+            div()
+                .flex_none()
+                .text_size(px(size::SMALL * scale))
+                .text_color(p.ink_2)
+                .child(format!("{percent}%")),
+        )
+}
+
+/// What a tile says beside its buttons: "In use", a model's download as it comes, or
+/// why a model's download failed or can't run here.
+fn tile_state(p: Palette, t: &Tile, scale: f32) -> Div {
+    if let Some(percent) = t.percent() {
+        return download_bar(p, percent, scale);
+    }
+    let why = match t.model_state() {
+        "failed" | "unavailable" => t.model.as_ref().map(|m| m.why.clone()),
+        _ => None,
+    };
+    match why {
+        Some(why) => div()
+            .flex_1()
+            .min_w_0()
+            .text_size(px(size::SMALL * scale))
+            .text_color(p.ink_2)
+            .truncate()
+            .child(why),
+        None => div().when(t.in_use, |d| d.child(in_use_mark(p, scale))),
+    }
+}
+
 /// A tile's head: its ink square, its name and its one quiet line.
 fn tile_head(p: Palette, t: &Tile, scale: f32) -> Div {
     div()
@@ -289,36 +337,49 @@ impl Loom {
                 return tile.into_any_element();
             }
         }
-        let button = t.action().map(|a| {
-            let id = t.id.clone();
-            self.small_button(
-                format!("voice-{}-{}", a.label().to_lowercase(), t.id),
-                a.label(),
-                a == Action::Use,
-            )
-            .on_click(cx.listener(move |this, _, _, cx| {
-                match a {
-                    Action::Use => {
-                        let f = this.model.voice.use_engine(tab, &id);
-                        this.send(f);
+        let buttons: Vec<_> = t
+            .actions()
+            .into_iter()
+            .map(|a| {
+                let id = t.id.clone();
+                self.small_button(
+                    format!(
+                        "voice-{}-{}",
+                        a.label().to_lowercase().replace(' ', "-"),
+                        t.id
+                    ),
+                    a.label(),
+                    a.main(),
+                )
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    match a {
+                        Action::Use => {
+                            let f = this.model.voice.use_engine(tab, &id);
+                            this.send(f);
+                        }
+                        Action::AddKey | Action::ChangeKey => {
+                            this.model.voice.adding = Some((tab, id.clone()));
+                            this.model.voice.menu = None;
+                        }
+                        Action::Download | Action::Cancel | Action::Delete => {
+                            if let Some(f) = this.model.voice.model(tab, &id, a) {
+                                this.send(f);
+                            }
+                        }
                     }
-                    Action::AddKey | Action::ChangeKey => {
-                        this.model.voice.adding = Some((tab, id.clone()));
-                        this.model.voice.menu = None;
-                    }
-                }
-                cx.notify();
-            }))
-        });
+                    cx.notify();
+                }))
+            })
+            .collect();
         tile.child(
             div()
                 .min_h(px(control::BUTTON_SMALL))
                 .flex()
                 .items_center()
                 .justify_between()
-                .gap(px(space::S))
-                .child(div().when(t.in_use, |d| d.child(in_use_mark(p, 1.0))))
-                .children(button),
+                .gap(px(space::M))
+                .child(tile_state(p, t, 1.0))
+                .child(div().flex().gap(px(space::S)).children(buttons)),
         )
         .into_any_element()
     }
@@ -832,16 +893,61 @@ pub(super) fn setup_card(
     this: WeakEntity<Loom>,
 ) -> Div {
     let fill = if p.dark { p.raised_2 } else { p.bg };
-    let tile = tile_box(p, fill, !card.asking)
-        .child(tile_head(p, &card.tile, scale))
-        .when(!card.asking, |d| d.child(in_use_mark(p, scale)));
+    let kind = card.kind;
+    // A model on the device: its download, as this computer has it, with Download or
+    // Cancel; it's in use once it's here.
+    let model = card.tile.model_state();
+    let tile = if !model.is_empty() {
+        let buttons: Vec<_> = card
+            .tile
+            .actions()
+            .into_iter()
+            .filter(|a| matches!(a, Action::Download | Action::Cancel))
+            .map(|a| {
+                let (this, id) = (this.clone(), card.tile.id.clone());
+                card_button(
+                    p,
+                    format!("voice-card-{}-{key}", a.label().to_lowercase()),
+                    a.label(),
+                    a.main(),
+                )
+                .on_click(move |_, _, cx| {
+                    let _ = this.update(cx, |loom, cx| {
+                        if let Some(f) = loom.model.voice.model(kind, &id, a) {
+                            loom.send(f);
+                        }
+                        cx.notify();
+                    });
+                })
+            })
+            .collect();
+        let shown = Tile {
+            in_use: model == "ready",
+            ..card.tile.clone()
+        };
+        tile_box(p, fill, model == "ready")
+            .child(tile_head(p, &card.tile, scale))
+            .child(
+                div()
+                    .min_h(px(control::BUTTON_SMALL))
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .gap(px(space::M))
+                    .child(tile_state(p, &shown, scale))
+                    .child(div().flex().gap(px(space::S)).children(buttons)),
+            )
+    } else {
+        tile_box(p, fill, !card.asking)
+            .child(tile_head(p, &card.tile, scale))
+            .when(!card.asking, |d| d.child(in_use_mark(p, scale)))
+    };
     let mut rows = div().flex().flex_col();
     for (i, (name, value)) in card.rows.iter().enumerate() {
         rows = rows.child(
             shown_row(p, name, value, scale).when(i > 0, |d| d.border_t_1().border_color(p.line)),
         );
     }
-    let kind = card.kind;
     let settings = {
         let this = this.clone();
         div()

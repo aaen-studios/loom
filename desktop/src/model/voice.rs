@@ -43,10 +43,23 @@ pub struct Tile {
     pub icon_svg: Option<String>,
     pub mark: String,
     pub streams: bool,
-    /// Whether it needs a key, and whether the person has it.
+    /// Whether it needs a key, and whether the person has it, or for a model on the
+    /// device, whether it's downloaded.
     pub key: bool,
     pub have: bool,
     pub in_use: bool,
+    /// A model on the device: where its download is on this computer, as the core says.
+    pub model: Option<Model>,
+}
+
+/// Where a model on the device is, as the core tells it with the tile.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Model {
+    /// `absent`, `downloading`, `ready`, `failed` or `unavailable`.
+    pub state: String,
+    pub percent: u8,
+    /// Why it failed, or why it can't run here.
+    pub why: String,
 }
 
 impl Tile {
@@ -67,6 +80,41 @@ impl Tile {
             key: b("key"),
             have: b("have"),
             in_use: b("in_use"),
+            model: v.get("model").filter(|m| m.is_object()).map(|m| Model {
+                state: s(m, "state"),
+                percent: m
+                    .get("percent")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(0)
+                    .min(100) as u8,
+                why: s(m, "why"),
+            }),
+        }
+    }
+
+    /// Where its download is, for a model on the device: `absent`, `downloading`,
+    /// `ready`, `failed` or `unavailable`; "" for a service.
+    pub fn model_state(&self) -> &str {
+        self.model.as_ref().map(|m| m.state.as_str()).unwrap_or("")
+    }
+
+    /// Its download's percent, while it downloads.
+    pub fn percent(&self) -> Option<u8> {
+        (self.model_state() == "downloading")
+            .then(|| self.model.as_ref().map(|m| m.percent).unwrap_or(0))
+    }
+
+    /// The tile's buttons, the main one last: Use, Add key or Change key for a service;
+    /// for a model, Download, Cancel while it downloads, and Delete and Use once it's
+    /// here. None for the one in use with no key to change, or a model that can't run.
+    pub fn actions(&self) -> Vec<Action> {
+        match self.model_state() {
+            "" => self.action().into_iter().collect(),
+            "absent" | "failed" => vec![Action::Download],
+            "downloading" => vec![Action::Cancel],
+            "ready" if self.in_use => vec![Action::Delete],
+            "ready" => vec![Action::Delete, Action::Use],
+            _ => Vec::new(),
         }
     }
 
@@ -89,6 +137,9 @@ pub enum Action {
     Use,
     AddKey,
     ChangeKey,
+    Download,
+    Cancel,
+    Delete,
 }
 
 impl Action {
@@ -97,6 +148,24 @@ impl Action {
             Action::Use => "Use",
             Action::AddKey => "Add key",
             Action::ChangeKey => "Change key",
+            Action::Download => "Download",
+            Action::Cancel => "Cancel",
+            Action::Delete => "Delete",
+        }
+    }
+
+    /// Whether it's the tile's main button, drawn in ink.
+    pub fn main(self) -> bool {
+        matches!(self, Action::Use | Action::Download)
+    }
+
+    /// What the core is asked to do with a model on the device, for the three that do.
+    pub fn model_word(self) -> Option<&'static str> {
+        match self {
+            Action::Download => Some("download"),
+            Action::Cancel => Some("cancel"),
+            Action::Delete => Some("delete"),
+            _ => None,
         }
     }
 }
@@ -187,7 +256,9 @@ impl Voice {
             }
             return true;
         }
-        if t == "event" && s(f, "kind") == "voice.updated" {
+        // Every device hears a change, and this one hears its downloads go as the core
+        // tells the tiles again.
+        if (t == "event" && s(f, "kind") == "voice.updated") || t == "core.voice" {
             if let Some(v) = f.get("voice") {
                 self.took(v);
             }
@@ -288,6 +359,18 @@ impl Voice {
     /// Use, on a tile.
     pub fn use_engine(&mut self, tab: Tab, id: &str) -> Value {
         self.cmd("voice.put", json!({ tab.kind(): {"engine": id} }))
+    }
+
+    /// Download, Cancel or Delete, on a model's tile or its card.
+    pub fn model(&self, tab: Tab, id: &str, act: Action) -> Option<Value> {
+        let word = act.model_word()?;
+        Some(json!({"t": "voice.model", "engine": id, "kind": tab.kind(), "do": word}))
+    }
+
+    /// The page's tile for an engine, as this computer has it, which a card in the chat
+    /// shows its download from.
+    pub fn tile(&self, tab: Tab, id: &str) -> Option<&Tile> {
+        self.tiles(tab).iter().find(|t| t.id == id)
     }
 
     /// One of a kind's rows changed.
@@ -554,6 +637,73 @@ mod tests {
         );
         // A key changed for the engine in use puts nothing else in use.
         assert_eq!(v.save_key(Tab::Dictation, "deepgram", "k").len(), 1);
+    }
+
+    #[test]
+    fn a_model_on_the_device_downloads_then_is_used() {
+        let tile = |model: Value, in_use: bool| {
+            Tile::of(
+                &json!({"id": "parakeet", "icon": "laptop", "key": false, "have": false, "in_use": in_use, "model": model}),
+            )
+        };
+        assert_eq!(
+            tile(json!({"state": "absent", "size": 35}), false).actions(),
+            vec![Action::Download]
+        );
+        let going = tile(
+            json!({"state": "downloading", "percent": 24, "size": 35}),
+            false,
+        );
+        assert_eq!(going.actions(), vec![Action::Cancel]);
+        assert_eq!(going.percent(), Some(24));
+        assert_eq!(
+            tile(json!({"state": "ready"}), false).actions(),
+            vec![Action::Delete, Action::Use]
+        );
+        assert_eq!(
+            tile(json!({"state": "ready"}), true).actions(),
+            vec![Action::Delete]
+        );
+        assert_eq!(
+            tile(json!({"state": "failed", "why": "no"}), false).actions(),
+            vec![Action::Download]
+        );
+        let phone = tile(
+            json!({"state": "unavailable", "why": "Runs on Windows and macOS."}),
+            false,
+        );
+        assert!(phone.actions().is_empty() && phone.percent().is_none());
+        // A service's tile has its one button, as before.
+        assert_eq!(
+            Tile::of(&json!({"id": "groq", "key": true, "have": true})).actions(),
+            vec![Action::Use]
+        );
+        assert!(
+            Action::Download.main()
+                && !Action::Cancel.main()
+                && Action::Delete.model_word() == Some("delete")
+        );
+        // Its buttons go to the core, and the core's progress is taken as the page.
+        let mut v = Voice::default();
+        let mut l = listed();
+        l["engines"]["dictation"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!({"id": "parakeet", "icon": "laptop", "key": false, "have": false, "in_use": false, "model": {"state": "absent"}}));
+        v.took(&l);
+        assert_eq!(
+            v.model(Tab::Dictation, "parakeet", Action::Download),
+            Some(
+                json!({"t": "voice.model", "engine": "parakeet", "kind": "dictation", "do": "download"})
+            )
+        );
+        assert_eq!(v.model(Tab::Dictation, "parakeet", Action::Use), None);
+        l["engines"]["dictation"][3]["model"] = json!({"state": "downloading", "percent": 50});
+        assert!(v.take(&json!({"t": "core.voice", "voice": l})));
+        assert_eq!(
+            v.tile(Tab::Dictation, "parakeet").and_then(Tile::percent),
+            Some(50)
+        );
     }
 
     /// The text once `splice`'s words are in.

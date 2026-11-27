@@ -748,6 +748,8 @@ impl Conn {
             self.voice.hush()
         } else if t == "voice.voices" {
             self.voice.list_voices(str_at(m, "engine") ?? String())
+        } else if t == "voice.model" {
+            self.voice.model(str_at(m.copy(), "engine") ?? String(), str_at(m.copy(), "kind") ?? String(), str_at(m, "do") ?? String())
         }
         self.voice_out()
     }
@@ -964,6 +966,13 @@ impl Conn {
                     self.voice.speak(voices.answer_of(message.copy()), str_at(message, "id") ?? String(), String(), String())
                     self.voice_out()
                 }
+                // An agent set up a model on the device: the computer the person is at
+                // downloads it.
+                let message = at(f.copy(), "message")
+                if self.synced and self.active and self.front.len() > 0 and str_at(message.copy(), "conversation") == some(self.front.copy()) {
+                    self.voice.card_came(message)
+                    self.voice_out()
+                }
             }
             // A quiet routine's reply never comes as message.created: its streaming goes
             // when its run ends.
@@ -1051,6 +1060,13 @@ impl Conn {
                     ok => {},
                     err(e) => self.tell_error("cache", "{e}"),
                 }
+            }
+        }
+        // The voice settings' tiles, with where each model's download is on this device.
+        if t == "result" or t == "event" {
+            if let shown = self.voice.shown_frame(f) {
+                self.to_app.send(ToApp.Text("{shown}"))
+                return
             }
         }
         self.to_app.send(ToApp.Text(text))
@@ -2191,6 +2207,7 @@ impl Conn {
         if let u = mut self.updater { u.waker = some(w) }
         if let d = mut self.device { d.waker = some(w) }
         self.voice.waker = some(w)
+        self.voice.models.waker = some(w)
     }
 
     /// How long the loop may wait, in ms, before something with a time of its own is
