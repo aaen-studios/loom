@@ -2300,7 +2300,7 @@ fn an_mcp_server_is_checked_once_for_both_ways_in() {
     }
 }
 
-// Whether `server` is the MCP server the MCP servers page's Add a browser set
+// Whether `server` is the MCP server the old MCP servers page's Add a browser set
 // up, as it set it up: named browser, running `npx -y @playwright/mcp@latest`,
 // with no settings.
 pub fn added_browser(server: Json) -> bool {
@@ -5038,7 +5038,7 @@ impl Instance {
             }
         }
         if missing.len() > 0 {
-            let why = "It uses {if missing.len() == 1 { "a secret" } else { "secrets" }} you don't have: {missing.join(", ")}. Add {if missing.len() == 1 { "it" } else { "them" }} under Keys on the MCP servers page."
+            let why = "It uses {if missing.len() == 1 { "a secret" } else { "secrets" }} you don't have: {missing.join(", ")}. Add {if missing.len() == 1 { "it" } else { "them" }} in Settings, on Secrets."
             try i.keep_tested(user.copy(), server_name.copy(), List<String>(), why.copy(), false)
             i.answer_cmd(w, Answer.Refused(String("mcp_failed"), why))
             return
@@ -5060,7 +5060,7 @@ impl Instance {
 
     // A test's answer: the tools, and whether it's signed in, or why it didn't
     // start. A 401 from a server with no key of the person's own is a sign-in
-    // it needs, which the MCP servers page then offers.
+    // it needs, which Spools' Installed then offers.
     fn mcp_tested(i: mut Instance, d: mcptest.Done) ! Error {
         let t = i.mcp_tests.remove(d.id) else return
         if d.grant != Json.Null { try i.keep_grant(t.user.copy(), t.server.copy(), d.grant.copy()) }
@@ -5481,7 +5481,7 @@ impl Instance {
         try i.store.set_meta(String("imported_servers_given"), String("1"))
     }
 
-    // The MCP server the MCP servers page's Add a browser set up, Microsoft's
+    // The MCP server the old MCP servers page's Add a browser set up, Microsoft's
     // Playwright MCP, goes once, for each person who has it as that button
     // added it, now that every agent has loom's own browser (PLAN.md, "The
     // agent's browser"); and with it, each agent's pick of it. One changed in
@@ -10791,7 +10791,7 @@ impl Instance {
         if not mine { return Answer.Refused(String("not_found"), String("That card's turn is over.")) }
         let server = str_at(spec.copy(), "name") ?? String()
         if answer == "cancel" {
-            if state != "asking" { return Answer.Refused(String("not_now"), "{server} was added already. It's on the MCP servers page, to remove.") }
+            if state != "asking" { return Answer.Refused(String("not_now"), "{server} was added already. It's in Spools, under Installed, to remove.") }
             try i.mcp_add_to(call.copy(), "cancelled", String())
             i.log(user.copy(), agent.copy(), "approval", "Didn't add the MCP server {server}", device)
             i.mcp_add_tell(call.copy(), rule_refusal("person-said-no", "Your person said no: {server} wasn't added."))
@@ -10902,7 +10902,7 @@ impl Instance {
                 var server = String()
                 if let a = i.mcp_adds.find(call.copy()) { server = str_at(a.spec.copy(), "name") ?? String() }
                 try i.mcp_add_to(call.copy(), "failed", message.copy())
-                i.mcp_add_tell(call, tool_error("Your person added {server}, but it didn't start: {message} They can change it on the MCP servers page."))
+                i.mcp_add_tell(call, tool_error("Your person added {server}, but it didn't start: {message} They can change it in Spools, under Installed."))
             },
         }
     }
@@ -17921,7 +17921,7 @@ impl Instance {
             let task = try i.start_task(user, agent, String("Propose skills and notes from past chats"), prompt, from, device)
             return Answer.Value(Obj.new().j("task", task).done())
         }
-        // Put off on the card under a reply: each waits on the Proposals page.
+        // Put off on the card under a reply: each waits at the top of Skills' list.
         if name == "proposal.later" {
             let Json.Array(ids) = at(args, "ids") else return Answer.Refused(String("bad_request"), String("ids is a list of proposals' ids."))
             var under = List<String>()

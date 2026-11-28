@@ -27,12 +27,6 @@ pub(super) fn settings_groups() -> Vec<(Option<&'static str>, Vec<Page>)> {
                 ),
                 ("pop-chat", Ico::MessageSquare, "Chat", Screen::ChatPrefs),
                 (
-                    "pop-emoji",
-                    Ico::FaceSlightlySmiling,
-                    "Emoji",
-                    Screen::Emoji,
-                ),
-                (
                     "pop-app",
                     Ico::Bell,
                     "App & notifications",
@@ -50,17 +44,9 @@ pub(super) fn settings_groups() -> Vec<(Option<&'static str>, Vec<Page>)> {
                     "Defaults",
                     Screen::Defaults,
                 ),
-                ("pop-rules", Ico::ShieldCheck, "Rules", Screen::Rules),
                 ("pop-programs", Ico::Brain, "Brains", Screen::Programs),
                 ("pop-skills", Ico::BookOpen, "Skills", Screen::Skills),
-                (
-                    "pop-proposals",
-                    Ico::Lightbulb,
-                    "Proposals",
-                    Screen::Proposals,
-                ),
                 ("pop-spools", Ico::Spool, "Spools", Screen::Spools),
-                ("pop-mcp", Ico::Plug, "MCP servers", Screen::Mcp),
                 ("pop-secrets", Ico::KeyRound, "Secrets", Screen::Secrets),
                 ("pop-plugins", Ico::Puzzle, "Plugins", Screen::Plugins),
             ],
@@ -72,32 +58,32 @@ pub(super) fn settings_groups() -> Vec<(Option<&'static str>, Vec<Page>)> {
                 ("pop-tasks", Ico::ListTodo, "Tasks", Screen::Tasks),
             ],
         ),
-        (
-            None,
-            vec![("pop-import", Ico::Import, "Import", Screen::Import)],
-        ),
     ]
 }
 
 /// How a page lays out in the popup (PLAN.md, "The settings popup"): the pages of things
-/// to pick from as a list beside the one picked, Emoji's tiles and Spools' Find across
-/// the whole width, and every other page as a column of rows.
+/// to pick from as a list beside the one picked, Spools' Find across the whole width,
+/// and every other page as a column of rows.
 pub(super) fn page_kind(screen: Screen) -> crate::model::popup::Kind {
     use crate::model::popup::Kind;
     match screen {
-        Screen::Mcp | Screen::Skills | Screen::Proposals | Screen::Routines | Screen::Installed => {
-            Kind::List
-        }
-        Screen::Emoji | Screen::Spools => Kind::Grid,
+        Screen::Skills | Screen::Routines | Screen::Installed => Kind::List,
+        Screen::Spools => Kind::Grid,
         _ => Kind::Column,
     }
 }
 
-/// What each of the person's pages has on it, for search to find besides its name.
+/// What each of the person's pages has on it, for search to find besides its name,
+/// with the names of the pages that went into it (Rules, Emoji, Proposals, MCP servers,
+/// Import), so they're found by those too.
 fn page_words(screen: Screen) -> &'static str {
     match screen {
-        Screen::Profile => "profile you name instructions what agents know",
-        Screen::Appearance => "theme dark light mode system colours colors text size font fonts geist code monospace bigger smaller",
+        Screen::Profile => {
+            "profile you name instructions what agents know proposals proposed notes memory remember keep drop import openbot grok bring over"
+        }
+        Screen::Appearance => {
+            "theme dark light mode system colours colors text size font fonts geist code monospace bigger smaller emoji emojis custom upload skin tone animated gif emoticons smiley twemoji"
+        }
         Screen::ChatPrefs => {
             "tool calls tools hidden folded thoughts thinking context ring compacted compaction fresh session send enter ctrl composer replies messages bubbles plain style vibrant colour color search sidebar find width wide narrow comfortable full column"
         }
@@ -106,26 +92,21 @@ fn page_words(screen: Screen) -> &'static str {
         }
         Screen::Programs => "brains models agent programs claude code codex gemini opencode acp registry install tokens limits share",
         Screen::Defaults => {
-            "defaults every agent brain backup model effort permission mode ask allow instructions busy queue steer group chats router haiku"
+            "defaults every agent brain backup model effort permission mode ask allow instructions busy queue steer group chats router haiku rules deny what if permissions site path file folder command shell tool webhook routine"
         }
-        Screen::Rules => {
-            "rules allow deny ask what if permissions site path file folder command shell tool webhook routine"
+        Screen::Skills => {
+            "skills how to proposals proposed suggestions suggested keep drop fixes learn teach recorded"
         }
-        Screen::Skills => "skills how to",
-        Screen::Proposals => "proposals proposed suggestions suggested keep drop notes skills learn teach recorded",
-        Screen::Mcp => "mcp servers tools connectors",
         Screen::Spools => {
-            "spools integrations catalog connect installed mcp servers acta t3 github notion linear vercel cloudflare playwright home assistant"
+            "spools integrations catalog connect installed mcp servers tools connectors add by hand command url address headers env client acta t3 github notion linear vercel cloudflare playwright home assistant"
         }
         Screen::Secrets => "secrets keys passwords sites bank sealed",
         Screen::Plugins => "plugins panels",
-        Screen::Emoji => "emoji emojis custom upload skin tone animated gif emoticons smiley twemoji",
         Screen::Voice => {
             "voice dictation dictate mic microphone speech speak read aloud talk transcribe elevenlabs deepgram openai groq fish whisper scribe language shortcut hold voices speed key"
         }
         Screen::Routines => "routines schedule every day hours times weekdays cron webhook history runs calendar week",
         Screen::Tasks => "tasks jobs long work",
-        Screen::Import => "import openbot grok bring over",
         _ => "",
     }
 }
@@ -272,7 +253,7 @@ impl Loom {
         .into_any_element()
     }
 
-    /// Appearance: the theme, and how big the chat's words are.
+    /// Appearance: the theme, how big the chat's words are, the fonts, and emoji.
     pub(super) fn appearance_page(&mut self, cx: &mut Context<Self>) -> Div {
         let theme = self.pref_choice(
             "theme",
@@ -310,7 +291,7 @@ impl Loom {
             |p, v| p.system_mono = v,
             cx,
         );
-        let groups = vec![
+        let mut groups = vec![
             self.group(
                 None,
                 vec![
@@ -328,6 +309,7 @@ impl Loom {
                 ],
             ),
         ];
+        groups.extend(self.emoji_groups(cx));
         self.settings_page("appearance-page", "Appearance", None, groups)
     }
 
@@ -899,11 +881,8 @@ mod tests {
                 .map(|(_, _, label, _)| label)
                 .collect()
         };
-        assert_eq!(
-            kinds(Kind::List),
-            ["Skills", "Proposals", "MCP servers", "Routines"]
-        );
-        assert_eq!(kinds(Kind::Grid), ["Emoji", "Spools"]);
+        assert_eq!(kinds(Kind::List), ["Skills", "Routines"]);
+        assert_eq!(kinds(Kind::Grid), ["Spools"]);
         assert!(kinds(Kind::Column).contains(&"Appearance"));
         assert_eq!(page_kind(Screen::Server), Kind::Column);
         // Brains is one column, each brain opening in place.
@@ -926,11 +905,49 @@ mod tests {
         assert!(screens("brains") == vec![Screen::Programs]);
         assert!(screens("claude code") == vec![Screen::Programs]);
         assert!(screens("steer") == vec![Screen::Defaults]);
-        assert!(screens("webhook deny") == vec![Screen::Rules]);
+        assert!(screens("webhook deny") == vec![Screen::Defaults]);
         assert!(screens("Group chats") == vec![Screen::Defaults]);
         assert!(screens("router model") == vec![Screen::Defaults]);
         assert!(screens("integrations") == vec![Screen::Spools]);
         assert!(screens("github") == vec![Screen::Spools]);
         assert!(screens("zzz").is_empty());
+    }
+
+    #[test]
+    fn the_nav_has_the_agreed_pages_and_finds_the_old_ones_by_name() {
+        let names: Vec<Vec<&str>> = settings_groups()
+            .into_iter()
+            .map(|(_, pages)| pages.into_iter().map(|(_, _, label, _)| label).collect())
+            .collect();
+        assert_eq!(
+            names,
+            [
+                vec![
+                    "About you",
+                    "Appearance",
+                    "Chat",
+                    "App & notifications",
+                    "Voice"
+                ],
+                vec!["Defaults", "Brains", "Skills", "Spools", "Secrets", "Plugins"],
+                vec!["Routines", "Tasks"],
+            ]
+        );
+        let screens = |q: &str| -> Vec<Screen> {
+            settings_found(q)
+                .into_iter()
+                .map(|(_, _, _, s)| s)
+                .collect()
+        };
+        // The pages that went, by their names, find where they went.
+        assert!(screens("rules") == vec![Screen::Defaults]);
+        assert!(screens("emoji") == vec![Screen::Appearance]);
+        assert!(screens("skin tone") == vec![Screen::Appearance]);
+        assert!(screens("import") == vec![Screen::Profile]);
+        assert!(screens("openbot") == vec![Screen::Profile]);
+        assert!(screens("proposals") == vec![Screen::Profile, Screen::Skills]);
+        assert!(screens("mcp") == vec![Screen::Spools]);
+        assert!(screens("MCP servers") == vec![Screen::Spools]);
+        assert!(screens("add by hand") == vec![Screen::Spools]);
     }
 }

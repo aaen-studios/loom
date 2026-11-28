@@ -1174,17 +1174,23 @@ impl Loom {
         out
     }
 
-    /// Spools' Installed tab: the person's servers down the left, as `model::spools`
-    /// orders them, each with its dot, and the one picked beside them.
+    /// Spools' Installed tab: the person's MCP servers down the left, as `model::spools`
+    /// orders them, each with its dot, Add by hand… beside the find field, and the one
+    /// picked beside them, or a new one's form.
     pub(super) fn installed_page(&mut self, cx: &mut Context<Self>) -> Div {
         let head = self.spools_head(true, cx).into_any_element();
         let rows = self.model.installed_rows();
-        if rows.is_empty() {
+        if rows.is_empty() && self.mcp_open.is_none() {
             let find = self
                 .small_button("installed-find", "Find one", true)
-                .on_click(cx.listener(|this, _, _, cx| this.spools_tab(Screen::Spools, cx)))
+                .on_click(cx.listener(|this, _, _, cx| this.spools_tab(Screen::Spools, cx)));
+            let actions = div()
+                .flex()
+                .gap(px(space::S))
+                .child(find)
+                .child(self.add_by_hand_button(false, cx))
                 .into_any_element();
-            let empty = self.empty(Ico::Spool, "Nothing connected yet", None, Some(find));
+            let empty = self.empty(Ico::Spool, "Nothing connected yet", None, Some(actions));
             return div().flex_1().min_h_0().child(
                 div()
                     .size_full()
@@ -1202,13 +1208,7 @@ impl Loom {
             .map(|r| self.model.mcp_servers[r.server].name.clone())
             .collect();
         let key_refs: Vec<&str> = keys.iter().map(String::as_str).collect();
-        let picked = self.model.spools.picked.clone();
-        let shows = popup::shows(
-            self.list_split(),
-            picked.as_deref().map(Some),
-            &key_refs,
-            false,
-        );
+        let shows = popup::shows(self.list_split(), self.installed_open(), &key_refs, false);
         let query = self.list_query(cx);
         let found = (0..rows.len())
             .filter(|&i| {
@@ -1224,14 +1224,16 @@ impl Loom {
                 let row = rows[i].clone();
                 (keys[i].clone(), self.installed_pane(&row, cx))
             }
+            Pane::New => ("new".to_string(), self.mcp_form(None, cx)),
             _ => (String::new(), Vec::new()),
         };
+        let action = Some(self.add_by_hand_button(false, cx));
         self.list_layout(
             head,
             ListPage {
                 id: "installed-page",
                 title: "Spools",
-                action: None,
+                action,
                 shows,
                 found,
                 row: Loom::installed_row,
@@ -1262,8 +1264,12 @@ impl Loom {
             row.dot,
             picked,
         )
-        .on_click(cx.listener(move |this, _, _, cx| {
+        .on_click(cx.listener(move |this, _, window, cx| {
+            this.mcp_open = None;
             this.model.spools.picked = Some(name.clone());
+            if let Some(m) = this.model.mcp_server(&name).cloned() {
+                this.fill_mcp(&m, window, cx);
+            }
             cx.notify();
         }))
         .into_any_element()
@@ -1271,7 +1277,8 @@ impl Loom {
 
     /// The server picked on Installed: its logo and name, with its own name under it
     /// where that isn't its entry's and its host where it has one (`installed_under`),
-    /// then how it stands, its agents, and what can be done with it.
+    /// then how it stands, its agents, what can be done with it, and its form to change
+    /// how it's reached.
     fn installed_pane(&mut self, row: &spools::Row, cx: &mut Context<Self>) -> Vec<AnyElement> {
         let m = self.model.mcp_servers[row.server].clone();
         let entry = row.entry.map(|e| self.model.spools.entries[e].clone());
@@ -1286,6 +1293,17 @@ impl Loom {
             None,
         )];
         out.extend(self.server_block(&m, cx));
+        // What its last test here found, with the tools by name.
+        if let Some(t) = self.model.mcp_tests.get(&m.name) {
+            out.push(
+                div()
+                    .text_size(px(size::SMALL))
+                    .text_color(self.p.ink_2)
+                    .child(t.said())
+                    .into_any_element(),
+            );
+        }
+        out.extend(self.mcp_form(Some(&m), cx));
         out
     }
 }

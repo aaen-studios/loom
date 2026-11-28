@@ -9,7 +9,7 @@ module tests.protocol.learn
 // everyday changes, the fix is put in, with the lines it removes and adds, and
 // undone. With a mode that asks, a note, even one for every agent, is still
 // kept at once, and forgetting it takes it from every agent; a fix waits on a
-// card under the reply: put off, it waits on the Proposals page, and a fix the
+// card under the reply: put off, it waits at the top of Skills' list, and a fix the
 // person changed is kept as they changed it, to
 // the skill by the name it has now when it was renamed while the fix waited. In
 // a group chat, each member that answered looks back over its own part, one
@@ -206,7 +206,7 @@ fn card_part(app: mut Session, agent: String, chat: String) ! Error {
     try see("{later}".contains("\"later\":true"), "Not now puts it off", "{later}")
     _ = try under(mut app, str_at(asked, "id") ?? String(), "\"later\":true")
     let waiting = try app.cmd("q_c6c", "proposal.list", Obj.new().done())
-    try check("{waiting}".contains(fix_id), "to wait on the Proposals page")
+    try check("{waiting}".contains(fix_id), "to wait at the top of Skills' list")
     let renamed = try rename_skill(mut app, "q_cr1", "post-release-notes", "post-notes", String(SKILL))
     try see(bool_at(renamed.copy(), "ok") == some(true), "the skill is renamed while its fix waits", "{renamed}")
     let changed = String("# Post release notes\n\n1. Open the drafts.\n2. Paste the notes.\n3. Press Release.\n4. Share the link.\n")

@@ -161,7 +161,7 @@ A message of only one to three emoji shows them big. Under the pointer an emoji 
 
 On the iPhone, the row of matches runs sideways over the message box, and the smiley opens the picker where the keyboard goes, under the message box, with the same groups and search. It stays up while you tap emoji and send. The keyboard button in the smiley's place brings the keyboard back, and a swipe down or a tap in the chat puts the picker away. When the smiley is hidden, the **+** sheet has **Emoji**. An emoji from the keyboard shows as loom draws it.
 
-Your own emoji are pictures you add in **Settings → Emoji**. On the iPhone, **Add** takes one from Photos and asks its name, and a tile's menu has Rename and Delete. They're kept on the instance, so all your devices have them. You send one as `:its_name:`, and agents read it that way. When an agent writes an emoji's name, it shows as the emoji. Built-in emoji go as the emoji itself. loom draws them with [Twemoji](https://github.com/jdecked/twemoji), the set Discord uses, so they look the same on Windows, a Mac and an iPhone.
+Your own emoji are pictures you add in **Settings → Appearance**, under **Your emoji** (on the iPhone, **Settings → Emoji**). On the iPhone, **Add** takes one from Photos and asks its name, and a tile's menu has Rename and Delete. They're kept on the instance, so all your devices have them. You send one as `:its_name:`, and agents read it that way. When an agent writes an emoji's name, it shows as the emoji. Built-in emoji go as the emoji itself. loom draws them with [Twemoji](https://github.com/jdecked/twemoji), the set Discord uses, so they look the same on Windows, a Mac and an iPhone.
 
 ## How an agent uses its tools
 

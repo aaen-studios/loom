@@ -1990,11 +1990,17 @@ impl Proposal {
 
     /// What it's called in the list: a skill's name, or the note.
     pub fn title(&self) -> String {
-        if self.kind == "skill" || self.kind == "fix" {
+        if self.is_skill() {
             self.name.clone()
         } else {
             self.text.clone()
         }
+    }
+
+    /// Whether it's a skill or a fix to one, which waits on Skills; a note waits on
+    /// About you.
+    pub fn is_skill(&self) -> bool {
+        self.kind == "skill" || self.kind == "fix"
     }
 
     /// Why a fix's skill failed, in a line.
@@ -7711,6 +7717,8 @@ impl Model {
             "synced" => {
                 self.synced = true;
                 self.caught_up(f);
+                // What waits for the person, for the badges in the settings' nav.
+                self.proposals_stale = true;
                 self.routines_stale = true;
                 self.defaults_stale = true;
                 self.rules_stale = true;
@@ -11539,6 +11547,22 @@ impl Model {
     pub fn delete_skill(&mut self, name: &str) -> Value {
         let id = self.id("app.skill_delete");
         json!({"t": "cmd", "id": id, "name": "skill.delete", "args": {"name": name}})
+    }
+
+    /// The skills and fixes agents propose that wait, for the top of Skills' list.
+    pub fn proposed_skills(&self) -> Vec<Proposal> {
+        self.proposals
+            .iter()
+            .filter(|k| k.is_skill())
+            .cloned()
+            .collect()
+    }
+
+    /// How many proposals wait for the person: skills and fixes, on Skills, and notes, on
+    /// About you, for their badges in the settings' nav.
+    pub fn waiting(&self) -> (usize, usize) {
+        let skills = self.proposals.iter().filter(|k| k.is_skill()).count();
+        (skills, self.proposals.len() - skills)
     }
 
     /// Asks for what agents propose that waits for the person.

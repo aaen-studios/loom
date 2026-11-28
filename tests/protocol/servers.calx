@@ -39,7 +39,7 @@ fn code(answer: Json) -> String {
 }
 
 // The acta server as mcp.put takes it, named `name`; with `was`, the name
-// it's saved under, as the MCP servers page's Save sends it.
+// it's saved under, as Installed's Save sends it.
 fn acta_server(name: str, was: str) -> Json {
     var o = Obj.new().s("name", String(name)).s("command", String("npx")).j("args", Json.Array([Json.Str(String("-y")), Json.Str(String("acta-mcp"))])).j("env", Obj.new().s("ACTA_URL", String("https://acta.example.com")).j("ACTA_KEY", Obj.new().s("secret", String("ACTA_KEY")).done()).done())
     if was.len() > 0 { o = o.s("was", String(was)) }
