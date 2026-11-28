@@ -75,6 +75,12 @@ fn run(i: Instance) ! Error {
     // --- Never ---
     let secret = try say(mut app, chat.copy(), "m_5", run_command("secret.put", Obj.new().s("name", String("key")).s("value", String("hunter2")).done()))
     try check(secret.starts_with("run_command failed") and secret.contains("never an agent's"), "a secret's value is the person's alone")
+    // A tool's name isn't a command: it fails at once, with nothing put to the person,
+    // in every mode (LOO-451). It used to ask first, and only fail once they said yes.
+    let guessed = try say(mut app, chat.copy(), "m_5b", run_command("list_commands", Obj.new().done()))
+    try check(guessed.starts_with("run_command failed") and guessed.contains("call it as a tool"), "a loom tool named as a command is refused at once, saying to call it as a tool")
+    let made_up = try say(mut app, chat.copy(), "m_5c", run_command("task.lst", Obj.new().done()))
+    try check(made_up.starts_with("run_command failed") and made_up.contains("loom has no command task.lst"), "and a command loom doesn't have, without asking (LOO-456)")
     let account = try say(mut app, chat.copy(), "m_6", run_command("account.delete", Obj.new().done()))
     try check(account.starts_with("run_command failed"), "and so is their account")
     let itself = try say(mut app, chat.copy(), "m_7", run_command("agent.update", Obj.new().s("agent", main_id.copy()).s("permission", String("allow")).done()))

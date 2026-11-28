@@ -204,12 +204,14 @@ impl Action {
     }
 }
 
-/// A menu open on the page: the language's, the voice's, or the models of the tile in use.
+/// A menu open on the page: the language's, the voice's, the models of the tile in use,
+/// or the microphones.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Menu {
     Language,
     Voice,
     Model,
+    Microphone,
 }
 
 /// Dictation on screen: where its words start in the composer, and how many bytes of
@@ -238,6 +240,9 @@ pub struct Voice {
     pub voices: std::collections::HashMap<String, Result<Vec<(String, String)>, String>>,
     /// A dictation under way.
     pub dictating: Option<Dictating>,
+    /// A dictation the message was sent in the middle of (LOO-448): the core's frames
+    /// about it are no one's until it says `cancelled`.
+    pub dropping: bool,
     /// What `core.dictation` said last, for the composer: its words, once they changed.
     pub words: Option<String>,
     /// How its words start: those the engine won't change again (`kept`).
@@ -326,6 +331,13 @@ impl Voice {
         }
         if t == "core.dictation" {
             let state = s(f, "state");
+            if state == "cancelled" {
+                self.dropping = false;
+                return true;
+            }
+            if self.dropping {
+                return true;
+            }
             match state.as_str() {
                 "no_engine" => {
                     self.dictating = None;
@@ -481,6 +493,18 @@ impl Voice {
         self.words = None;
         self.kept.clear();
         json!({"t": "voice.listen"})
+    }
+
+    /// The message sent while dictating (LOO-448): the dictation is dropped, so the
+    /// words still to come don't write it back into the emptied composer, and the core
+    /// is told to drop it too. None when there's no dictation.
+    pub fn sent(&mut self) -> Option<Value> {
+        self.dictating.take()?;
+        self.words = None;
+        self.kept.clear();
+        self.dictated = None;
+        self.dropping = true;
+        Some(json!({"t": "voice.cancel"}))
     }
 
     /// Where dictation's words go in the composer's `text`, in place of the ones it put
@@ -919,6 +943,38 @@ mod tests {
             Some((5..13, " how are you".into()))
         );
         assert!(v.dictating.is_none());
+    }
+
+    #[test]
+    fn a_message_sent_while_dictating_stays_out_of_the_composer() {
+        let mut v = Voice::default();
+        // Nothing to drop with no dictation.
+        assert_eq!(v.sent(), None);
+        v.listen(0);
+        v.take(&json!({"t": "core.dictation", "state": "listening", "text": "check the"}));
+        assert_eq!(v.composer_words(""), Some((0..0, "check the".into())));
+        // Sent while words are still coming: the composer is emptied, and the core told
+        // to drop the dictation.
+        assert_eq!(v.sent(), Some(json!({"t": "voice.cancel"})));
+        assert!(v.dictating.is_none() && v.dictated.is_none());
+        // What the core had on the way comes anyway, and goes nowhere.
+        for (state, text) in [
+            ("listening", "check the build"),
+            ("finishing", "check the build"),
+            ("done", "check the build"),
+        ] {
+            v.take(&json!({"t": "core.dictation", "state": state, "text": text}));
+            assert_eq!(v.composer_words(""), None);
+        }
+        // Dictating again at once: the last one's words still on the way don't go into
+        // the new one, which has its own once the core says the last is gone.
+        v.listen(0);
+        v.take(&json!({"t": "core.dictation", "state": "done", "text": "check the build"}));
+        assert_eq!(v.composer_words(""), None);
+        assert!(v.dictating.is_some());
+        v.take(&json!({"t": "core.dictation", "state": "cancelled"}));
+        v.take(&json!({"t": "core.dictation", "state": "listening", "text": "ship it"}));
+        assert_eq!(v.composer_words(""), Some((0..0, "ship it".into())));
     }
 
     #[test]

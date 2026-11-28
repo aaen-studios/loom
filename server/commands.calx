@@ -7,6 +7,7 @@ module server.commands
 // person every time. A few stay the person's alone: their account, their
 // password, their secrets' values, what a plugin is allowed, and a device's
 // own push token.
+import std.fs
 import std.json.{Json}
 import shared.obj.{Obj}
 
@@ -40,8 +41,8 @@ const COMMANDS: [Command; 105] = [
     Command { name: "room.update", args: "conversation, name?, members?, color?, default?", does: "Changes a group chat's name, members, colour or default agent." },
     Command { name: "messages.pinned", args: "conversation, before? (a pinned message id), limit? (up to 100)", does: "The pinned messages in a conversation, the newest pin first, how many there are, and whether there are more." },
     Command { name: "message.delete", args: "message", does: "Deletes a message from its chat, leaving a mark where it was, for every device; its agent is told it's gone." },
-    Command { name: "agent.create", args: "name, acp_agent? (left out: the default brain), backup? (the program that takes over when its own runs out; left out: the default's), instructions, mcp? (names of MCP servers), color?, shape? (its shape in the sidebar: loop, coil, bow, heart, star, knot, snail or yarn; left out: the plain thread), isolated? (true runs it in a sandbox), network? (hosts it may reach, [] for none; null for everything)", does: "Makes an agent. It starts out asking first, and an isolated agent's are isolated, with no more network than its own." },
-    Command { name: "agent.update", args: #"agent, and what changes: name, instructions, mcp, color, shape (loop, coil, bow, heart, star, knot, snail, yarn, drawn for its drawing, or "" for the plain thread), folder, permission (ask, auto or allow), busy (queue or steer), backup (a program, or none), config ({option: value}), code_mode (false for plain tools), isolated (true runs it in a sandbox), network (hosts it may reach, [] for none, null for everything); null follows the default"#, does: "Changes an agent. A looser permission mode, or where it runs, asks the person." },
+    Command { name: "agent.create", args: "name, acp_agent? (left out: the default brain), backup? (the program that takes over when its own runs out; left out: the default's), instructions, mcp? (names of MCP servers), color?, shape? (its shape in the sidebar: loop, coil, bow, heart, star, knot, snail or yarn; left out: the plain thread), isolated? (true runs it in a sandbox), network? (hosts it may reach, [] for none; null for everything), private? (true cuts it off from everything the person's other agents share)", does: "Makes an agent. It starts out asking first; an isolated agent's are isolated, with no more network than its own, and a private agent's are private." },
+    Command { name: "agent.update", args: #"agent, and what changes: name, instructions, mcp, color, shape (loop, coil, bow, heart, star, knot, snail, yarn, drawn for its drawing, or "" for the plain thread), folder, permission (ask, auto or allow), busy (queue or steer), backup (a program, or none), config ({option: value}), code_mode (false for plain tools), isolated (true runs it in a sandbox), network (hosts it may reach, [] for none, null for everything), private (true cuts it off from everything shared; an agent in a group chat is taken out first); null follows the default"#, does: "Changes an agent. A looser permission mode, where it runs, or whether it's private, asks the person." },
     Command { name: "agent.revisions", args: "agent", does: "Every revision of an agent's instructions." },
     Command { name: "agent.rollback", args: "agent, revision", does: "Puts an agent back as it was at a revision." },
     Command { name: "agent.delete", args: "agent", does: "Deletes an agent." },
@@ -152,6 +153,7 @@ pub fn access(name: String) -> Access {
     if name == "conversation.read" { return Access.Never(String("What your person has read is marked by their apps, as they read it.")) }
     if name == "room.resend" or name == "room.forget" { return Access.Never(String("Where a message in a group chat goes is your person's to correct, in the app. To give one to another member, use hand_off.")) }
     if name.starts_with("scripts.") { return Access.Never(String("Scripts are your person's own: they turn them on in the app.")) }
+    if name.starts_with("t3.") { return Access.Never(String("T3's threads in the chat are your person's app's. To work with T3, use the T3 tools you have, if you have them.")) }
     let runs = ["conversation.create", "conversation.rename", "conversation.branch", "conversation.move", "messages.list", "messages.search", "messages.pinned", "message.pin", "room.create", "room.update", "agent.create", "agent.update", "agent.revisions", "agent.rollback", "activity.list", "memory.list", "memory.put", "table.list", "table.create", "table.write", "table.rows", "table.delete_rows", "profile.get", "profile.put", "voice.get", "defaults.get", "rule.list", "rule.check", "routine.list", "routine.put", "routine.run", "routine.runs", "routine.next", "routine.calendar", "routine.stop", "flow.list", "watch.list", "watch.put", "task.list", "task.start", "task.pause", "task.resume", "task.cancel", "task.retry", "queue.list", "queue.edit", "queue.order", "queue.drop", "skill.list", "skill.get", "skill.put", "plugin.list", "plugin.get", "plugin.put", "plugin.revisions", "mcp.list", "mcp.test", "secret.list", "acp.list", "acp.registry", "device.list"]
     if name.starts_with("proposal.") { return Access.Never(String("Proposals are your person's to keep or drop, in the app. Use propose_skill or propose_note to make one.")) }
     for r in runs {
@@ -172,6 +174,35 @@ pub fn catalog() -> List<Json> {
         out.push(Obj.new().s("name", String(c.name)).s("args", String(c.args)).s("does", String(c.does)).s("how", String(how)).done())
     }
     return out
+}
+
+// The commands the instance has that list_commands doesn't list: the app's own, which
+// an agent reaches only by asking its person. The test below reads the instance's
+// commands, so a new one is here or in COMMANDS from its first day.
+const UNLISTED: [str; 34] = ["acta.board", "acta.boards", "acta.tasks", "agent.file", "agent.files", "agent.group", "agent.hide", "agent.mute", "agent.order", "agent.pin", "agent.summary", "card.comment", "card.create", "card.get", "card.preview", "card.update", "cards.refresh", "code.call", "device.call", "emoji.add", "emoji.delete", "emoji.list", "emoji.rename", "emoji.restore", "files.recent", "group.create", "group.delete", "group.list", "group.update", "link.preview", "room.summary", "sidebar.order", "status.since", "tool.call"]
+
+// Whether the instance has the command `name`, listed or not.
+pub fn known(name: String) -> bool {
+    for c in COMMANDS {
+        if name == c.name { return true }
+    }
+    for u in UNLISTED {
+        if name == u { return true }
+    }
+    return false
+}
+
+// Why `name` isn't a command, before anything asks the person (LOO-451, LOO-456). A
+// name without a dot is one of the agent's own tools, such as list_commands, or a
+// guess, since every command is `thing.verb`; a dotted one the instance doesn't have
+// is a guess too. Either used to ask the person, in every permission mode, and only
+// fail once they said yes. None when it's a command, or one an agent never runs, which
+// says why on its own.
+pub fn not_a_command(name: String) -> String? {
+    if not name.contains(".") { return some("{name} isn't a command. If it's one of your loom tools, call it as a tool, not with run_command. list_commands lists the commands.") }
+    if let Access.Never(_) = access(name.copy()) { return none }
+    if known(name.copy()) { return none }
+    return some("loom has no command {name}. list_commands lists them.")
 }
 
 // What `name` does, in a few words, for the ask the person sees: the first
@@ -212,6 +243,36 @@ fn reading_runs_and_harm_asks() {
     assert(access(String("import.run")) == Access.Asks(String("other")))
     assert(access(String("table.write")) == Access.Runs and access(String("table.delete_rows")) == Access.Runs)
     assert(access(String("table.drop")) == Access.Asks(String("delete")))
+    // A tool's name isn't a command, and is known not to be before it could ask (LOO-451).
+    for c in COMMANDS {
+        if not_a_command(String(c.name)) != none { panic("{c.name} is listed but taken for a tool") }
+    }
+    assert((not_a_command(String("list_commands")) ?? String()).starts_with("list_commands isn't a command. If it's one of your loom tools"))
+    // A dotted guess is refused as well (LOO-456); one the app has but doesn't list,
+    // and one an agent never runs, aren't.
+    assert(not_a_command(String("task.lst")) == some(String("loom has no command task.lst. list_commands lists them.")))
+    assert(not_a_command(String("agent.pin")) == none and not_a_command(String("secret.put")) == none)
     assert(does(String("mcp.delete")) == "Removes an MCP server")
     assert(does(String("agent.update")) == "Changes an agent")
+}
+
+// Every command the instance has is known, or one an agent never runs, so none is
+// refused as a guess. Read from the instance's own `name == "thing.verb"`, run from the
+// repository's root as the tests are.
+@test
+fn every_command_the_instance_has_is_known() {
+    let text = fs.read_text(String("server/instance.calx"))! ?? String()
+    assert(text.len() > 0)
+    var seen: usize = 0
+    let pieces = text.split("name == \"")
+    for k in 1..pieces.len() {
+        let piece = pieces[k].copy()
+        let end = piece.find("\"") ?? 0
+        let name = piece[..end].copy()
+        if not name.contains(".") or name.starts_with(".") { continue }
+        seen += 1
+        if let Access.Never(_) = access(name.copy()) { continue }
+        if not known(name.copy()) { panic("{name} is a command the instance has, but neither COMMANDS nor UNLISTED has it") }
+    }
+    assert(seen > 150)
 }

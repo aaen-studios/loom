@@ -2149,6 +2149,12 @@ impl Store {
     // `text`, `shared`, `by` and `at`. With `agent` none, every note of the
     // person's.
     pub fn memories(self, user: String, agent: String?, query: String, limit: usize) -> List<Json> ! Error {
+        return try self.memories_of(user, agent, query, limit, true)
+    }
+
+    // As memories, and with `shared` false, only `agent`'s own notes: what a
+    // private agent recalls (PLAN.md, "Private agents").
+    pub fn memories_of(self, user: String, agent: String?, query: String, limit: usize, shared: bool) -> List<Json> ! Error {
         var out = List<Json>()
         var sql = String()
         var args = List<Value>()
@@ -2160,7 +2166,7 @@ impl Store {
             args = [t(user)]
         }
         if let a = agent {
-            sql.push_str(" AND (m.agent = ? OR m.agent = '')")
+            sql.push_str(if shared { " AND (m.agent = ? OR m.agent = '')" } else { " AND m.agent = ?" })
             args.push(t(a))
         }
         sql.push_str(if query.trim().len() > 0 { " ORDER BY rank LIMIT ?" } else { " ORDER BY m.id DESC LIMIT ?" })
@@ -2301,10 +2307,16 @@ impl Store {
     // Forgets note `id` of the person's, if `agent` (when given) may: its
     // own, or a shared one.
     pub fn forget(self, user: String, id: i64, agent: String?) -> bool ! Error {
+        return try self.forget_of(user, id, agent, true)
+    }
+
+    // As forget, and with `shared` false, only one of `agent`'s own: what a
+    // private agent forgets (PLAN.md, "Private agents").
+    pub fn forget_of(self, user: String, id: i64, agent: String?, shared: bool) -> bool ! Error {
         var sql = String("DELETE FROM memories WHERE id = ? AND user = ?")
         var args: List<Value> = [Value.Int(id), t(user)]
         if let a = agent {
-            sql.push_str(" AND (agent = ? OR agent = '')")
+            sql.push_str(if shared { " AND (agent = ? OR agent = '')" } else { " AND agent = ?" })
             args.push(t(a))
         }
         let began = try self.begin()
@@ -3517,6 +3529,13 @@ fn fts_query(query: String) -> String? {
 // before it (Unix ms). On any connection to the database, so server/searcher.calx
 // runs it off the loop.
 pub fn search_in(db: Database, user: String, query: String, agent: String?, after: i64?, before: i64?, limit: usize) -> List<(Json, String)> ! Error {
+    return try search_walled_in(db, user, query, agent, after, before, limit, none, List<String>())
+}
+
+// As search_in, for an agent (PLAN.md, "Private agents"): with `only`, only in that
+// agent's own conversations, as a private agent searches, and never in those of
+// the agents in `hide`, the private ones, as every other agent searches.
+pub fn search_walled_in(db: Database, user: String, query: String, agent: String?, after: i64?, before: i64?, limit: usize, only: String?, hide: List<String>) -> List<(Json, String)> ! Error {
     var out = List<(Json, String)>()
     let fts = fts_query(query) else return out
     var sql = String("SELECT m.json, snippet(messages_fts, 0, char(2), char(3), '…', 16) FROM messages_fts f JOIN messages m ON m.rowid = f.rowid JOIN conversations c ON c.id = m.conversation AND c.deleted = 0 WHERE messages_fts MATCH ? AND f.user = ?")
@@ -3524,6 +3543,14 @@ pub fn search_in(db: Database, user: String, query: String, agent: String?, afte
     if let a = agent {
         sql.push_str(" AND f.agent = ?")
         args.push(t(a))
+    }
+    if let o = only {
+        sql.push_str(" AND c.agent = ?")
+        args.push(t(o))
+    }
+    for h in hide {
+        sql.push_str(" AND c.agent != ?")
+        args.push(t(h.copy()))
     }
     if let a = after {
         sql.push_str(" AND m.at >= ?")
@@ -3569,7 +3596,14 @@ pub fn search_answer_in(db: Database, user: String, args: Json) -> Json ! Error 
     let n = usize.try_from(clamped) ?? 30
     let found = match conversation {
         some(c) => try find_in(db, user, query, c, n),
-        none => try search_in(db, user, query, str_at(args.copy(), "agent"), int_at(args.copy(), "after"), int_at(args, "before"), n),
+        none => {
+            // What an agent's search is walled from, as the instance sets it (PLAN.md, "Private agents").
+            var hide = List<String>()
+            if let Json.Array(ids) = args.get(String("hide")) ?? Json.Null {
+                for h in ids { hide.push(h.as_str() ?? String()) }
+            }
+            try search_walled_in(db, user, query, str_at(args.copy(), "agent"), int_at(args.copy(), "after"), int_at(args.copy(), "before"), n, str_at(args, "own"), hide)
+        },
     }
     var results = List<Json>()
     for (message, snippet) in found {

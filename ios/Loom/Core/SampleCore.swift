@@ -303,7 +303,7 @@ final class SampleCore: CoreLink, @unchecked Sendable {
                 // Acta, T3 and Spools, and the person's MCP servers.
                 _ = integrations(f)
             }
-        case "voice.listen", "voice.stop", "voice.voices", "voice.speak":
+        case "voice.listen", "voice.stop", "voice.cancel", "voice.voices", "voice.speak":
             voiceFrame(f)
         case "live.start", "live.mute", "live.end":
             liveFrame(f, name: agents.first { $0["id"] == f["agent"] }?["name"].text ?? "")

@@ -60,6 +60,8 @@ mod form_drafts;
 mod list_page;
 #[path = "live_ui.rs"]
 mod live_ui;
+#[path = "mic_ui.rs"]
+mod mic_ui;
 #[path = "picked_ui.rs"]
 mod picked_ui;
 #[path = "routine_off_view.rs"]
@@ -641,6 +643,17 @@ pub struct Loom {
     live_mic: Option<crate::voice::Mic>,
     live_sample: bool,
     live_t0: Instant,
+    /// Settings › Voice › Microphone: the system's inputs as last listed, a listing on
+    /// its way and when the last was asked for, the mic its meter hears while the page
+    /// shows the row, how loud that is and why it didn't start, and the picked mic
+    /// loom said wasn't plugged in, so it says it once (`mic_ui.rs`).
+    inputs: crate::voice::Inputs,
+    inputs_coming: Option<std::sync::mpsc::Receiver<crate::voice::Inputs>>,
+    inputs_asked: Option<Instant>,
+    meter: Option<crate::voice::Mic>,
+    meter_level: f32,
+    meter_why: Option<String>,
+    missing_said: Option<String>,
     /// Whether the chat is drawn again each second while a draft's Undo counts down.
     draft_ticking: bool,
     queue_in: Entity<InputState>,
@@ -670,6 +683,10 @@ pub struct Loom {
     menu_folders: bool,
     /// Whether the agent menu shows the agent's threads, to open one.
     menu_threads: bool,
+    /// Whether the agent menu asks "make it private?", listing what it loses, before it does.
+    menu_private: bool,
+    /// Whether the edit page asks the same, under its Private switch.
+    private_armed: bool,
     listing_hosts: bool,
     /// One of the person's own hosts to add, by what ssh is given, on the Hosts page.
     ssh_host_in: Entity<InputState>,
@@ -1068,17 +1085,7 @@ impl Loom {
             window,
             |this: &mut Loom, state, event: &InputEvent, window, cx| {
                 match event {
-                    InputEvent::PressEnter { shift: false, .. } => {
-                        let text = composer_text(state.read(cx));
-                        if let Some(frame) = this.model.send(&text) {
-                            this.core.send(&frame.to_string());
-                            state.update(cx, |s, cx| s.set_value("", window, cx));
-                            // Sending shuts the emoji picker.
-                            if this.emoji_ui.picker.is_some() {
-                                this.close_emoji_picker(cx);
-                            }
-                        }
-                    }
+                    InputEvent::PressEnter { shift: false, .. } => this.send_composer(window, cx),
                     // A / alone in the composer opens the + menu, with its search.
                     InputEvent::Change if state.read(cx).value() == "/" => {
                         state.update(cx, |s, cx| s.set_value("", window, cx));
@@ -1562,6 +1569,7 @@ ACTA_KEY=secret:ACTA_KEY",
                     }
                     loom.pump_mic();
                     loom.pump_live_mic();
+                    loom.tick_mics(cx);
                     loom.pump_door();
                     if loom.pump_away() {
                         cx.notify();
@@ -1853,6 +1861,13 @@ ACTA_KEY=secret:ACTA_KEY",
             live_mic: None,
             live_sample: false,
             live_t0: Instant::now(),
+            inputs: crate::voice::Inputs::default(),
+            inputs_coming: None,
+            inputs_asked: None,
+            meter: None,
+            meter_level: 0.0,
+            meter_why: None,
+            missing_said: None,
             draft_ticking: false,
             queue_in,
             aside_in,
@@ -1869,6 +1884,8 @@ ACTA_KEY=secret:ACTA_KEY",
             side_drop: None,
             menu_folders: false,
             menu_threads: false,
+            menu_private: false,
+            private_armed: false,
             listing_hosts: false,
             ssh_host_in,
             skill_name_in,
@@ -2047,6 +2064,28 @@ ACTA_KEY=secret:ACTA_KEY",
 
     fn send(&self, frame: Value) {
         self.core.send(&frame.to_string());
+    }
+
+    /// The composer's message sent, by Enter or the send button: the composer empties,
+    /// and a dictation under way ends with it, its words still to come dropped (LOO-448).
+    pub(super) fn send_composer(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let text = composer_text(self.composer.read(cx));
+        let Some(frame) = self.model.send(&text) else {
+            return;
+        };
+        self.send(frame);
+        if let Some(cancel) = self.model.voice.sent() {
+            self.mic = None;
+            self.heard.clear();
+            self.send(cancel);
+        }
+        self.composer
+            .update(cx, |s, cx| s.set_value("", window, cx));
+        // Sending shuts the emoji picker.
+        if self.emoji_ui.picker.is_some() {
+            self.close_emoji_picker(cx);
+        }
+        cx.notify();
     }
 
     // --- The sidebar, whole or a rail (rail.rs) ---
@@ -3690,6 +3729,7 @@ ACTA_KEY=secret:ACTA_KEY",
         self.menu = Some(Menu::Agent);
         self.menu_folders = false;
         self.menu_threads = false;
+        self.menu_private = false;
         self.menu_at = Some(at);
         cx.notify();
     }
@@ -7156,16 +7196,24 @@ ACTA_KEY=secret:ACTA_KEY",
             .child(
                 div()
                     .w_full()
-                    .text_center()
-                    .text_size(px(size::SMALL))
-                    .font_weight(if unread {
-                        FontWeight::SEMIBOLD
-                    } else {
-                        FontWeight::MEDIUM
-                    })
-                    .text_color(if selected || unread { p.ink } else { p.ink_2 })
-                    .truncate()
-                    .child(a.name.clone()),
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .gap(px(space::XS))
+                    .child(
+                        div()
+                            .min_w_0()
+                            .text_size(px(size::SMALL))
+                            .font_weight(if unread {
+                                FontWeight::SEMIBOLD
+                            } else {
+                                FontWeight::MEDIUM
+                            })
+                            .text_color(if selected || unread { p.ink } else { p.ink_2 })
+                            .truncate()
+                            .child(a.name.clone()),
+                    )
+                    .when(a.private, |d| d.child(self.lock_mark())),
             )
             .when(unread, |d| {
                 d.child(
@@ -7229,11 +7277,20 @@ ACTA_KEY=secret:ACTA_KEY",
                     .flex_col()
                     .child(
                         div()
-                            .text_size(px(size::BODY))
-                            .font_weight(FontWeight::MEDIUM)
-                            .text_color(p.ink)
-                            .truncate()
-                            .child(a.name.clone()),
+                            .flex()
+                            .items_center()
+                            .gap(px(space::S))
+                            .min_w_0()
+                            .child(
+                                div()
+                                    .min_w_0()
+                                    .text_size(px(size::BODY))
+                                    .font_weight(FontWeight::MEDIUM)
+                                    .text_color(p.ink)
+                                    .truncate()
+                                    .child(a.name.clone()),
+                            )
+                            .when(a.private, |d| d.child(self.lock_mark())),
                     )
                     .child(
                         div()
@@ -7244,6 +7301,15 @@ ACTA_KEY=secret:ACTA_KEY",
                     ),
             )
             .child(div().size(px(6.0)).flex_none().rounded_full().bg(p.warn))
+    }
+
+    /// A private agent's lock, small and quiet after its name wherever agents are listed
+    /// (PLAN.md, "Private agents").
+    fn lock_mark(&self) -> Div {
+        div()
+            .flex_none()
+            .text_color(self.p.ink_3)
+            .child(Icon::new(Ico::Lock).xsmall())
     }
 
     /// An agent's row in the sidebar: its thread, its name, and what it's on after it.
@@ -7326,7 +7392,8 @@ ACTA_KEY=secret:ACTA_KEY",
                             .truncate()
                             .child(a.name.clone()),
                     )
-                    // A muted agent's quiet mark.
+                    // A private agent's lock, and a muted one's quiet mark.
+                    .when(a.private, |d| d.child(self.lock_mark()))
                     .when(a.muted, |d| {
                         d.child(
                             div()
@@ -8671,6 +8738,7 @@ ACTA_KEY=secret:ACTA_KEY",
                     this.menu_at = None;
                     this.menu_folders = false;
                     this.menu_threads = false;
+                    this.menu_private = false;
                     this.menu = if this.menu == Some(Menu::Agent) {
                         None
                     } else {
@@ -9862,6 +9930,64 @@ ACTA_KEY=secret:ACTA_KEY",
     }
 
     /// A routine's row once it's picked: "Run it now?", with Run and Cancel.
+    /// What Make private asks before it does, in the agent menu and under the edit page's
+    /// switch: what the agent loses, then Cancel and Make private (PLAN.md, "Private
+    /// agents").
+    fn private_confirm(
+        &self,
+        id: &'static str,
+        name: &str,
+        cx: &mut Context<Self>,
+        cancel: fn(&mut Loom),
+        yes: fn(&mut Loom),
+    ) -> Div {
+        let p = self.p;
+        div()
+            .max_w(px(280.0))
+            .flex()
+            .flex_col()
+            .gap(px(space::S))
+            .px(px(space::M))
+            .py(px(space::S))
+            .child(
+                div()
+                    .text_size(px(size::SMALL))
+                    .font_weight(FontWeight::MEDIUM)
+                    .text_color(p.ink)
+                    .child(format!("Make {name} private?")),
+            )
+            .child(
+                div()
+                    .text_size(px(size::CAPTION))
+                    .text_color(p.ink_3)
+                    .child(PRIVATE_LOSES),
+            )
+            .child(
+                div()
+                    .flex()
+                    .justify_end()
+                    .gap(px(space::S))
+                    .child(
+                        self.small_button(SharedString::from(format!("{id}-no")), "Cancel", false)
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                cancel(this);
+                                cx.notify();
+                            })),
+                    )
+                    .child(
+                        self.small_button(
+                            SharedString::from(format!("{id}-yes")),
+                            "Make private",
+                            true,
+                        )
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            yes(this);
+                            cx.notify();
+                        })),
+                    ),
+            )
+    }
+
     fn plus_confirm(&self, r: &model::Routine, cx: &mut Context<Self>) -> Stateful<Div> {
         let p = self.p;
         let id = r.id.clone();
@@ -11024,6 +11150,7 @@ ACTA_KEY=secret:ACTA_KEY",
             self.menu_at = None;
             self.menu_folders = false;
             self.menu_threads = false;
+            self.menu_private = false;
         }
         let menu = self.menu?;
         let under_header = self.menu_at.is_none();
@@ -11066,6 +11193,41 @@ ACTA_KEY=secret:ACTA_KEY",
             .as_ref()
             .and_then(|id| self.model.agent(id))
             .is_some_and(|a| a.muted);
+        let private = self
+            .model
+            .selected
+            .as_ref()
+            .and_then(|id| self.model.agent(id))
+            .is_some_and(|a| a.private);
+        // Make private asks first, in the menu's place, saying what it loses.
+        if menu == Menu::Agent && self.menu_private {
+            let name = self
+                .model
+                .selected
+                .as_ref()
+                .and_then(|id| self.model.agent(id))
+                .map(|a| a.name.clone())
+                .unwrap_or_default();
+            return Some(panel.when(under_header, |d| d.left(px(space::S))).child(
+                self.private_confirm(
+                    "menu-private",
+                    &name,
+                    cx,
+                    |this| {
+                        this.menu_private = false;
+                        this.menu = None;
+                    },
+                    |this| {
+                        if let Some(agent) = this.model.selected.clone() {
+                            let f = this.model.set_private(&agent, true);
+                            this.send(f);
+                        }
+                        this.menu_private = false;
+                        this.menu = None;
+                    },
+                ),
+            ));
+        }
         if menu == Menu::Agent && self.menu_folders {
             return Some(self.folder_menu(
                 panel.when(under_header, |d| d.left(px(space::S))),
@@ -11154,6 +11316,31 @@ ACTA_KEY=secret:ACTA_KEY",
                 )
                 .child(
                     self.menu_item(
+                        "private-agent",
+                        if private { Ico::LockOpen } else { Ico::Lock },
+                        if private {
+                            "Make normal"
+                        } else {
+                            "Make private"
+                        },
+                        false,
+                    )
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        // Normal again shares nothing of its own, so it needs no asking.
+                        if private {
+                            if let Some(agent) = this.model.selected.clone() {
+                                let f = this.model.set_private(&agent, false);
+                                this.send(f);
+                            }
+                            this.menu = None;
+                        } else {
+                            this.menu_private = true;
+                        }
+                        cx.notify();
+                    })),
+                )
+                .child(
+                    self.menu_item(
                         "hide-agent",
                         if hidden { Ico::Eye } else { Ico::EyeOff },
                         if hidden { "Show" } else { "Hide" },
@@ -11195,6 +11382,7 @@ ACTA_KEY=secret:ACTA_KEY",
                                     .update(cx, |s, cx| s.set_value(instructions, window, cx));
                             }
                             this.fresh_armed = false;
+                            this.private_armed = false;
                             this.custom_color = false;
                             this.show_side(Screen::EditAgent, cx);
                             this.menu = None;
@@ -12357,6 +12545,27 @@ ACTA_KEY=secret:ACTA_KEY",
                 .w_full(),
             )
             .child(appear(swatches, self.enter(0.45, 0.4)))
+            // Private from the start, cut off from what the other agents share.
+            .child(appear(
+                div()
+                    .id("make-private")
+                    .role(Role::Switch)
+                    .aria_label("Private")
+                    .flex()
+                    .items_center()
+                    .gap(px(space::S))
+                    .text_size(px(size::SMALL))
+                    .text_color(if self.make.private { p.ink } else { p.ink_2 })
+                    .cursor_pointer()
+                    .child(Icon::new(Ico::Lock).small())
+                    .child("Private")
+                    .child(self.switch("make-private-switch", self.make.private))
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.make.private = !this.make.private;
+                        cx.notify();
+                    })),
+                self.enter(0.5, 0.4),
+            ))
             .child(appear(
                 div()
                     .id("weave-it")
@@ -12389,7 +12598,9 @@ ACTA_KEY=secret:ACTA_KEY",
         } else {
             typed
         };
-        let f = self.model.new_agent(&name, &program, "", self.make.color());
+        let f = self
+            .model
+            .new_agent(&name, &program, "", self.make.color(), self.make.private);
         self.send(f);
         self.make.step = Step::Weaving;
         self.make.started = Some(Instant::now());
@@ -13598,6 +13809,47 @@ ACTA_KEY=secret:ACTA_KEY",
                 },
             )
         };
+        // Private: cut off from what the other agents share, and they from it. Turning it
+        // on asks first, under the switch, with what it loses; off needs no asking.
+        let (private, editing_name) = self
+            .model
+            .editing
+            .as_ref()
+            .and_then(|id| self.model.agent(id))
+            .map(|a| (a.private, a.name.clone()))
+            .unwrap_or_default();
+        let private_row = div()
+            .flex()
+            .flex_col()
+            .child(
+                self.switch_row("edit-private", "Private", "", private, cx, |this| {
+                    let Some(agent) = this.model.editing.clone() else {
+                        return;
+                    };
+                    let on = this.model.agent(&agent).is_some_and(|a| a.private);
+                    if on {
+                        let f = this.model.set_private(&agent, false);
+                        this.send(f);
+                    } else {
+                        this.private_armed = !this.private_armed;
+                    }
+                }),
+            )
+            .when(self.private_armed && !private, |d| {
+                d.child(div().px(px(space::S)).child(self.private_confirm(
+                    "edit-private",
+                    &editing_name,
+                    cx,
+                    |this| this.private_armed = false,
+                    |this| {
+                        this.private_armed = false;
+                        if let Some(agent) = this.model.editing.clone() {
+                            let f = this.model.set_private(&agent, true);
+                            this.send(f);
+                        }
+                    },
+                )))
+            });
         let listing = match &network {
             None => false,
             Some(hosts) => self.listing_hosts || !hosts.is_empty(),
@@ -13913,6 +14165,7 @@ ACTA_KEY=secret:ACTA_KEY",
                     ))
                     .when_some(following, |d, list| d.child(self.field("Following", list)))
                     .child(group("Runs"))
+                    .child(div().mx(px(-space::L)).child(private_row))
                     .child(div().mx(px(-space::L)).child(isolate))
                     .when(isolated, |d| {
                         d.child(self.field("Network", reach))
@@ -27048,6 +27301,25 @@ mod when_tests {
     }
 
     #[test]
+    fn a_replys_time_never_sits_on_its_thread() {
+        use super::{space, time_clear, REPLY_HANG, REPLY_THREAD_W};
+        // Left of the column's edge, at 0: a reply's thread spans from its hang to the
+        // gap after it, and its time ends clear of it (LOO-450).
+        let thread = (-REPLY_HANG, -REPLY_HANG + REPLY_THREAD_W);
+        let time_ends = -time_clear(false);
+        assert!(time_ends <= thread.0, "the time ends left of the thread");
+        assert_eq!(
+            time_clear(true),
+            space::M,
+            "a person's message has no thread"
+        );
+        // It needs that much more room before it goes in the corner.
+        let gutter = 40.0 + space::M;
+        assert_eq!(when_at(gutter, 40.0, true, None, 500.0), WhenAt::Outside);
+        assert_eq!(when_at(gutter, 40.0, false, None, 500.0), WhenAt::Corner);
+    }
+
+    #[test]
     fn a_messages_time_says_the_day_when_it_isnt_today() {
         let at = |y, mo, d, h, mi| {
             chrono::Local
@@ -27769,6 +28041,8 @@ struct Making {
     picked_at: Option<Instant>,
     /// Whether it's the person's first agent, made full-window before the app opens.
     first: bool,
+    /// Whether it's made private (PLAN.md, "Private agents").
+    private: bool,
 }
 
 impl Making {
@@ -27780,6 +28054,11 @@ impl Making {
         }
     }
 }
+
+/// What an agent made private loses, as Make private says before it does.
+const PRIVATE_LOSES: &str = "It loses the shared notes, the shared folder and shared tables, \
+     messages with your other agents, their chats in its searches, and plugins' tools. They \
+     lose it too.";
 
 /// What a new chat offers to ask, under the composer.
 const SUGGESTIONS: [&str; 3] = [
@@ -28797,17 +29076,27 @@ fn row_room(width: f32, column: f32) -> (f32, f32) {
 }
 
 /// Where a message's time goes: outside, left of it, while the room there (`gutter`)
-/// takes the time `time` wide; otherwise for the person's message left of its bubble,
-/// `bubble` wide, while the row's `content` has room for it there, and else in the
-/// corner.
+/// takes the time `time` wide, clear of a reply's thread (`time_clear`); otherwise for
+/// the person's message left of its bubble, `bubble` wide, while the row's `content` has
+/// room for it there, and else in the corner.
 fn when_at(gutter: f32, time: f32, person: bool, bubble: Option<f32>, content: f32) -> WhenAt {
-    let need = time + space::M;
-    if gutter >= need {
+    if gutter >= time + time_clear(person) {
         WhenAt::Outside
-    } else if person && bubble.is_some_and(|b| content - b >= need) {
+    } else if person && bubble.is_some_and(|b| content - b >= time + space::M) {
         WhenAt::BesideBubble
     } else {
         WhenAt::Corner
+    }
+}
+
+/// How far left of the column a message's time ends, when it's outside: a gap, and for
+/// an agent's reply its thread too, which hangs there (`REPLY_HANG`), so nothing is ever
+/// drawn over the time (LOO-450).
+fn time_clear(person: bool) -> f32 {
+    if person {
+        space::M
+    } else {
+        REPLY_HANG + space::M
     }
 }
 
@@ -29590,6 +29879,7 @@ fn chat_row(i: &RowInputs, this: WeakEntity<Loom>) -> Stateful<Div> {
             .child(when)
     });
     let top = if joined.above { 0.0 } else { space::XS } + 4.0;
+    let person_row = matches!(row, Row::Message(m) if m.role == "person");
     let (beside, when) = match when_at {
         WhenAt::BesideBubble => (
             time.map(|t| t.top(px(4.0)).right(relative(1.0)).pr(px(space::M))),
@@ -29601,7 +29891,7 @@ fn chat_row(i: &RowInputs, this: WeakEntity<Loom>) -> Stateful<Div> {
                 t.top(px(top))
                     .right(relative(1.0))
                     .mr(px(-HOVER_REACH))
-                    .pr(px(space::M))
+                    .pr(px(time_clear(person_row)))
             }),
         ),
         WhenAt::Corner => (
@@ -29613,7 +29903,7 @@ fn chat_row(i: &RowInputs, this: WeakEntity<Loom>) -> Stateful<Div> {
                     .py(px(2.0))
                     .rounded(px(radius::ROW))
                     .bg(p.bg);
-                if matches!(row, Row::Message(m) if m.role == "person") {
+                if person_row {
                     t.left(px(HOVER_REACH - space::XS))
                 } else {
                     t.right(px(HOVER_REACH - space::XS))
