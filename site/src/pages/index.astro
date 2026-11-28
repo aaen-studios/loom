@@ -199,6 +199,7 @@ const SHORTCUTS = ['Ctrl+Shift+Space', 'Off'];
 const SPEEDS = ['0.8×', '0.9×', '1×', '1.1×', '1.2×'];
 const READ_ALOUD = ['Never', 'Only in live', 'Always'];
 const PAUSES = ['After 0.5 s', 'After 0.8 s', 'After 1.2 s'];
+const MICS = ['System default (Built-in Microphone)', 'Built-in Microphone', 'USB Microphone', 'Headset Microphone'];
 // Lucide's icons: check, chevron-down, play, eye and eye-off.
 const CHECK = 'M20 6 9 17l-5-5';
 const CHEVRON = 'm6 9 6 6 6-6';
@@ -675,6 +676,33 @@ const faq = {
 								</div>
 								)}
 								<div class="box voice-rows">
+									{t.id !== 'speech' && (
+										<div class="row">
+											<span class="row-text">
+												<span class="row-title">Microphone</span>
+											</span>
+											<span class="voice-pick">
+												<span class="mic-level" role="meter" aria-label="Level" aria-valuemin="0" aria-valuemax="1" aria-valuenow="0.35">
+													<span class="mic-level-fill" />
+												</span>
+												<span class="menu-at" data-mic>
+													<button type="button" class="pick" data-pick aria-haspopup="menu" aria-expanded="false">
+														<span data-pick-value>{MICS[0]}</span>
+														<svg class="i" viewBox="0 0 24 24" aria-hidden="true">
+															<path d={CHEVRON} />
+														</svg>
+													</button>
+													<span class="voice-menu mic-menu" role="menu" data-pick-menu hidden>
+														{MICS.map((m, j) => (
+															<button type="button" role="menuitemradio" class:list={{ on: j === 0 }} aria-checked={j === 0 ? 'true' : 'false'} data-value={m}>
+																{m}
+															</button>
+														))}
+													</span>
+												</span>
+											</span>
+										</div>
+									)}
 									{t.id === 'dictation' ? (
 										<>
 											<div class="row">
@@ -2075,6 +2103,72 @@ const faq = {
 	.voice-menu[hidden] {
 		display: none;
 	}
+	/* The Microphone row: a thin bar filled in ink as loud as the mic hears, as the app draws it
+	   (desktop/src/mic_ui.rs), and a menu wide enough for a mic's name. */
+	.mic-level {
+		flex: none;
+		width: 56px;
+		height: 3px;
+		margin-right: var(--space-s);
+		border-radius: 999px;
+		background: var(--line);
+		overflow: hidden;
+	}
+	.mic-level-fill {
+		display: block;
+		width: 35%;
+		height: 100%;
+		border-radius: 999px;
+		background: var(--ink);
+		animation: mic-level 2.4s steps(24) infinite;
+	}
+	@keyframes mic-level {
+		0% {
+			width: 12%;
+		}
+		12% {
+			width: 46%;
+		}
+		20% {
+			width: 30%;
+		}
+		34% {
+			width: 62%;
+		}
+		48% {
+			width: 18%;
+		}
+		60% {
+			width: 52%;
+		}
+		74% {
+			width: 26%;
+		}
+		86% {
+			width: 40%;
+		}
+		100% {
+			width: 12%;
+		}
+	}
+	@media (prefers-reduced-motion: reduce) {
+		.mic-level-fill {
+			animation: none;
+		}
+	}
+	.voice-menu.mic-menu {
+		width: 260px;
+	}
+	.menu-at[data-mic],
+	.menu-at[data-mic] .pick {
+		min-width: 0;
+	}
+	.menu-at[data-mic] [data-pick-value] {
+		max-width: 240px;
+		overflow: hidden;
+		text-overflow: ellipsis;
+		white-space: nowrap;
+	}
 	.voice-menu button {
 		display: flex;
 		align-items: center;
@@ -2602,7 +2696,7 @@ const faq = {
 			}
 		}
 
-		// The language's, the voice's and the model chips' menus: one open at a time, closed by a pick,
+		// The microphone's, the language's, the voice's and the model chips' menus: one open at a time, closed by a pick,
 		// Esc or a click outside.
 		const picks = [...voice.querySelectorAll<HTMLElement>('.menu-at')];
 		function closeMenus(but?: HTMLElement) {
@@ -2631,6 +2725,16 @@ const faq = {
 						i.setAttribute('aria-checked', String(i === item));
 					});
 					value.textContent = item.dataset.value ?? '';
+					// Dictation and Live record from one mic, the device's: a pick on one row is the other's.
+					if (at.hasAttribute('data-mic'))
+						for (const other of picks.filter((o) => o !== at && o.hasAttribute('data-mic'))) {
+							other.querySelectorAll<HTMLElement>('[data-value]').forEach((i) => {
+								i.classList.toggle('on', i.dataset.value === item.dataset.value);
+								i.setAttribute('aria-checked', String(i.dataset.value === item.dataset.value));
+							});
+							const shown = other.querySelector<HTMLElement>('[data-pick-value]');
+							if (shown) shown.textContent = item.dataset.value ?? '';
+						}
 					closeMenus();
 				});
 			}

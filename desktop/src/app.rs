@@ -62,6 +62,8 @@ mod form_drafts;
 mod list_page;
 #[path = "live_ui.rs"]
 mod live_ui;
+#[path = "mic_ui.rs"]
+mod mic_ui;
 #[path = "picked_ui.rs"]
 mod picked_ui;
 #[path = "routine_off_view.rs"]
@@ -643,6 +645,17 @@ pub struct Loom {
     live_mic: Option<crate::voice::Mic>,
     live_sample: bool,
     live_t0: Instant,
+    /// Settings › Voice › Microphone: the system's inputs as last listed, a listing on
+    /// its way and when the last was asked for, the mic its meter hears while the page
+    /// shows the row, how loud that is and why it didn't start, and the picked mic
+    /// loom said wasn't plugged in, so it says it once (`mic_ui.rs`).
+    inputs: crate::voice::Inputs,
+    inputs_coming: Option<std::sync::mpsc::Receiver<crate::voice::Inputs>>,
+    inputs_asked: Option<Instant>,
+    meter: Option<crate::voice::Mic>,
+    meter_level: f32,
+    meter_why: Option<String>,
+    missing_said: Option<String>,
     /// Whether the chat is drawn again each second while a draft's Undo counts down.
     draft_ticking: bool,
     queue_in: Entity<InputState>,
@@ -1539,6 +1552,7 @@ ACTA_KEY=secret:ACTA_KEY",
                     }
                     loom.pump_mic();
                     loom.pump_live_mic();
+                    loom.tick_mics(cx);
                     loom.pump_door();
                     if loom.pump_away() {
                         cx.notify();
@@ -1830,6 +1844,13 @@ ACTA_KEY=secret:ACTA_KEY",
             live_mic: None,
             live_sample: false,
             live_t0: Instant::now(),
+            inputs: crate::voice::Inputs::default(),
+            inputs_coming: None,
+            inputs_asked: None,
+            meter: None,
+            meter_level: 0.0,
+            meter_why: None,
+            missing_said: None,
             draft_ticking: false,
             queue_in,
             aside_in,

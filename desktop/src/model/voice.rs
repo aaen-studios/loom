@@ -204,12 +204,14 @@ impl Action {
     }
 }
 
-/// A menu open on the page: the language's, the voice's, or the models of the tile in use.
+/// A menu open on the page: the language's, the voice's, the models of the tile in use,
+/// or the microphones.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Menu {
     Language,
     Voice,
     Model,
+    Microphone,
 }
 
 /// Dictation on screen: where its words start in the composer, and how many bytes of
