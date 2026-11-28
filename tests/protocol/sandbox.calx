@@ -224,6 +224,9 @@ fn private_agent(runtime: String, ann: mut Session, data: String, ann_id: String
     _ = try ann.until("event", "run.finished")
 }
 
+// What the instance says of an agent while its files move.
+const MOVING: str = "Its files are moving; try again in a moment."
+
 // An agent of hers made private takes its files with it (PLAN.md, "Private agents"):
 // what its folder in hers held goes to its own folder beside hers, out of her other
 // agents' reach, and back when it's made normal again. Links her sandbox put in its
@@ -244,9 +247,28 @@ fn moving_files(runtime: String, ann: mut Session, data: String, ann_id: String)
     try sh(runtime.copy(), [String("exec"), "loom-{ann_id}", String("ln"), String("-s"), "{data}/secret.txt", "{old}/key"])
     try sh(runtime.copy(), [String("exec"), "loom-{ann_id}", String("ln"), String("-s"), "{home}/shared", "{old}/notes/shared"])
 
-    let refused = at(try ann.cmd("q_42", "agent.update", Obj.new().s("agent", id.copy()).b("private", true).done()), "error")
-    if refused != Json.Null { fail "making it private was refused: {refused}" }
-    try check(try fs.read_text("{mine}/notes/kept.md") == some(String("kept")) and not fs.exists(old.copy()), "made private, what its folder held goes to its own folder, and out of hers")
+    // Enough that the move takes a moment, which the instance goes on through.
+    try sh(runtime.copy(), [String("exec"), "loom-{ann_id}", String("dd"), String("if=/dev/zero"), "of={old}/big.bin", String("bs=1M"), String("count=64"), String("status=none")])
+
+    // Made private, it moves on a thread of its own: a message meanwhile, and another
+    // change to it, are refused, saying why, and the change is answered once its files
+    // are there.
+    try ann.send(Obj.new().s("t", String("cmd")).s("id", String("q_42")).s("name", String("agent.update")).j("args", Obj.new().s("agent", id.copy()).b("private", true).done()).done())
+    try ann.send(Obj.new().s("t", String("send")).s("cid", String("m_42")).s("conversation", chat.copy()).s("text", String("/env HOME")).done())
+    let second = try ann.cmd("q_45", "agent.update", Obj.new().s("agent", id.copy()).s("name", String("Moved")).done())
+    let stopped = try ann.event("run.finished")
+    println("      while its files moved: {at(stopped.copy(), "error")}, {at(second.copy(), "error")}")
+    try check(str_at(stopped, "error") == some(String(MOVING)), "a run started while its files move is refused, saying why")
+    try check(str_at(at(second, "error"), "message") == some(String(MOVING)), "and so is another change to it")
+    var early = false
+    for f in ann.frames.copy() {
+        if str_at(f.copy(), "t") == some(String("result")) and str_at(f, "id") == some(String("q_42")) { early = true }
+    }
+    try check(not early, "the change isn't answered before its files are there")
+    let moved = try ann.until("result", "", 120000)
+    if str_at(moved.copy(), "id") != some(String("q_42")) { fail "another result came first: {moved}" }
+    if at(moved.copy(), "error") != Json.Null { fail "making it private was refused: {at(moved, "error")}" }
+    try check(try fs.read_text("{mine}/notes/kept.md") == some(String("kept")) and fs.exists("{mine}/big.bin") and not fs.exists(old.copy()), "the change is answered once its files are there, in its own folder, and out of hers")
     try check(try fs.kind("{mine}/key") == none and try fs.kind("{mine}/notes/shared") == none and try fs.read_text("{data}/secret.txt") == some(String("the instance's")), "the links her sandbox put there are neither followed nor moved")
     try ann.send(Obj.new().s("t", String("send")).s("cid", String("m_41")).s("conversation", chat.copy()).s("text", String("/env HOME")).done())
     try check(reply_text(try ann.reply()).contains("HOME={mine}"), "and it runs there, in a sandbox of its own")

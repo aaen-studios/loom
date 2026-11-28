@@ -36,6 +36,7 @@ module server.sandbox
 import std.env
 import std.fs
 import std.io
+import std.net.{Waker as LoopWaker}
 import std.process.{Child, Command, Stdio}
 import std.tar
 import std.tar.{Kind, StreamReader, StreamWriter}
@@ -442,6 +443,43 @@ impl Task for Puller {
 // here, or why it isn't.
 pub fn pull_on_thread(boxes: own Sandboxes, done: own Sender<String>) {
     _ = unsafe { Thread.spawn(Puller { boxes: boxes, done: done }) }
+}
+
+/// How a move on its own thread went (`move_on_thread`): its `key`, and why it failed,
+/// or "".
+pub struct Moved {
+    pub key: String
+    pub error: String
+}
+
+struct Mover {
+    boxes: Sandboxes
+    out: Place
+    from: String
+    into: Place
+    to: String
+    key: String
+    done: Sender<Moved>
+    wake: LoopWaker
+}
+
+impl Task for Mover {
+    fn run(own self) {
+        var m = self
+        let error = match m.boxes.move_folder(m.out.copy(), m.from.copy(), m.into.copy(), m.to.copy()) {
+            ok => String(),
+            err(e) => "{e}",
+        }
+        m.done.send(Moved { key: m.key.copy(), error: error })
+        m.wake.wake()
+    }
+}
+
+// Moves a folder as `move_folder` does, on a thread of its own, since one of several GB
+// takes a while and the instance's loop goes on meanwhile: `done` gets `key` and how it
+// went, and `wake` wakes the loop.
+pub fn move_on_thread(boxes: own Sandboxes, out: own Place, from: own String, into: own Place, to: own String, key: own String, done: own Sender<Moved>, wake: LoopWaker) {
+    _ = unsafe { Thread.spawn(Mover { boxes: boxes, out: out, from: from, into: into, to: to, key: key, done: done, wake: wake }) }
 }
 
 // The name of `user`'s own sandbox.
