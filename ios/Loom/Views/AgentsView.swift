@@ -13,8 +13,11 @@ struct AgentsView: View {
     @State private var naming: Naming?
     /// The sheet that makes a group chat.
     @State private var newRoom = false
-    /// The agent Make private asks about, saying what it loses.
+    /// The agent Make private asks about, saying what it loses: in the system's dialog,
+    /// or, where the instance offers a sandbox of its own too, in a sheet with that switch.
     @State private var makingPrivate: Agent?
+    @State private var isolatingPrivate: Agent?
+    @State private var isolateToo = false
 
     private static let insets = EdgeInsets(top: 0, leading: Tokens.PhoneSpace.gutter, bottom: 0, trailing: Tokens.Space.l)
 
@@ -78,6 +81,12 @@ struct AgentsView: View {
                 Button("Cancel", role: .cancel) { makingPrivate = nil }
             } message: {
                 Text(Model.privateLoses)
+            }
+            .sheet(item: $isolatingPrivate) { a in
+                MakePrivateSheet(name: a.name, isolate: $isolateToo, cancel: { isolatingPrivate = nil }) {
+                    session.send(model.makePrivate(a.id, true, isolate: isolateToo && model.offersIsolating(a.id)))
+                    isolatingPrivate = nil
+                }
             }
             .listStyle(.plain)
             .scrollContentBackground(.hidden)
@@ -298,6 +307,9 @@ struct AgentsView: View {
         Button(agent.isPrivate ? "Make normal" : "Make private", systemImage: agent.isPrivate ? "lock.open" : "lock") {
             if agent.isPrivate {
                 session.send(model.makePrivate(agent.id, false))
+            } else if model.offersIsolating(agent.id) {
+                isolateToo = false
+                isolatingPrivate = agent
             } else {
                 makingPrivate = agent
             }
@@ -529,6 +541,52 @@ struct AgentRow: View {
         }
         .padding(.vertical, Tokens.Space.m + 2)
         .accessibilityElement(children: .combine)
+    }
+}
+
+/// Make private's question where the instance has sandboxes, for an agent that isn't
+/// isolated (PLAN.md, "Private agents"): what it loses, one switch, off at first, to run
+/// it in a sandbox of its own too, with what that costs under it, then Cancel and Make
+/// private. As tall as what it says.
+private struct MakePrivateSheet: View {
+    let name: String
+    @Binding var isolate: Bool
+    let cancel: () -> Void
+    let yes: () -> Void
+    @State private var tall: CGFloat = 320
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: Tokens.Space.l) {
+            Text("Make \(name) private?")
+                .font(Fonts.ui(Tokens.PhoneSize.body, .semibold))
+                .foregroundStyle(P.ink)
+            Text(Model.privateLoses)
+                .font(Fonts.small)
+                .foregroundStyle(P.ink3)
+                .fixedSize(horizontal: false, vertical: true)
+            Toggle(isOn: $isolate) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(Model.privateIsolate).font(Fonts.small).foregroundStyle(P.ink)
+                    Text(Model.privateIsolateCosts).font(Fonts.caption).foregroundStyle(P.ink3)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+            .tint(P.button)
+            HStack(spacing: Tokens.Space.s) {
+                Button(action: cancel) { Text("Cancel").frame(maxWidth: .infinity) }
+                    .buttonStyle(.loomQuiet)
+                Button(action: yes) { Text("Make private").frame(maxWidth: .infinity) }
+                    .buttonStyle(.loom)
+            }
+        }
+        .padding(.horizontal, Tokens.PhoneSpace.gutter)
+        .padding(.top, Tokens.Space.xl)
+        .padding(.bottom, Tokens.Space.l)
+        .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { tall = $0 }
+        .frame(maxHeight: .infinity, alignment: .top)
+        .background(P.bg)
+        .presentationDetents([.height(tall)])
+        .presentationDragIndicator(.visible)
     }
 }
 

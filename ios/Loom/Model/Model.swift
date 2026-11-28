@@ -40,6 +40,8 @@ struct Agent: Identifiable, Equatable, Sendable {
     /// Whether it's private: cut off from what the person's other agents share, and they
     /// from it (PLAN.md, "Private agents"). A lock marks it in the list.
     var isPrivate = false
+    /// Whether it runs in a sandbox, as every member's agent does.
+    var isolated = false
 
     /// The points its thread follows in the list, or nil for the plain thread.
     var outline: [CGPoint]? {
@@ -1693,6 +1695,9 @@ final class Model {
     /// Each agent program's name as people know it ("Claude Agent" for `claude-acp`), by
     /// its name, as `acp.list` gives it.
     var programTitles: [String: String] = [:]
+    /// Whether the instance runs sandboxes, as `acp.list` says, so Make private can offer
+    /// one of its own.
+    var sandboxes = false
     private var programsWanted = false
     /// The selected agent's messages, oldest first, with the queued ones last.
     var messages: [Message] = []
@@ -2431,6 +2436,7 @@ final class Model {
                 if let title = p["title"].string { titles[p["name"].text] = title }
             }
             programTitles = titles
+            sandboxes = f["value"]["sandboxes"].bool ?? false
             return
         }
         let error = f["error"].isNull ? nil : f["error"]["message"].string
@@ -2573,7 +2579,7 @@ final class Model {
         case .agents:
             agents = listed(items.map {
                 Agent(id: $0["id"].text, name: $0["name"].text, color: $0["color"].text, program: $0["acp_agent"].text, shape: $0["shape"].text, drawing: points($0["drawing"]), pinned: $0["pinned"].int, order: $0["order"].int, group: $0["group"].string, hidden: !$0["hidden"].isNull, instructions: $0["instructions"].text, forLine: $0["for"].text,
-                      options: $0["options"].array.map(ConfigOption.init), config: stringsOf($0["config"]), isPrivate: $0["private"].bool ?? false)
+                      options: $0["options"].array.map(ConfigOption.init), config: stringsOf($0["config"]), isPrivate: $0["private"].bool ?? false, isolated: $0["isolated"].bool ?? false)
             })
             if let s = selected, agent(s) == nil { select(nil) }
         case .conversations:
@@ -3368,10 +3374,24 @@ final class Model {
     /// What an agent made private loses, as Make private says before it does.
     static let privateLoses = "It loses the shared notes, the shared folder and shared tables, messages with your other agents, their chats in its searches, and plugins' tools. They lose it too."
 
-    /// Makes an agent private, or normal again (PLAN.md, "Private agents"). The instance
-    /// refuses one in a group chat, and says why.
-    func makePrivate(_ agent: String, _ on: Bool) -> JSON {
-        ["t": "cmd", "id": JSON(id("app.private")), "name": "agent.update", "args": ["agent": JSON(agent), "private": JSON(on)]]
+    /// The switch Make private offers where the instance has sandboxes, and what it costs.
+    static let privateIsolate = "Also run it in a sandbox of its own"
+    static let privateIsolateCosts = "It no longer works in its folder, and has only what its sandbox has."
+
+    /// Makes an agent private, or normal again (PLAN.md, "Private agents"), and with
+    /// `isolate`, isolated too, in a sandbox of its own. The instance refuses one in a
+    /// group chat, and says why.
+    func makePrivate(_ agent: String, _ on: Bool, isolate: Bool = false) -> JSON {
+        let args: JSON = isolate
+            ? ["agent": JSON(agent), "private": JSON(on), "isolated": true]
+            : ["agent": JSON(agent), "private": JSON(on)]
+        return ["t": "cmd", "id": JSON(id("app.private")), "name": "agent.update", "args": args]
+    }
+
+    /// Whether Make private offers to isolate the agent `id` as well: on an instance with
+    /// sandboxes, for one that isn't isolated already.
+    func offersIsolating(_ id: String) -> Bool {
+        sandboxes && agent(id).map { !$0.isolated } == true
     }
 
     /// Makes a folder, with `agent` in it once it's made. Nil for a blank name.

@@ -10901,14 +10901,34 @@ impl Model {
     /// Makes `agent` private, or normal again (PLAN.md, "Private agents"). The
     /// instance refuses one in a group chat, and the list goes back to what it has.
     pub fn set_private(&mut self, agent: &str, on: bool) -> Value {
+        self.make_private(agent, on, false)
+    }
+
+    /// Makes an agent private, or normal again, and with `isolate`, isolated too, in a
+    /// sandbox of its own (PLAN.md, "Private agents"), which Make private offers.
+    pub fn make_private(&mut self, agent: &str, on: bool, isolate: bool) -> Value {
         if let Some(a) = Rc::make_mut(&mut self.agents)
             .iter_mut()
             .find(|a| a.id == agent)
         {
             a.private = on;
+            if isolate {
+                a.isolated = true;
+            }
         }
         let id = self.id("app.private");
-        json!({"t": "cmd", "id": id, "name": "agent.update", "args": {"agent": agent, "private": on}})
+        let args = if isolate {
+            json!({"agent": agent, "private": on, "isolated": true})
+        } else {
+            json!({"agent": agent, "private": on})
+        };
+        json!({"t": "cmd", "id": id, "name": "agent.update", "args": args})
+    }
+
+    /// Whether Make private offers to isolate `agent` as well: on an instance with
+    /// sandboxes, for one that isn't isolated already.
+    pub fn offers_isolating(&self, agent: &str) -> bool {
+        self.sandboxes && self.agent(agent).is_some_and(|a| !a.isolated)
     }
 
     pub fn start_fresh(&mut self) -> Option<Value> {
@@ -17677,6 +17697,28 @@ mod tests {
         assert!(m.new_agent("Four", "fake", "", "", false)["args"]
             .get("private")
             .is_none());
+    }
+
+    #[test]
+    fn make_private_offers_a_sandbox_only_where_there_are_some() {
+        let mut m = Model::new();
+        m.take(&json!({"t": "core.data", "what": "agents", "items": [
+            {"id": "a_1", "name": "One"},
+            {"id": "a_2", "name": "Two", "isolated": true},
+        ]}));
+        // No sandboxes, as on the desktop's own instance on Windows: nothing to offer.
+        assert!(!m.offers_isolating("a_1"));
+        m.sandboxes = true;
+        assert!(m.offers_isolating("a_1"));
+        // Isolated already, as every member's agent is.
+        assert!(!m.offers_isolating("a_2"));
+        let f = m.make_private("a_1", true, true);
+        assert_eq!(
+            f["args"],
+            json!({"agent": "a_1", "private": true, "isolated": true})
+        );
+        assert!(m.agents[0].private && m.agents[0].isolated);
+        assert!(!m.offers_isolating("a_1"));
     }
 
     #[test]
