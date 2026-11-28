@@ -246,6 +246,21 @@ Say you ask: "Set up loom on this VPS and move me there." The agent:
 3. Starts `loom receive` there, and reads the move code it prints.
 4. Asks you once: "Move this instance to the new server?" Then it moves it, and your apps follow.
 
+### Private agents
+
+An agent can be made **private**: it has only its own notes, chats, files, tables and tools, and nothing passes between it and the person's other agents, either way (LOO-449). The person still reads and changes all of it, as with any agent.
+
+- **Where it's set.** A Private switch on New agent's name step, under the colours; **Make private** and **Make normal** in the agent's menu (a right-click on its row or tile, or a long press on the iPhone); and a Private switch under Runs in its settings. Make private asks first, in the menu's place or under the switch, with what the agent will lose: the shared notes, the shared folder and shared tables, messages with the other agents, their chats in its searches, and plugins' tools. Make normal doesn't ask, since nothing of its own is shared by it. A small lock after its name marks a private agent wherever agents are listed: its row, its tile and its row in Waiting on you, on the desktop and the iPhone.
+- **Shared notes.** It recalls and forgets only its own notes, and is shown only its own on a site. A note it keeps or proposes with `shared` is kept as its own, and it's told so.
+- **The shared folder.** It's told none, and is told it's private instead. Its own folder stands in wherever the shared folder would, so `attach_files`, a file a reply names, a mention and the composer's @ picker reach only its own files.
+- **Shared tables.** It lists, reads and writes only the tables it made, and no other agent lists, reads or writes those. The person reaches every table.
+- **Other agents.** It can't `message_agent` or `hand_off`, and no agent can message it. `list_agents` gives it only itself, and never lists it to others. A mention of another agent in its chat, or of it in another's, says they can't reach each other. It isn't in group chats: making a group chat with it is refused, and making an agent in one private is refused until it's taken out.
+- **Search and commands.** `search_messages` finds only its own chats, and no other agent's search finds them. Every command an agent runs with `run_command`, or that loom's own tools run, is walled the same way (`server/walls.calx`): a command about another agent, its chat, a message in it, its task, routine or watch, is refused when either agent is private, and a list loses what's across the wall, as a private agent's `memory.list` loses the shared notes. This holds before the person is asked, too; what the person says yes to runs as their device, as always.
+- **What every agent reads.** It doesn't write skills (`save_skill`, `fix_skill`), the person's profile (`update_profile`) or plugins (`save_plugin`), which every agent reads or runs; it proposes a skill with `propose_skill` for the person to keep. It still reads the person's profile, skills and defaults, which are the person's, not another agent's.
+- **Tools.** It gets only the MCP servers given to it on its settings, as every agent does, and none of the plugins' tool servers, which every other agent gets. An agent it makes is private too, and it can't change whether it's private, or another agent's without asking the person.
+- **Switching.** A change takes its chat's next message to a fresh session, as a change of Code Mode does, since its tools and what it's told change. Made private, it keeps its own notes and chats, and what it shared before stays shared: its threads with other agents stay readable by the person but no agent continues them. Made normal again, nothing of its own is shared.
+- **On the computer.** Private is kept by loom, not by the system: an agent that isn't isolated runs as the instance's user and could still open the shared folder's path on disk. Isolated as well, it runs in a sandbox. Its own sandbox, with only its own folder mounted, is a follow-up (LOO-457).
+
 ## Plugins
 
 Agents and people can extend loom itself:
