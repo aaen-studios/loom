@@ -13,6 +13,8 @@ struct AgentsView: View {
     @State private var naming: Naming?
     /// The sheet that makes a group chat.
     @State private var newRoom = false
+    /// The agent Make private asks about, saying what it loses.
+    @State private var makingPrivate: Agent?
 
     private static let insets = EdgeInsets(top: 0, leading: Tokens.PhoneSpace.gutter, bottom: 0, trailing: Tokens.Space.l)
 
@@ -67,6 +69,15 @@ struct AgentsView: View {
                     }
                     naming = nil
                 }
+            }
+            .confirmationDialog("Make \(makingPrivate?.name ?? "it") private?", isPresented: Binding(get: { makingPrivate != nil }, set: { if !$0 { makingPrivate = nil } }), titleVisibility: .visible) {
+                Button("Make private") {
+                    if let a = makingPrivate { session.send(model.makePrivate(a.id, true)) }
+                    makingPrivate = nil
+                }
+                Button("Cancel", role: .cancel) { makingPrivate = nil }
+            } message: {
+                Text(Model.privateLoses)
             }
             .listStyle(.plain)
             .scrollContentBackground(.hidden)
@@ -278,11 +289,19 @@ struct AgentsView: View {
         }
     }
 
-    /// An agent's long-press menu: its folder, and whether it's hidden.
+    /// An agent's long-press menu: its folder, whether it's private, and whether it's
+    /// hidden. Make private asks first; normal again needs no asking.
     @ViewBuilder
     private func agentMenu(_ agent: Agent) -> some View {
         let model = session.model
         folderMenu(agent.id)
+        Button(agent.isPrivate ? "Make normal" : "Make private", systemImage: agent.isPrivate ? "lock.open" : "lock") {
+            if agent.isPrivate {
+                session.send(model.makePrivate(agent.id, false))
+            } else {
+                makingPrivate = agent
+            }
+        }
         Button(agent.hidden ? "Show" : "Hide", systemImage: agent.hidden ? "eye" : "eye.slash") {
             session.send(model.hideAgent(agent.id, !agent.hidden))
         }
@@ -386,10 +405,13 @@ private struct AgentTile: View {
                         }
                     }
                     .frame(width: 48, height: 32)
-                    Text(agent.name)
-                        .font(Fonts.ui(Tokens.PhoneSize.caption, .medium))
-                        .foregroundStyle(P.ink)
-                        .lineLimit(1)
+                    HStack(spacing: Tokens.Space.xs) {
+                        Text(agent.name)
+                            .font(Fonts.ui(Tokens.PhoneSize.caption, .medium))
+                            .foregroundStyle(P.ink)
+                            .lineLimit(1)
+                        if agent.isPrivate { LockMark() }
+                    }
                 }
                 .padding(.horizontal, Tokens.Space.xs)
             }
@@ -482,9 +504,12 @@ struct AgentRow: View {
             .frame(width: 26, height: 22)
             let unread = model.unread(agent: agent.id)
             VStack(alignment: .leading, spacing: 3) {
-                Text(agent.name)
-                    .font(Fonts.ui(Tokens.PhoneSize.body, unread ? .semibold : .medium))
-                    .foregroundStyle(P.ink)
+                HStack(spacing: Tokens.Space.s) {
+                    Text(agent.name)
+                        .font(Fonts.ui(Tokens.PhoneSize.body, unread ? .semibold : .medium))
+                        .foregroundStyle(P.ink)
+                    if agent.isPrivate { LockMark() }
+                }
                 Text(model.preview(agent))
                     .font(Fonts.small)
                     .foregroundStyle(mood == .failed ? P.bad : unread ? P.ink : P.ink3)
@@ -504,6 +529,16 @@ struct AgentRow: View {
         }
         .padding(.vertical, Tokens.Space.m + 2)
         .accessibilityElement(children: .combine)
+    }
+}
+
+/// A private agent's lock, small and quiet after its name (PLAN.md, "Private agents").
+struct LockMark: View {
+    var body: some View {
+        Image(systemName: "lock")
+            .font(.system(size: 10, weight: .medium))
+            .foregroundStyle(P.ink3)
+            .accessibilityLabel("Private")
     }
 }
 

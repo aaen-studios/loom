@@ -196,6 +196,21 @@ import Testing
         #expect(m.preview(m.agent("a_1")!) == "Claude Agent")
     }
 
+    @Test func anAgentIsMadePrivateAndBack() {
+        let m = caughtUp()
+        m.take(data("agents", [
+            ["id": "a_1", "name": "Builder", "color": "mint", "acp_agent": "claude", "private": true],
+            ["id": "a_2", "name": "Scribe", "color": "mint", "acp_agent": "claude"],
+        ]))
+        #expect(m.agent("a_1")?.isPrivate == true && m.agent("a_2")?.isPrivate == false)
+        let f = m.makePrivate("a_2", true)
+        #expect(f["name"] == "agent.update")
+        #expect(f["args"] == ["agent": "a_2", "private": true])
+        // Refused, as for one in a group chat: said.
+        m.take(["t": "result", "id": f["id"], "ok": false, "error": ["code": "in_group", "message": "Scribe is in Daily."]])
+        #expect(m.notice == "Scribe is in Daily.")
+    }
+
     @Test func thePickerHasTheOtherAgentsThatMatch() {
         let m = caughtUp(agents: ["a_1", "a_2", "a_3"])
         m.take(data("agents", [

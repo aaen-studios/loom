@@ -672,6 +672,10 @@ pub struct Loom {
     menu_folders: bool,
     /// Whether the agent menu shows the agent's threads, to open one.
     menu_threads: bool,
+    /// Whether the agent menu asks "make it private?", listing what it loses, before it does.
+    menu_private: bool,
+    /// Whether the edit page asks the same, under its Private switch.
+    private_armed: bool,
     listing_hosts: bool,
     /// One of the person's own hosts to add, by what ssh is given, on the Hosts page.
     ssh_host_in: Entity<InputState>,
@@ -1856,6 +1860,8 @@ ACTA_KEY=secret:ACTA_KEY",
             side_drop: None,
             menu_folders: false,
             menu_threads: false,
+            menu_private: false,
+            private_armed: false,
             listing_hosts: false,
             ssh_host_in,
             skill_name_in,
@@ -3678,6 +3684,7 @@ ACTA_KEY=secret:ACTA_KEY",
         self.menu = Some(Menu::Agent);
         self.menu_folders = false;
         self.menu_threads = false;
+        self.menu_private = false;
         self.menu_at = Some(at);
         cx.notify();
     }
@@ -7140,16 +7147,24 @@ ACTA_KEY=secret:ACTA_KEY",
             .child(
                 div()
                     .w_full()
-                    .text_center()
-                    .text_size(px(size::SMALL))
-                    .font_weight(if unread {
-                        FontWeight::SEMIBOLD
-                    } else {
-                        FontWeight::MEDIUM
-                    })
-                    .text_color(if selected || unread { p.ink } else { p.ink_2 })
-                    .truncate()
-                    .child(a.name.clone()),
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .gap(px(space::XS))
+                    .child(
+                        div()
+                            .min_w_0()
+                            .text_size(px(size::SMALL))
+                            .font_weight(if unread {
+                                FontWeight::SEMIBOLD
+                            } else {
+                                FontWeight::MEDIUM
+                            })
+                            .text_color(if selected || unread { p.ink } else { p.ink_2 })
+                            .truncate()
+                            .child(a.name.clone()),
+                    )
+                    .when(a.private, |d| d.child(self.lock_mark())),
             )
             .when(unread, |d| {
                 d.child(
@@ -7213,11 +7228,20 @@ ACTA_KEY=secret:ACTA_KEY",
                     .flex_col()
                     .child(
                         div()
-                            .text_size(px(size::BODY))
-                            .font_weight(FontWeight::MEDIUM)
-                            .text_color(p.ink)
-                            .truncate()
-                            .child(a.name.clone()),
+                            .flex()
+                            .items_center()
+                            .gap(px(space::S))
+                            .min_w_0()
+                            .child(
+                                div()
+                                    .min_w_0()
+                                    .text_size(px(size::BODY))
+                                    .font_weight(FontWeight::MEDIUM)
+                                    .text_color(p.ink)
+                                    .truncate()
+                                    .child(a.name.clone()),
+                            )
+                            .when(a.private, |d| d.child(self.lock_mark())),
                     )
                     .child(
                         div()
@@ -7228,6 +7252,15 @@ ACTA_KEY=secret:ACTA_KEY",
                     ),
             )
             .child(div().size(px(6.0)).flex_none().rounded_full().bg(p.warn))
+    }
+
+    /// A private agent's lock, small and quiet after its name wherever agents are listed
+    /// (PLAN.md, "Private agents").
+    fn lock_mark(&self) -> Div {
+        div()
+            .flex_none()
+            .text_color(self.p.ink_3)
+            .child(Icon::new(Ico::Lock).xsmall())
     }
 
     /// An agent's row in the sidebar: its thread, its name, and what it's on after it.
@@ -7310,7 +7343,8 @@ ACTA_KEY=secret:ACTA_KEY",
                             .truncate()
                             .child(a.name.clone()),
                     )
-                    // A muted agent's quiet mark.
+                    // A private agent's lock, and a muted one's quiet mark.
+                    .when(a.private, |d| d.child(self.lock_mark()))
                     .when(a.muted, |d| {
                         d.child(
                             div()
@@ -8655,6 +8689,7 @@ ACTA_KEY=secret:ACTA_KEY",
                     this.menu_at = None;
                     this.menu_folders = false;
                     this.menu_threads = false;
+                    this.menu_private = false;
                     this.menu = if this.menu == Some(Menu::Agent) {
                         None
                     } else {
@@ -9827,6 +9862,64 @@ ACTA_KEY=secret:ACTA_KEY",
     }
 
     /// A routine's row once it's picked: "Run it now?", with Run and Cancel.
+    /// What Make private asks before it does, in the agent menu and under the edit page's
+    /// switch: what the agent loses, then Cancel and Make private (PLAN.md, "Private
+    /// agents").
+    fn private_confirm(
+        &self,
+        id: &'static str,
+        name: &str,
+        cx: &mut Context<Self>,
+        cancel: fn(&mut Loom),
+        yes: fn(&mut Loom),
+    ) -> Div {
+        let p = self.p;
+        div()
+            .max_w(px(280.0))
+            .flex()
+            .flex_col()
+            .gap(px(space::S))
+            .px(px(space::M))
+            .py(px(space::S))
+            .child(
+                div()
+                    .text_size(px(size::SMALL))
+                    .font_weight(FontWeight::MEDIUM)
+                    .text_color(p.ink)
+                    .child(format!("Make {name} private?")),
+            )
+            .child(
+                div()
+                    .text_size(px(size::CAPTION))
+                    .text_color(p.ink_3)
+                    .child(PRIVATE_LOSES),
+            )
+            .child(
+                div()
+                    .flex()
+                    .justify_end()
+                    .gap(px(space::S))
+                    .child(
+                        self.small_button(SharedString::from(format!("{id}-no")), "Cancel", false)
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                cancel(this);
+                                cx.notify();
+                            })),
+                    )
+                    .child(
+                        self.small_button(
+                            SharedString::from(format!("{id}-yes")),
+                            "Make private",
+                            true,
+                        )
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            yes(this);
+                            cx.notify();
+                        })),
+                    ),
+            )
+    }
+
     fn plus_confirm(&self, r: &model::Routine, cx: &mut Context<Self>) -> Stateful<Div> {
         let p = self.p;
         let id = r.id.clone();
@@ -10989,6 +11082,7 @@ ACTA_KEY=secret:ACTA_KEY",
             self.menu_at = None;
             self.menu_folders = false;
             self.menu_threads = false;
+            self.menu_private = false;
         }
         let menu = self.menu?;
         let under_header = self.menu_at.is_none();
@@ -11031,6 +11125,41 @@ ACTA_KEY=secret:ACTA_KEY",
             .as_ref()
             .and_then(|id| self.model.agent(id))
             .is_some_and(|a| a.muted);
+        let private = self
+            .model
+            .selected
+            .as_ref()
+            .and_then(|id| self.model.agent(id))
+            .is_some_and(|a| a.private);
+        // Make private asks first, in the menu's place, saying what it loses.
+        if menu == Menu::Agent && self.menu_private {
+            let name = self
+                .model
+                .selected
+                .as_ref()
+                .and_then(|id| self.model.agent(id))
+                .map(|a| a.name.clone())
+                .unwrap_or_default();
+            return Some(panel.when(under_header, |d| d.left(px(space::S))).child(
+                self.private_confirm(
+                    "menu-private",
+                    &name,
+                    cx,
+                    |this| {
+                        this.menu_private = false;
+                        this.menu = None;
+                    },
+                    |this| {
+                        if let Some(agent) = this.model.selected.clone() {
+                            let f = this.model.set_private(&agent, true);
+                            this.send(f);
+                        }
+                        this.menu_private = false;
+                        this.menu = None;
+                    },
+                ),
+            ));
+        }
         if menu == Menu::Agent && self.menu_folders {
             return Some(self.folder_menu(
                 panel.when(under_header, |d| d.left(px(space::S))),
@@ -11119,6 +11248,31 @@ ACTA_KEY=secret:ACTA_KEY",
                 )
                 .child(
                     self.menu_item(
+                        "private-agent",
+                        if private { Ico::LockOpen } else { Ico::Lock },
+                        if private {
+                            "Make normal"
+                        } else {
+                            "Make private"
+                        },
+                        false,
+                    )
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        // Normal again shares nothing of its own, so it needs no asking.
+                        if private {
+                            if let Some(agent) = this.model.selected.clone() {
+                                let f = this.model.set_private(&agent, false);
+                                this.send(f);
+                            }
+                            this.menu = None;
+                        } else {
+                            this.menu_private = true;
+                        }
+                        cx.notify();
+                    })),
+                )
+                .child(
+                    self.menu_item(
                         "hide-agent",
                         if hidden { Ico::Eye } else { Ico::EyeOff },
                         if hidden { "Show" } else { "Hide" },
@@ -11160,6 +11314,7 @@ ACTA_KEY=secret:ACTA_KEY",
                                     .update(cx, |s, cx| s.set_value(instructions, window, cx));
                             }
                             this.fresh_armed = false;
+                            this.private_armed = false;
                             this.custom_color = false;
                             this.show_side(Screen::EditAgent, cx);
                             this.menu = None;
@@ -12322,6 +12477,27 @@ ACTA_KEY=secret:ACTA_KEY",
                 .w_full(),
             )
             .child(appear(swatches, self.enter(0.45, 0.4)))
+            // Private from the start, cut off from what the other agents share.
+            .child(appear(
+                div()
+                    .id("make-private")
+                    .role(Role::Switch)
+                    .aria_label("Private")
+                    .flex()
+                    .items_center()
+                    .gap(px(space::S))
+                    .text_size(px(size::SMALL))
+                    .text_color(if self.make.private { p.ink } else { p.ink_2 })
+                    .cursor_pointer()
+                    .child(Icon::new(Ico::Lock).small())
+                    .child("Private")
+                    .child(self.switch("make-private-switch", self.make.private))
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.make.private = !this.make.private;
+                        cx.notify();
+                    })),
+                self.enter(0.5, 0.4),
+            ))
             .child(appear(
                 div()
                     .id("weave-it")
@@ -12354,7 +12530,9 @@ ACTA_KEY=secret:ACTA_KEY",
         } else {
             typed
         };
-        let f = self.model.new_agent(&name, &program, "", self.make.color());
+        let f = self
+            .model
+            .new_agent(&name, &program, "", self.make.color(), self.make.private);
         self.send(f);
         self.make.step = Step::Weaving;
         self.make.started = Some(Instant::now());
@@ -13563,6 +13741,47 @@ ACTA_KEY=secret:ACTA_KEY",
                 },
             )
         };
+        // Private: cut off from what the other agents share, and they from it. Turning it
+        // on asks first, under the switch, with what it loses; off needs no asking.
+        let (private, editing_name) = self
+            .model
+            .editing
+            .as_ref()
+            .and_then(|id| self.model.agent(id))
+            .map(|a| (a.private, a.name.clone()))
+            .unwrap_or_default();
+        let private_row = div()
+            .flex()
+            .flex_col()
+            .child(
+                self.switch_row("edit-private", "Private", "", private, cx, |this| {
+                    let Some(agent) = this.model.editing.clone() else {
+                        return;
+                    };
+                    let on = this.model.agent(&agent).is_some_and(|a| a.private);
+                    if on {
+                        let f = this.model.set_private(&agent, false);
+                        this.send(f);
+                    } else {
+                        this.private_armed = !this.private_armed;
+                    }
+                }),
+            )
+            .when(self.private_armed && !private, |d| {
+                d.child(div().px(px(space::S)).child(self.private_confirm(
+                    "edit-private",
+                    &editing_name,
+                    cx,
+                    |this| this.private_armed = false,
+                    |this| {
+                        this.private_armed = false;
+                        if let Some(agent) = this.model.editing.clone() {
+                            let f = this.model.set_private(&agent, true);
+                            this.send(f);
+                        }
+                    },
+                )))
+            });
         let listing = match &network {
             None => false,
             Some(hosts) => self.listing_hosts || !hosts.is_empty(),
@@ -13878,6 +14097,7 @@ ACTA_KEY=secret:ACTA_KEY",
                     ))
                     .when_some(following, |d, list| d.child(self.field("Following", list)))
                     .child(group("Runs"))
+                    .child(div().mx(px(-space::L)).child(private_row))
                     .child(div().mx(px(-space::L)).child(isolate))
                     .when(isolated, |d| {
                         d.child(self.field("Network", reach))
@@ -27757,6 +27977,8 @@ struct Making {
     picked_at: Option<Instant>,
     /// Whether it's the person's first agent, made full-window before the app opens.
     first: bool,
+    /// Whether it's made private (PLAN.md, "Private agents").
+    private: bool,
 }
 
 impl Making {
@@ -27768,6 +27990,11 @@ impl Making {
         }
     }
 }
+
+/// What an agent made private loses, as Make private says before it does.
+const PRIVATE_LOSES: &str = "It loses the shared notes, the shared folder and shared tables, \
+     messages with your other agents, their chats in its searches, and plugins' tools. They \
+     lose it too.";
 
 /// What a new chat offers to ask, under the composer.
 const SUGGESTIONS: [&str; 3] = [

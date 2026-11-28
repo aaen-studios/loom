@@ -365,6 +365,7 @@ gpui_kit::assets::icon_assets!(
         Lightbulb,
         ArrowUpRight,
         Lock,
+        LockOpen,
         Image,
         ClipboardPaste,
         ClipboardPen,

@@ -165,6 +165,9 @@ pub struct Agent {
     /// Whether it runs in a sandbox: every member's agent does, and the owner's marked
     /// isolated.
     pub isolated: bool,
+    /// Whether it's private: cut off from everything the person's other agents share,
+    /// and they from it (PLAN.md, "Private agents"). A lock marks it in the sidebar.
+    pub private: bool,
     /// The hosts it may reach from its sandbox, or None for everything; empty is none.
     pub network: Option<Vec<String>>,
 }
@@ -9512,9 +9515,10 @@ impl Model {
                 .pointer("/value/sandboxes")
                 .and_then(Value::as_bool)
                 .unwrap_or(false);
-        } else if id.starts_with("app.place") {
+        } else if id.starts_with("app.place") || id.starts_with("app.private") {
             // Where it runs was refused, as on an instance without sandboxes, or
-            // while it answers: the list as the instance has it again.
+            // while it answers, or making it private, while it's in a group chat:
+            // the list as the instance has it again.
             if let Some(e) = f.get("error") {
                 self.notices.push(s(e, "message"));
                 self.dirty.insert(List::Agents);
@@ -9597,6 +9601,7 @@ impl Model {
                         muted: a.get("muted").is_some_and(|m| !m.is_null()),
                         code_mode: a.get("code_mode").and_then(Value::as_bool).unwrap_or(true),
                         isolated: a.get("isolated").and_then(Value::as_bool).unwrap_or(false),
+                        private: a.get("private").and_then(Value::as_bool).unwrap_or(false),
                         network: a.get("network").and_then(Value::as_array).map(|hs| {
                             hs.iter()
                                 .filter_map(Value::as_str)
@@ -10855,6 +10860,7 @@ impl Model {
         program: &str,
         instructions: &str,
         color: &str,
+        private: bool,
     ) -> Value {
         let id = self.id("app.new_agent");
         let mut args =
@@ -10862,7 +10868,23 @@ impl Model {
         if !color.is_empty() {
             args["color"] = json!(color);
         }
+        if private {
+            args["private"] = json!(true);
+        }
         json!({"t": "cmd", "id": id, "name": "agent.create", "args": args})
+    }
+
+    /// Makes `agent` private, or normal again (PLAN.md, "Private agents"). The
+    /// instance refuses one in a group chat, and the list goes back to what it has.
+    pub fn set_private(&mut self, agent: &str, on: bool) -> Value {
+        if let Some(a) = Rc::make_mut(&mut self.agents)
+            .iter_mut()
+            .find(|a| a.id == agent)
+        {
+            a.private = on;
+        }
+        let id = self.id("app.private");
+        json!({"t": "cmd", "id": id, "name": "agent.update", "args": {"agent": agent, "private": on}})
     }
 
     pub fn start_fresh(&mut self) -> Option<Value> {
@@ -17573,6 +17595,33 @@ mod tests {
         m.result(&json!({"t": "result", "id": f["id"], "ok": false, "error": {"code": "not_here", "message": "No sandboxes."}}));
         assert_eq!(m.notices.last().map(String::as_str), Some("No sandboxes."));
         assert!(m.dirty.contains(&List::Agents));
+    }
+
+    #[test]
+    fn an_agent_is_made_private_and_back() {
+        let mut m = Model::new();
+        m.take(&json!({"t": "core.data", "what": "agents", "items": [
+            {"id": "a_1", "name": "One", "private": true},
+            {"id": "a_2", "name": "Two"},
+        ]}));
+        assert!(m.agents[0].private && !m.agents[1].private);
+        let f = m.set_private("a_2", true);
+        assert_eq!(f["name"], "agent.update");
+        assert_eq!(f["args"], json!({"agent": "a_2", "private": true}));
+        assert!(m.agents[1].private);
+        // Refused, as for one in a group chat: the list as the instance has it comes again.
+        m.dirty.clear();
+        m.result(&json!({"t": "result", "id": f["id"], "ok": false, "error": {"code": "in_group", "message": "Two is in Shop."}}));
+        assert_eq!(
+            m.notices.last().map(String::as_str),
+            Some("Two is in Shop.")
+        );
+        assert!(m.dirty.contains(&List::Agents));
+        let made = m.new_agent("Three", "fake", "", "", true);
+        assert_eq!(made["args"]["private"], true);
+        assert!(m.new_agent("Four", "fake", "", "", false)["args"]
+            .get("private")
+            .is_none());
     }
 
     #[test]

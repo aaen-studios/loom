@@ -1,0 +1,90 @@
+module server.walls
+
+// Private agents (PLAN.md, "Private agents"): an agent marked private has only
+// its own notes, conversations, files and tools. It reaches nothing another
+// agent of the person's left for the rest, and no other agent reaches it. The
+// instance keeps the wall; this says where it runs.
+import std.json.{Json}
+import shared.obj.{Obj, str_at}
+
+// What a private agent's sessions are told once, in place of the shared folder.
+pub const TOLD: str = "[loom: You're private: you have only your own notes, chats, files and tools. Your person's other agents, their shared notes, shared folder and shared tables are out of your reach, and they can't reach you. Keep what you learn with remember, which stays yours.]"
+
+// Why a private agent was refused, and why another agent was refused one.
+pub const MINE: str = "You're private: you reach only your own chats, notes, tables and files, never your person's other agents'. Your person can change that, in the app."
+pub const THEIRS: str = "That agent is private: no other agent reaches it, its chats, its notes or its tables."
+
+// Whether `by` and `other` are walled apart: they aren't the same agent, and
+// either is private. An empty `other` is every agent's, as a shared note is,
+// so only a private agent is walled from it.
+pub fn apart(by: String, other: String, private: List<String>) -> bool {
+    if by == other { return false }
+    return private.contains(by) or private.contains(other)
+}
+
+// Why a private agent never runs the command `name`, or none when it may:
+// what it would write is read by every agent of the person's.
+pub fn never(name: String) -> String? {
+    if name == "skill.put" or name == "skill.delete" { return some(String("You're private, so you don't write skills, which every agent of your person's reads. Propose one with propose_skill, and your person keeps it if they want.")) }
+    if name == "profile.put" { return some(String("You're private, so you don't write your person's profile, which every agent of theirs starts with. Keep it with remember.")) }
+    if name == "plugin.put" { return some(String("You're private, so you don't write plugins, whose tools every agent of your person's gets.")) }
+    if name.starts_with("room.") { return some(String("You're private, so you aren't in group chats, where agents read each other.")) }
+    return none
+}
+
+// The tools a private agent's calls never reach: loom's own that write what
+// every agent reads, or reach another agent. Each says why.
+pub fn never_tool(name: String) -> String? {
+    if name == "message_agent" or name == "hand_off" { return some(String("You're private: you don't message your person's other agents, and they don't message you. Your person can change that, in the app.")) }
+    if name == "save_skill" or name == "fix_skill" { return never(String("skill.put")) }
+    if name == "update_profile" { return never(String("profile.put")) }
+    if name == "save_plugin" { return never(String("plugin.put")) }
+    return none
+}
+
+// `answer` without what's walled off from `by`: each item of a list in it with
+// an `agent` that `by` is walled apart from, as another agent's chats, notes,
+// routines and activity are from a private one, and a private one's from the rest.
+pub fn strip(answer: Json, by: String, private: List<String>) -> Json {
+    let Json.Object(m) = answer.copy() else return answer.copy()
+    var out = LinkedMap<String, Json>()
+    for (k, v) in m {
+        if let Json.Array(items) = v.copy() {
+            var kept = List<Json>()
+            for item in items {
+                if let whose = str_at(item.copy(), "agent") {
+                    if apart(by.copy(), whose, private.copy()) { continue }
+                }
+                kept.push(item.copy())
+            }
+            out.insert(k.copy(), Json.Array(kept))
+        } else {
+            out.insert(k.copy(), v.copy())
+        }
+    }
+    return Json.Object(out)
+}
+
+@test
+fn a_private_agent_is_walled_from_the_rest_and_from_shared_notes() {
+    let private: List<String> = [String("a_2")]
+    assert(not apart(String("a_1"), String("a_3"), private.copy()))
+    assert(apart(String("a_1"), String("a_2"), private.copy()) and apart(String("a_2"), String("a_1"), private.copy()))
+    assert(not apart(String("a_2"), String("a_2"), private.copy()))
+    assert(apart(String("a_2"), String(), private.copy()) and not apart(String("a_1"), String(), private))
+}
+
+@test
+fn lists_lose_what_is_walled_off() {
+    let notes = Obj.new().j("memories", Json.Array([Obj.new().i("id", 1).s("agent", String("a_2")).done(), Obj.new().i("id", 2).s("agent", String()).done(), Obj.new().i("id", 3).s("agent", String("a_1")).done(), Obj.new().i("id", 4).done()])).b("more", false).done()
+    let private: List<String> = [String("a_2")]
+    assert("{strip(notes.copy(), String("a_2"), private.copy())}" == #"{"memories":[{"id":1,"agent":"a_2"},{"id":4}],"more":false}"#)
+    assert("{strip(notes, String("a_1"), private)}" == #"{"memories":[{"id":2,"agent":""},{"id":3,"agent":"a_1"},{"id":4}],"more":false}"#)
+}
+
+@test
+fn a_private_agent_writes_nothing_every_agent_reads() {
+    assert(never(String("skill.put")) != none and never(String("profile.put")) != none and never(String("room.create")) != none and never(String("plugin.put")) != none)
+    assert(never(String("memory.put")) == none and never(String("skill.list")) == none)
+    assert(never_tool(String("message_agent")) != none and never_tool(String("update_profile")) != none and never_tool(String("recall")) == none)
+}

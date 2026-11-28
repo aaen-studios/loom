@@ -37,6 +37,9 @@ struct Agent: Identifiable, Equatable, Sendable {
     /// person picked for it, by option id; the rest follow the defaults.
     var options: [ConfigOption] = []
     var config: [String: String] = [:]
+    /// Whether it's private: cut off from what the person's other agents share, and they
+    /// from it (PLAN.md, "Private agents"). A lock marks it in the list.
+    var isPrivate = false
 
     /// The points its thread follows in the list, or nil for the plain thread.
     var outline: [CGPoint]? {
@@ -2443,6 +2446,9 @@ final class Model {
             roomCreateAnswered(f)
         case let id where id.hasPrefix("app.room_summary:"):
             if error == nil { roomUsageCame(f) }
+        case let id where id.hasPrefix("app.private"):
+            // Refused, as for an agent in a group chat: said.
+            if let error { notice = error }
         case let id where id.hasPrefix("app.context"):
             // Compact now, or Start a fresh session: the chat shows what came of it, and
             // a refusal, as while the agent is answering, is said.
@@ -2562,7 +2568,7 @@ final class Model {
         case .agents:
             agents = listed(items.map {
                 Agent(id: $0["id"].text, name: $0["name"].text, color: $0["color"].text, program: $0["acp_agent"].text, shape: $0["shape"].text, drawing: points($0["drawing"]), pinned: $0["pinned"].int, order: $0["order"].int, group: $0["group"].string, hidden: !$0["hidden"].isNull, instructions: $0["instructions"].text, forLine: $0["for"].text,
-                      options: $0["options"].array.map(ConfigOption.init), config: stringsOf($0["config"]))
+                      options: $0["options"].array.map(ConfigOption.init), config: stringsOf($0["config"]), isPrivate: $0["private"].bool ?? false)
             })
             if let s = selected, agent(s) == nil { select(nil) }
         case .conversations:
@@ -3352,6 +3358,15 @@ final class Model {
     /// Hides an agent, or shows it again.
     func hideAgent(_ agent: String, _ hidden: Bool) -> JSON {
         ["t": "cmd", "id": JSON(id("app.hide_agent")), "name": "agent.hide", "args": ["agent": JSON(agent), "hidden": JSON(hidden)]]
+    }
+
+    /// What an agent made private loses, as Make private says before it does.
+    static let privateLoses = "It loses the shared notes, the shared folder and shared tables, messages with your other agents, their chats in its searches, and plugins' tools. They lose it too."
+
+    /// Makes an agent private, or normal again (PLAN.md, "Private agents"). The instance
+    /// refuses one in a group chat, and says why.
+    func makePrivate(_ agent: String, _ on: Bool) -> JSON {
+        ["t": "cmd", "id": JSON(id("app.private")), "name": "agent.update", "args": ["agent": JSON(agent), "private": JSON(on)]]
     }
 
     /// Makes a folder, with `agent` in it once it's made. Nil for a blank name.
