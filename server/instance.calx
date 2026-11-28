@@ -9707,7 +9707,7 @@ impl Instance {
         let posts_in = if choice.agent.len() > 0 { str_at(r.copy(), "conversation") ?? String() } else { conversation_id.copy() }
         try i.routine_ran(user.copy(), merge(r.copy(), Obj.new().s("conversation", posts_in).j("last", Obj.new().i("at", t).s("status", String("running")).s("run", run_id.copy()).done()).done()))
         let from = "the person's routine \"{name}\", run {how}. The person set it up, but isn't writing this"
-        var note = routines.quiet_note(has_flow)
+        var note = routines.quiet_note(has_flow, i.tools_of(user.copy(), agent_id.copy()).starts_with("code"))
         if last.len() > 0 { note = "{note}\n\n{last}" }
         if gated.starts_with("[loom: ") {
             note = "{note}\n\n{gated}"
@@ -9972,7 +9972,8 @@ impl Instance {
                 // Quiet, as the routine's own run is, and beside the chat in a
                 // session of its own: only what its agent posts reaches the chat.
                 let later = flows.has_after(f.copy(), k)
-                let inputs = "{flows.inputs_for(f.copy(), k, names.copy())}\n\n{routines.quiet_note(later)}"
+                let code = i.tools_of(f.user.copy(), agent_id.copy()).starts_with("code")
+                let inputs = "{flows.inputs_for(f.copy(), k, names.copy())}\n\n{routines.quiet_note(later, code)}"
                 let run_id = try i.store.new_id("run")
                 f.steps[k].state = flows.State.Running
                 f.steps[k].run = run_id.copy()
