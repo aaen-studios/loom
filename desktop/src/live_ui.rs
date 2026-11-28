@@ -195,7 +195,9 @@ impl Loom {
         }
         let wants_mic = l.on && !l.muted && !self.live_sample;
         if wants_mic && self.live_mic.is_none() {
-            match crate::voice::Mic::start() {
+            // The meter lets the mic go first.
+            self.meter = None;
+            match self.start_mic(cx) {
                 Ok(mic) => self.live_mic = Some(mic),
                 Err(why) => {
                     self.model.notices.push(why);
@@ -474,8 +476,8 @@ impl Loom {
             )
     }
 
-    /// The rows of the Voice page's Live tab: Shortcut, Talk over a reply to stop it,
-    /// Send when I stop talking, and Show what's said.
+    /// The rows of the Voice page's Live tab: Microphone, Shortcut, Talk over a reply to
+    /// stop it, Send when I stop talking, and Show what's said.
     pub(super) fn live_rows(&self, cx: &mut Context<Self>) -> Vec<AnyElement> {
         let v = &self.model.voice;
         let shortcut = self.pref_choice(
@@ -521,6 +523,7 @@ impl Loom {
             );
         }
         vec![
+            self.mic_row(cx),
             self.row(None, "Shortcut", None, Some(shortcut))
                 .into_any_element(),
             self.row(

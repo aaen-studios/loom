@@ -11,6 +11,9 @@ use std::ops::Range;
 
 /// A menu of languages or voices, as tall as it may be before it scrolls.
 const MENU_MOST: f32 = 240.0;
+/// A row's picker at its widest, and the microphones' menu, so a long name is cut
+/// rather than the row.
+const PICKER_MOST: f32 = 360.0;
 /// The ink square on a tile, with the engine's icon on it.
 const MARK: f32 = 32.0;
 
@@ -529,7 +532,7 @@ impl Loom {
     }
 
     /// A row's picker: what's picked and a chevron, with the choices in a menu under it.
-    fn voice_picker(
+    pub(super) fn voice_picker(
         &self,
         which: VoiceMenu,
         now: String,
@@ -542,12 +545,14 @@ impl Loom {
         let id = match which {
             VoiceMenu::Language => "voice-language",
             VoiceMenu::Voice | VoiceMenu::Model => "voice-voice",
+            VoiceMenu::Microphone => "voice-mic",
         };
         let button = div()
             .id(id)
             .role(Role::Button)
             .aria_label(now.clone())
             .h(px(control::BUTTON_SMALL))
+            .max_w(px(PICKER_MOST))
             .px(px(space::M))
             .flex()
             .items_center()
@@ -559,7 +564,7 @@ impl Loom {
             .text_size(px(size::SMALL))
             .text_color(p.ink)
             .soft_hover(transparent_black(), p.hover, None)
-            .child(now)
+            .child(div().min_w_0().truncate().child(now))
             .child(
                 div()
                     .text_color(p.ink_3)
@@ -577,7 +582,11 @@ impl Loom {
             let mut list = div()
                 .id(SharedString::from(format!("{id}-menu")))
                 .occlude()
-                .w(px(layout::MENU))
+                .w(px(if which == VoiceMenu::Microphone {
+                    PICKER_MOST
+                } else {
+                    layout::MENU
+                }))
                 .max_h(px(MENU_MOST))
                 .overflow_y_scroll()
                 .p(px(space::XS))
@@ -610,7 +619,7 @@ impl Loom {
                         .text_size(px(size::SMALL))
                         .text_color(p.ink)
                         .soft_hover(transparent_black(), p.hover, None)
-                        .child(div().flex_1().child(name))
+                        .child(div().flex_1().min_w_0().truncate().child(name))
                         .when(on, |d| {
                             d.child(
                                 div()
@@ -618,7 +627,7 @@ impl Loom {
                                     .child(Icon::new(Ico::Check).xsmall()),
                             )
                         })
-                        .on_click(cx.listener(move |this, _, _, cx| {
+                        .on_click(cx.listener(move |this, _, window, cx| {
                             this.model.voice.menu = None;
                             let f = match which {
                                 VoiceMenu::Language => this
@@ -629,6 +638,11 @@ impl Loom {
                                     Tab::Speech,
                                     serde_json::json!({"voice": value, "voice_name": picked_name}),
                                 ),
+                                // The device's own, in its prefs: nothing goes to the core.
+                                VoiceMenu::Microphone => {
+                                    this.pick_mic(&value, &picked_name, window, cx);
+                                    return;
+                                }
                             };
                             this.send(f);
                             cx.notify();
@@ -657,7 +671,7 @@ impl Loom {
             .into_any_element()
     }
 
-    /// The rows of Dictation: Language, Shortcut and Hold to talk.
+    /// The rows of Dictation: Microphone, Language, Shortcut and Hold to talk.
     fn dictation_rows(&self, cx: &mut Context<Self>) -> Vec<AnyElement> {
         let v = &self.model.voice;
         let languages = v.languages.clone();
@@ -682,6 +696,7 @@ impl Loom {
             cx,
         );
         vec![
+            self.mic_row(cx),
             self.row(None, "Language", None, Some(language))
                 .into_any_element(),
             self.row(None, "Shortcut", None, Some(shortcut))
@@ -902,7 +917,7 @@ impl Loom {
                 d.text_color(p.ink_2)
                     .soft_hover(transparent_black(), p.hover, None)
             })
-            .tooltip(tip(if hold { "Hold to dictate" } else { "Dictate" }))
+            .tooltip(tip_text(self.mic_tip(hold)))
             .child(Icon::new(Ico::Mic).small())
             .when(hold, |d| {
                 d.on_mouse_down(
@@ -943,7 +958,9 @@ impl Loom {
             self.open_voice(Tab::Dictation, cx);
             return;
         }
-        match crate::voice::Mic::start() {
+        // The meter lets the mic go first.
+        self.meter = None;
+        match self.start_mic(cx) {
             Ok(mic) => {
                 let at = self.composer.read(cx).cursor();
                 let f = self.model.voice.listen(at);
