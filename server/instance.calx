@@ -2966,7 +2966,18 @@ impl Instance {
     // where it runs now. The sandbox of its own it had, closed to the network,
     // goes, with its egress; the person's folder stays.
     fn moved_agent(i: mut Instance, user: String, id: String, was: sandbox.Place?) {
-        // Each program it runs on, its backup's too.
+        i.stop_programs(user.copy(), id.copy())
+        i.close_browser("{user}/{id}")
+        i.close_doors(user.copy(), some(id.copy()))
+        if let old = was {
+            // A write there next readies it again, rather than finding it gone.
+            if old.its_own() and i.ready_now == old.name() { i.ready_now = String() }
+            if let b = i.boxes { b.drop_place(old) }
+        }
+    }
+
+    // Stops each program `user`'s agent `id` runs on, its backup's too.
+    fn stop_programs(i: mut Instance, user: String, id: String) {
         var keys = List<String>()
         for (key, p) in i.procs {
             if p.agent == id and p.user == user { keys.push(key.copy()) }
@@ -2976,13 +2987,32 @@ impl Instance {
                 i.stop_proc(p.to)
             }
         }
-        i.close_browser("{user}/{id}")
-        i.close_doors(user.copy(), some(id.copy()))
-        if let old = was {
-            // A write there next readies it again, rather than finding it gone.
-            if old.its_own() and i.ready_now == old.name() { i.ready_now = String() }
-            if let b = i.boxes { b.drop_place(old) }
-        }
+    }
+
+    // Moves what `user`'s isolated agent's folder holds when it's made private or normal
+    // again, and so moves between its person's folder and one of its own (PLAN.md,
+    // "Private agents"): from where `old` had it to where `new` has it, through the
+    // sandboxes that see each, never following a link (sandbox.move_folder). Nothing
+    // moves for an agent that isn't isolated before and after: the folder it names
+    // isn't loom's to move. Its programs stop first, so none writes there meanwhile.
+    // Why it couldn't, or none.
+    fn carry_files(i: mut Instance, user: String, old: Json, new: Json) -> String? {
+        let b = i.boxes.copy() else return none
+        let was = i.place(user.copy(), old.copy()) else return none
+        let will = i.place(user.copy(), new.copy()) else return none
+        let from = i.agent_folder(user.copy(), old)
+        let to = i.agent_folder(user.copy(), new.copy())
+        if from == to { return none }
+        // The person's own sandbox for their folder, and the agent's own for its private one.
+        let out = if was.private { was } else { sandbox.person(user.copy()) }
+        let into = if will.private { will } else { sandbox.person(user.copy()) }
+        i.stop_programs(user.copy(), str_at(new, "id") ?? String())
+        var why: String? = none
+        if let err(e) = b.move_folder(out.copy(), from.copy(), into.copy(), to) { why = some("{e}") }
+        // Both folders are measured again before the next run.
+        _ = i.disk_used.remove(b.seen(out))
+        _ = i.disk_used.remove(b.seen(into))
+        return why
     }
 
     // --- Budgets (PLAN.md, "Agents and keys") ---
@@ -19011,7 +19041,12 @@ impl Instance {
                 }
                 o.m.insert(String("config"), Json.Object(config))
             }
-            let agent = o.i("revision", (int_at(old, "revision") ?? 0) + 1).done()
+            let agent = o.i("revision", (int_at(old.copy(), "revision") ?? 0) + 1).done()
+            // Made private or normal again, an isolated agent's files go with it to its
+            // other folder, or nothing changes.
+            if moves {
+                if let why = i.carry_files(user.copy(), old.copy(), agent.copy()) { return Answer.Refused(String("unavailable"), "Its files couldn't be moved, so it's as it was: {why}") }
+            }
             try i.store.put_agent(user.copy(), agent.copy(), device.copy())
             if moves {
                 i.moved_agent(user.copy(), id.copy(), old_place)

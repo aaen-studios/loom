@@ -35,8 +35,10 @@ module server.sandbox
 // measures it before each run, and a run doesn't start while it's over DISK.
 import std.env
 import std.fs
-import std.process.{Command}
+import std.io
+import std.process.{Child, Command, Stdio}
 import std.tar
+import std.tar.{Kind, StreamReader, StreamWriter}
 import std.thread.{Task}
 import std.time.{Timestamp}
 import server.egress
@@ -249,7 +251,7 @@ fn files_go_in_with_one_exec() {
     let t = tar.Tar.open(bytes)!
     let entries = t.entries()
     assert(entries.len() == 2)
-    assert(entries[0].name == "srv/loom/sandboxes/u_2/agents/a_1/AGENTS.md" and entries[0].kind == tar.Kind.File and entries[0].mode == 0o644)
+    assert(entries[0].name == "srv/loom/sandboxes/u_2/agents/a_1/AGENTS.md" and entries[0].kind == Kind.File and entries[0].mode == 0o644)
     assert(t.read(0) == "Be brief.".to_bytes())
     assert(entries[1].name == "srv/loom/sandboxes/u_2/agents/a_1/.claude/skills/review/SKILL.md" and t.read(1) == "---\nname: review\n---\n".to_bytes())
     // Dated now, so what reads a file's time sees it's new.
@@ -267,6 +269,157 @@ fn kilobytes(said: String) -> i64? {
 fn du_says_kilobytes() {
     assert(kilobytes(String("2048\t/data/sandboxes/u_2\n")) == some(2097152))
     assert(kilobytes(String("du: cannot read")) == none)
+}
+
+// What `sh -c` runs at each end of a move (`Sandboxes.move_folder`), with the folder as
+// $1, in the sandbox that sees it. Each goes into the folder only when it's a folder of
+// its own, not a link nor reached through one: `cd -P` follows what's there, and the
+// folder it lands in must be the one named. tar doesn't follow a link inside it either.
+// A folder that isn't there, or is a link, has nothing to move, and the link stays.
+const PACK: str = #"[ -d "$1" ] && [ ! -L "$1" ] || exit 0; cd -P -- "$1" && [ "$(pwd -P)" = "$1" ] || { echo "$1 isn't a folder of its own" >&2; exit 1; }; exec tar -c -f - ."#
+const UNPACK: str = #"mkdir -p -- "$1" && cd -P -- "$1" && [ "$(pwd -P)" = "$1" ] || { echo "$1 isn't a folder of its own" >&2; exit 1; }; exec tar -x --no-same-owner -f -"#
+// Empties the old folder once what it held is in the new one, and removes it where it
+// isn't a sandbox's mount. rm doesn't follow the links it removes.
+const CLEAR: str = #"[ -d "$1" ] && [ ! -L "$1" ] || exit 0; cd -P -- "$1" && [ "$(pwd -P)" = "$1" ] || { echo "$1 isn't a folder of its own" >&2; exit 1; }; chmod -R u+rwX . 2>/dev/null; find . -mindepth 1 -maxdepth 1 -exec rm -rf -- {} + || exit 1; cd / && rmdir -- "$1" 2>/dev/null; exit 0"#
+
+// How long a move waits for the old folder's sandbox to send more, in seconds, before
+// it takes it to have stopped.
+const QUIET_MOST: i64 = 120
+
+// The path an entry of the old folder's archive goes to in the new folder, or none for
+// the folder itself and for a path that would climb out of it.
+fn inside(entry: String) -> String? {
+    var path = entry.copy()
+    while path.starts_with("./") { path = path[2..].copy() }
+    if path.len() == 0 or path == "." or path.starts_with("/") { return none }
+    for part in path.split("/") {
+        if part == ".." { return none }
+    }
+    return some(path)
+}
+
+@test
+fn a_moved_entry_stays_in_its_folder() {
+    assert(inside(String("./notes/a.md")) == some(String("notes/a.md")))
+    assert(inside(String("./")) == none and inside(String(".")) == none and inside(String("")) == none)
+    assert(inside(String("./../x")) == none and inside(String("a/../../x")) == none and inside(String("/etc/passwd")) == none)
+    assert(inside(String("a..b/c")) == some(String("a..b/c")))
+}
+
+// Passes on the folders and regular files of the archive `r` reads to `w`, each with
+// its time and permission bits: no link, hard link, device, pipe or socket, and nothing
+// whose path climbs out. How many went.
+fn only_files<R: io.Reader, W: io.Writer>(r: mut StreamReader<R>, w: mut StreamWriter<W>) -> usize ! String {
+    var n: usize = 0
+    while let e = try r.next() {
+        let path = inside(e.name.copy()) else continue
+        w.set_time(e.modified)
+        if e.kind == Kind.Dir {
+            try w.add_dir(path)
+            n += 1
+        } else if e.kind == Kind.File {
+            try w.add_from(path, u64(e.size), mut r, e.mode & 0o777)
+            n += 1
+        }
+    }
+    return n
+}
+
+@test
+fn a_move_passes_on_only_folders_and_files() {
+    var t = tar.Writer.new()
+    t.add_dir("./")
+    t.add_dir("./notes")
+    t.add("./notes/a.md", "kept".to_bytes(), mode: 0o4755)
+    t.add_symlink("./key", "/srv/loom/secret.key")
+    t.add_symlink("./up", "..")
+    t.add("./../out.md", "out".to_bytes())
+    t.add("/etc/passwd", "root".to_bytes())
+    t.add("./b.md", "also".to_bytes())
+    var r = StreamReader.new(io.ByteReader.new(t.finish()))
+    var w = StreamWriter.new(List<u8>())
+    assert(only_files(mut r, mut w)! == 3)
+    let got = tar.Tar.open(w.finish()!)!
+    let entries = got.entries()
+    assert(entries.len() == 3)
+    assert(entries[0].name == "notes" and entries[0].kind == Kind.Dir)
+    assert(entries[1].name == "notes/a.md" and entries[1].kind == Kind.File and entries[1].mode == 0o755 and got.read(1) == "kept".to_bytes())
+    assert(entries[2].name == "b.md" and got.read(2) == "also".to_bytes())
+}
+
+// The old folder's archive, as its sandbox sends it, a piece at a time.
+struct Packed {
+    child: Child
+    left: List<u8>
+    at: usize
+}
+
+impl io.Reader for Packed {
+    fn read(mut self, buf: mut List<u8>, n: usize) -> usize ! String {
+        if n == 0 { return 0 }
+        var quiet: i64 = 0
+        while self.at >= self.left.len() {
+            if self.child.ended() { return 0 }
+            self.left = self.child.read(1000)
+            self.at = 0
+            if self.left.len() == 0 {
+                quiet += 1
+                if quiet >= QUIET_MOST { fail "the old folder's sandbox stopped sending it" }
+            }
+        }
+        let k = if n < self.left.len() - self.at { n } else { self.left.len() - self.at }
+        buf.extend(self.left[self.at..self.at + k])
+        self.at += k
+        return k
+    }
+}
+
+// The new folder's sandbox, taking the archive in.
+struct Unpacking {
+    child: Child
+}
+
+impl io.Writer for Unpacking {
+    fn write(mut self, bytes: List<u8>) ! String {
+        match self.child.write(bytes) {
+            ok => {},
+            err(e) => fail "the new folder's sandbox stopped taking it: {e}",
+        }
+    }
+}
+
+// Runs `pack`, which sends a folder as a tar stream, and `unpack`, which takes one in,
+// with only the folders and regular files of the first passed on to the second
+// (`only_files`). Both are waited for, whatever goes wrong.
+fn carry(pack: own Command, unpack: own Command) ! Error {
+    var packer = try pack.stdin(Stdio.Null).stdout(Stdio.Pipe).stderr(Stdio.Pipe).spawn()
+    let unpacker = match unpack.stdin(Stdio.Pipe).stdout(Stdio.Null).stderr(Stdio.Pipe).spawn() {
+        ok(c) => c,
+        err(e) => {
+            packer.kill()
+            _ = packer.wait()
+            fail "{e}"
+        },
+    }
+    var r = StreamReader.new(Packed { child: packer, left: List<u8>(), at: 0 })
+    var w = StreamWriter.new(Unpacking { child: unpacker })
+    var why = match only_files(mut r, mut w) {
+        ok(_) => String(),
+        err(e) => e,
+    }
+    var sent = r.into_inner().child
+    if why.len() > 0 { sent.kill() }
+    let packed = sent.wait()
+    match w.finish() {
+        ok(u) => {
+            var taking = u.child
+            let unpacked = taking.wait()
+            if why.len() == 0 and not unpacked.status.success() { why = "the new folder didn't take it: {unpacked.error_text().trim()}" }
+        },
+        err(e) => if why.len() == 0 { why = e },
+    }
+    if why.len() == 0 and not packed.status.success() { why = "the old folder couldn't be read: {packed.error_text().trim()}" }
+    if why.len() > 0 { fail why }
 }
 
 struct Puller {
@@ -532,6 +685,32 @@ impl Sandboxes {
         if not out.status.success() { fail "writing in the sandbox didn't work: {out.error_text().trim()}" }
     }
 
+    // Moves what an agent's folder holds from `from`, which `out`'s sandbox sees, to `to`,
+    // which `into`'s sees: as an agent made private goes from its person's folder to its
+    // own, and back (PLAN.md, "Private agents"). The instance touches neither folder
+    // itself, since the sandboxes can put links in them: tar in `out` reads the old one
+    // without following a link at its path or in it, the instance passes on only its
+    // folders and regular files (`only_files`), and tar in `into` writes them, so nothing
+    // outside the old folder is read and nothing outside the new one is written. Once
+    // they're all in, the old folder is emptied, in `out`. If anything fails, the old
+    // folder is as it was, and what got into the new one stays there.
+    pub fn move_folder(self, out: Place, from: String, into: Place, to: String) ! Error {
+        try self.ready(out.copy())
+        try self.ready(into.copy())
+        try carry(self.script(out.copy(), false, PACK, from.copy()), self.script(into, true, UNPACK, to.copy()))
+        let cleared = try self.script(out, false, CLEAR, from.copy()).output()
+        if not cleared.status.success() { fail "its old folder, {from}, couldn't be emptied: {cleared.error_text().trim()}" }
+    }
+
+    // What runs `script` with `sh -c` in `place`'s sandbox, with `folder` as $1, and
+    // with its standard input if `input`.
+    fn script(self, place: Place, input: bool, script: str, folder: own String) -> Command {
+        var args: List<String> = [String("exec")]
+        if input { args.push(String("-i")) }
+        args.extend([place.name(), String("sh"), String("-c"), String(script), String("loom"), folder])
+        return Command.new(self.runtime.copy()).args(args)
+    }
+
     // Removes the file `path` in `place`'s sandbox, or the folder, if it's empty.
     pub fn remove_file(self, place: Place, path: String) ! Error {
         try self.run([String("exec"), place.name(), String("rm"), String("-f"), String("--"), path.copy()])
@@ -556,6 +735,52 @@ impl Sandboxes {
         let out = try Command.new(self.runtime.copy()).args(args.copy()).output()
         if not out.status.success() { fail "{self.runtime} {args.join(" ")} didn't work: {out.error_text().trim()}" }
     }
+}
+
+// What runs `script` with `sh -c` here, with `folder` as $1, as a sandbox would.
+fn here(script: str, folder: own String) -> Command {
+    return Command.new(String("sh")).args([String("-c"), String(script), String("loom"), folder])
+}
+
+// The scripts of a move, run here rather than in sandboxes, which this test can't
+// count on: a folder's files and folders go across, its links don't and aren't
+// followed, and the old folder is emptied without following one either.
+@test
+fn a_move_follows_no_link() {
+    // On macOS, its tar gives each file binary xattrs in pax headers, which std.tar
+    // doesn't read yet (CLX-478); the sandboxes' GNU tar writes none.
+    if env.os() == "windows" or env.os() == "macos" { return }
+    let dir = fs.temp_dir()!
+    fs.make_dir_all("{dir}/old/notes/deep")!
+    fs.write_text("{dir}/old/notes/a.md", "kept")!
+    fs.write_text("{dir}/old/notes/deep/b.md", "deep")!
+    fs.write_text("{dir}/secret.key", "the instance's")!
+    fs.make_dir_all("{dir}/elsewhere")!
+    fs.write_text("{dir}/elsewhere/x.md", "elsewhere")!
+    fs.make_link("{dir}/secret.key", "{dir}/old/key")!
+    fs.make_link("{dir}/elsewhere", "{dir}/old/notes/up")!
+    if let err(e) = carry(here(PACK, "{dir}/old"), here(UNPACK, "{dir}/new")) { panic("the move: {e}") }
+    assert(fs.read_text("{dir}/new/notes/a.md")! == some(String("kept")) and fs.read_text("{dir}/new/notes/deep/b.md")! == some(String("deep")))
+    assert(fs.kind("{dir}/new/key")! == none and fs.kind("{dir}/new/notes/up")! == none)
+    assert(here(CLEAR, "{dir}/old").output()!.status.success())
+    assert(fs.kind("{dir}/old")! == none and fs.read_text("{dir}/secret.key")! == some(String("the instance's")) and fs.read_text("{dir}/elsewhere/x.md")! == some(String("elsewhere")))
+
+    // A link at the old folder's path isn't followed: nothing moves, and it stays.
+    fs.make_link("{dir}/elsewhere", "{dir}/linked")!
+    carry(here(PACK, "{dir}/linked"), here(UNPACK, "{dir}/new2"))!
+    assert(fs.kind("{dir}/new2/x.md")! == none)
+    assert(here(CLEAR, "{dir}/linked").output()!.status.success())
+    assert(fs.kind("{dir}/linked")! == some(fs.Kind.Link) and fs.read_text("{dir}/elsewhere/x.md")! == some(String("elsewhere")))
+
+    // Nor one on the way to it: the move fails, and the new folder gets nothing.
+    fs.make_link(dir.copy(), "{dir}/via")!
+    assert(match carry(here(PACK, "{dir}/via/elsewhere"), here(UNPACK, "{dir}/new3")) { ok => false, err(_) => true })
+    assert(fs.kind("{dir}/new3/x.md")! == none)
+    assert(not here(CLEAR, "{dir}/via/elsewhere").output()!.status.success() and fs.read_text("{dir}/elsewhere/x.md")! == some(String("elsewhere")))
+    // And a new folder reached through one takes nothing.
+    assert(match carry(here(PACK, "{dir}/new"), here(UNPACK, "{dir}/via/elsewhere")) { ok => false, err(_) => true })
+    assert(fs.kind("{dir}/elsewhere/notes")! == none)
+    fs.remove_dir_all(dir)!
 }
 
 @test

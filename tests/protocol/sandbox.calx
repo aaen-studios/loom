@@ -220,7 +220,43 @@ fn private_agent(runtime: String, ann: mut Session, data: String, ann_id: String
     try ann.send(Obj.new().s("t", String("send")).s("cid", String("m_32")).s("conversation", chat).s("text", String("/env HOME")).done())
     let back = reply_text(try ann.reply())
     try check(back.contains("HOME={home}") and fs.exists("{home}/agents/{kept}/CLAUDE.md"), "and it runs in her sandbox, in her folder")
+    try check(try fs.read_text("{home}/agents/{kept}/notes.log") == some(String("kept")) and not fs.exists("{mine}/notes.log"), "with what its own folder held, moved back")
     _ = try ann.until("event", "run.finished")
+}
+
+// An agent of hers made private takes its files with it (PLAN.md, "Private agents"):
+// what its folder in hers held goes to its own folder beside hers, out of her other
+// agents' reach, and back when it's made normal again. Links her sandbox put in its
+// folder aren't followed or moved: one to a file of the instance's, one to her shared
+// folder. (A link at the folder's path, or on the way to it, is server/sandbox.calx's
+// own test, a_move_follows_no_link.)
+fn moving_files(runtime: String, ann: mut Session, data: String, ann_id: String) ! Error {
+    let home = "{data}/sandboxes/{ann_id}"
+    let made = try ann.cmd("q_40", "agent.create", Obj.new().s("name", String("Moving")).s("acp_agent", String("boxed")).s("instructions", String("Moves.")).b("code_mode", false).done())
+    let id = str_at(at(at(made, "value"), "agent"), "id") ?? String()
+    let old = "{home}/agents/{id}"
+    let mine = "{data}/sandboxes/{ann_id}.private/{id}"
+    let chat = str_at(at(try ann.cmd("q_41", "conversation.create", Obj.new().s("agent", id.copy()).done()), "value"), "conversation") ?? String()
+    try ann.send(Obj.new().s("t", String("send")).s("cid", String("m_40")).s("conversation", chat.copy()).s("text", "/write {old}/notes/kept.md kept\nWritten.").done())
+    _ = try ann.reply()
+    _ = try ann.until("event", "run.finished")
+    try fs.write_text("{data}/secret.txt", "the instance's")
+    try sh(runtime.copy(), [String("exec"), "loom-{ann_id}", String("ln"), String("-s"), "{data}/secret.txt", "{old}/key"])
+    try sh(runtime.copy(), [String("exec"), "loom-{ann_id}", String("ln"), String("-s"), "{home}/shared", "{old}/notes/shared"])
+
+    let refused = at(try ann.cmd("q_42", "agent.update", Obj.new().s("agent", id.copy()).b("private", true).done()), "error")
+    if refused != Json.Null { fail "making it private was refused: {refused}" }
+    try check(try fs.read_text("{mine}/notes/kept.md") == some(String("kept")) and not fs.exists(old.copy()), "made private, what its folder held goes to its own folder, and out of hers")
+    try check(try fs.kind("{mine}/key") == none and try fs.kind("{mine}/notes/shared") == none and try fs.read_text("{data}/secret.txt") == some(String("the instance's")), "the links her sandbox put there are neither followed nor moved")
+    try ann.send(Obj.new().s("t", String("send")).s("cid", String("m_41")).s("conversation", chat.copy()).s("text", String("/env HOME")).done())
+    try check(reply_text(try ann.reply()).contains("HOME={mine}"), "and it runs there, in a sandbox of its own")
+    _ = try ann.until("event", "run.finished")
+    let looked = try Command.new(runtime.copy()).args([String("exec"), "loom-{ann_id}", String("test"), String("-e"), "{old}/notes/kept.md"]).output()
+    try check(not looked.status.success(), "where her other agents run, its files are gone")
+
+    _ = try ann.cmd("q_43", "agent.update", Obj.new().s("agent", id.copy()).b("private", false).done())
+    try check(try fs.read_text("{old}/notes/kept.md") == some(String("kept")) and not fs.exists("{mine}/notes"), "made normal again, they go back to its folder in hers")
+    _ = try ann.cmd("q_44", "agent.delete", Obj.new().s("agent", id).done())
 }
 
 fn run(runtime: String) ! Error {
@@ -309,6 +345,7 @@ fn run(runtime: String) ! Error {
     try check(not dropped.status.success(), "opening its network back up takes its own sandbox away")
 
     try private_agent(runtime.copy(), mut ann, data.copy(), ann_id.copy(), agent.copy())
+    try moving_files(runtime.copy(), mut ann, data.copy(), ann_id.copy())
 
     // The owner's agents can be isolated too, and run in a sandbox of the
     // owner's, on the program's settings, which are the owner's own.

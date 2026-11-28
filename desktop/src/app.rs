@@ -687,6 +687,8 @@ pub struct Loom {
     menu_private: bool,
     /// Whether the edit page asks the same, under its Private switch.
     private_armed: bool,
+    /// Whether either asks to run it in a sandbox of its own as well, where it offers to.
+    private_isolate: bool,
     listing_hosts: bool,
     /// One of the person's own hosts to add, by what ssh is given, on the Hosts page.
     ssh_host_in: Entity<InputState>,
@@ -1891,6 +1893,7 @@ ACTA_KEY=secret:ACTA_KEY",
             menu_threads: false,
             menu_private: false,
             private_armed: false,
+            private_isolate: false,
             listing_hosts: false,
             ssh_host_in,
             skill_name_in,
@@ -9945,19 +9948,55 @@ ACTA_KEY=secret:ACTA_KEY",
             .when_some(right, |d, r| d.child(r))
     }
 
-    /// A routine's row once it's picked: "Run it now?", with Run and Cancel.
     /// What Make private asks before it does, in the agent menu and under the edit page's
     /// switch: what the agent loses, then Cancel and Make private (PLAN.md, "Private
-    /// agents").
+    /// agents"). With `offer`, on an instance with sandboxes for an agent that isn't
+    /// isolated, one switch between, off at first, to run it in a sandbox of its own too,
+    /// with what that costs under it.
     fn private_confirm(
         &self,
         id: &'static str,
         name: &str,
+        offer: bool,
         cx: &mut Context<Self>,
         cancel: fn(&mut Loom),
         yes: fn(&mut Loom),
     ) -> Div {
         let p = self.p;
+        let isolate = div()
+            .flex()
+            .items_start()
+            .gap(px(space::S))
+            .child(
+                self.switch(
+                    SharedString::from(format!("{id}-isolate")),
+                    self.private_isolate,
+                )
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.private_isolate = !this.private_isolate;
+                    cx.notify();
+                })),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .flex()
+                    .flex_col()
+                    .gap(px(2.0))
+                    .child(
+                        div()
+                            .text_size(px(size::SMALL))
+                            .text_color(p.ink)
+                            .child(PRIVATE_ISOLATE),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(size::CAPTION))
+                            .text_color(p.ink_3)
+                            .child(PRIVATE_ISOLATE_COSTS),
+                    ),
+            );
         div()
             .max_w(px(280.0))
             .flex()
@@ -9978,6 +10017,7 @@ ACTA_KEY=secret:ACTA_KEY",
                     .text_color(p.ink_3)
                     .child(PRIVATE_LOSES),
             )
+            .when(offer, |d| d.child(isolate))
             .child(
                 div()
                     .flex()
@@ -10004,6 +10044,7 @@ ACTA_KEY=secret:ACTA_KEY",
             )
     }
 
+    /// A routine's row once it's picked: "Run it now?", with Run and Cancel.
     fn plus_confirm(&self, r: &model::Routine, cx: &mut Context<Self>) -> Stateful<Div> {
         let p = self.p;
         let id = r.id.clone();
@@ -11224,10 +11265,16 @@ ACTA_KEY=secret:ACTA_KEY",
                 .and_then(|id| self.model.agent(id))
                 .map(|a| a.name.clone())
                 .unwrap_or_default();
+            let offer = self
+                .model
+                .selected
+                .as_ref()
+                .is_some_and(|id| self.model.offers_isolating(id));
             return Some(panel.when(under_header, |d| d.left(px(space::S))).child(
                 self.private_confirm(
                     "menu-private",
                     &name,
+                    offer,
                     cx,
                     |this| {
                         this.menu_private = false;
@@ -11235,10 +11282,13 @@ ACTA_KEY=secret:ACTA_KEY",
                     },
                     |this| {
                         if let Some(agent) = this.model.selected.clone() {
-                            let f = this.model.set_private(&agent, true);
+                            let isolate =
+                                this.private_isolate && this.model.offers_isolating(&agent);
+                            let f = this.model.make_private(&agent, true, isolate);
                             this.send(f);
                         }
                         this.menu_private = false;
+                        this.private_isolate = false;
                         this.menu = None;
                     },
                 ),
@@ -11351,6 +11401,7 @@ ACTA_KEY=secret:ACTA_KEY",
                             this.menu = None;
                         } else {
                             this.menu_private = true;
+                            this.private_isolate = false;
                         }
                         cx.notify();
                     })),
@@ -13848,21 +13899,31 @@ ACTA_KEY=secret:ACTA_KEY",
                         this.send(f);
                     } else {
                         this.private_armed = !this.private_armed;
+                        this.private_isolate = false;
                     }
                 }),
             )
             .when(self.private_armed && !private, |d| {
+                let offer = self
+                    .model
+                    .editing
+                    .as_ref()
+                    .is_some_and(|id| self.model.offers_isolating(id));
                 d.child(div().px(px(space::S)).child(self.private_confirm(
                     "edit-private",
                     &editing_name,
+                    offer,
                     cx,
                     |this| this.private_armed = false,
                     |this| {
                         this.private_armed = false;
                         if let Some(agent) = this.model.editing.clone() {
-                            let f = this.model.set_private(&agent, true);
+                            let isolate =
+                                this.private_isolate && this.model.offers_isolating(&agent);
+                            let f = this.model.make_private(&agent, true, isolate);
                             this.send(f);
                         }
+                        this.private_isolate = false;
                     },
                 )))
             });
@@ -28075,6 +28136,11 @@ impl Making {
 const PRIVATE_LOSES: &str = "It loses the shared notes, the shared folder and shared tables, \
      messages with your other agents, their chats in its searches, and plugins' tools. They \
      lose it too.";
+
+/// The switch Make private offers where the instance has sandboxes, and what it costs.
+const PRIVATE_ISOLATE: &str = "Also run it in a sandbox of its own";
+const PRIVATE_ISOLATE_COSTS: &str =
+    "It no longer works in its folder, and has only what its sandbox has.";
 
 /// What a new chat offers to ask, under the composer.
 const SUGGESTIONS: [&str; 3] = [
