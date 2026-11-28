@@ -337,6 +337,20 @@ impl Voice {
         self.listening = some(l)
     }
 
+    /// The message was sent while dictating (LOO-448): the dictation ends at once, and
+    /// nothing more of it comes. Its stream is closed, the model on the device stops and
+    /// a recording being written is dropped; the app is told `cancelled` last, so every
+    /// frame of it before that is no one's.
+    pub fn cancel(mut self) {
+        if let l = self.listening.take() {
+            var m = l
+            if m.stopped == none { self.cues.push(false) }
+            if m.local { self.run(sherpa.Job.Stop(m.n)) }
+            if let ws = m.ws.take() { ws.close() }
+        }
+        self.to_app.push(Obj.new().s("t", String("core.dictation")).s("state", String("cancelled")).done())
+    }
+
     // The whole recording, gone to be written, for an engine that doesn't stream.
     fn write_recording(mut self, l: own Listening) {
         var m = l
@@ -1024,6 +1038,27 @@ fn no_engine_opens_the_settings() {
     var v = Voice.new()
     v.listen()
     assert("{v.to_app[0]}" == #"{"t":"core.dictation","state":"no_engine"}"# and v.to_instance.len() == 0 and v.cues.len() == 0)
+}
+
+@test
+fn a_message_sent_while_dictating_drops_the_dictation() {
+    var v = Voice.new()
+    v.settings = engines.apply(Json.Null, parse(#"{"dictation":{"engine":"groq"}}"#)!)!
+    v.listen()
+    v.audio(engines.le_bytes([1i16, 2, 3, 4]), 24000, 1)
+    v.cancel()
+    assert(v.listening == none and v.cues == [true, false])
+    assert("{v.to_app[v.to_app.len() - 1]}" == #"{"t":"core.dictation","state":"cancelled"}"#)
+    // Its key coming late starts nothing, and the next dictation starts afresh.
+    let told = v.to_app.len()
+    _ = v.answer(parse(#"{"t":"result","id":"core.voice:1","ok":true,"value":{"key":"k","engine":"groq"}}"#)!)
+    assert(v.listening == none and v.to_app.len() == told)
+    v.listen()
+    assert(v.listening != none and str_at(v.to_app[told].copy(), "state") == some(String("listening")))
+    // With nothing under way it still says so, for the app to stop ignoring frames.
+    var idle = Voice.new()
+    idle.cancel()
+    assert("{idle.to_app[0]}" == #"{"t":"core.dictation","state":"cancelled"}"# and idle.cues.len() == 0)
 }
 
 @test

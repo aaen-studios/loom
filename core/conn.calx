@@ -733,9 +733,10 @@ impl Conn {
 
     /// What the app says about voice (core/voice.calx): the mic pressed (`voice.listen`),
     /// what it heard (`voice.audio`, 16-bit PCM in base64 with its `rate` and
-    /// `channels`), the mic let go (`voice.stop`), a reply or a voice's preview to read
-    /// aloud (`voice.speak`), stopping it (`voice.hush`), and an engine's voices for the
-    /// picker (`voice.voices`).
+    /// `channels`), the mic let go (`voice.stop`), the dictation dropped as the message
+    /// is sent (`voice.cancel`), a reply or a voice's preview to read aloud
+    /// (`voice.speak`), stopping it (`voice.hush`), and an engine's voices for the picker
+    /// (`voice.voices`).
     fn voice_frame(mut self, t: String, m: Json) {
         if t == "voice.listen" {
             self.voice.listen()
@@ -751,6 +752,8 @@ impl Conn {
             }
         } else if t == "voice.stop" {
             self.voice.stop()
+        } else if t == "voice.cancel" {
+            self.voice.cancel()
         } else if t == "voice.speak" {
             var text = str_at(m.copy(), "text") ?? String()
             let id = str_at(m.copy(), "id") ?? String()

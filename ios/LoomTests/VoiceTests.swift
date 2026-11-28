@@ -144,6 +144,28 @@ import Testing
         #expect(m.notice == "Deepgram didn't answer.")
     }
 
+    @Test func aMessageSentWhileDictatingStaysOutOfTheComposer() {
+        let m = caughtUp()
+        m.dictationStarted()
+        m.take(["t": "core.dictation", "state": "listening", "text": "check the"])
+        // Sent while words are still coming: the dictation is over, and the core told.
+        #expect(m.dictationSent() == ["t": "voice.cancel"])
+        #expect(m.voice.heard.over && m.voice.heard.text == "")
+        // What the core had on the way comes anyway, and goes nowhere.
+        for state in ["listening", "finishing", "done"] {
+            m.take(["t": "core.dictation", "state": JSON(state), "text": "check the build"])
+            #expect(m.voice.heard.state == "cancelled" && m.voice.heard.text == "")
+        }
+        // Dictating again at once: the last one's words don't go into the new one, which
+        // has its own once the core says the last is gone.
+        m.dictationStarted()
+        m.take(["t": "core.dictation", "state": "done", "text": "check the build"])
+        #expect(m.voice.heard == Dictation(n: 2, state: "listening", text: ""))
+        m.take(["t": "core.dictation", "state": "cancelled"])
+        m.take(["t": "core.dictation", "state": "listening", "text": "ship it"])
+        #expect(m.voice.heard.n == 2 && m.voice.heard.text == "ship it")
+    }
+
     @Test @MainActor func dictatedWordsKnowWhichAreKept() {
         let m = caughtUp()
         m.dictationStarted()

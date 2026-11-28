@@ -140,7 +140,8 @@ struct VoiceOption: Equatable, Sendable, Identifiable {
 }
 
 /// A dictation, as the core tells it: which one it is (each start is the next), how it
-/// stands (`listening`, `finishing`, `done`, `failed`, `no_engine`) and all its words so far.
+/// stands (`listening`, `finishing`, `done`, `failed`, `no_engine`, or `cancelled` once the
+/// message was sent while it went on) and all its words so far.
 struct Dictation: Equatable, Sendable {
     var n = 0
     var state = ""
@@ -149,7 +150,7 @@ struct Dictation: Equatable, Sendable {
     var kept = ""
 
     /// Whether it's over, and the mic is to stop.
-    var over: Bool { ["done", "failed", "no_engine"].contains(state) }
+    var over: Bool { ["done", "failed", "no_engine", "cancelled"].contains(state) }
 }
 
 /// Settings › Voice and dictation, as the instance and the core last said.
@@ -173,6 +174,9 @@ struct VoiceState {
     var useOnceKept: [String: String] = [:]
     /// The dictation now, or the last.
     var heard = Dictation()
+    /// A dictation the message was sent in the middle of (LOO-448): the core's frames
+    /// about it are no one's until it says `cancelled`.
+    var dropping = false
     /// Settings › Voice, asked for by the mic or live mode with no engine set up, on the
     /// tab of the one missing.
     var open = false
@@ -326,6 +330,11 @@ extension Model {
     func voiceFrame(_ f: JSON) -> Bool {
         switch f["t"].text {
         case "core.dictation":
+            if f["state"].text == "cancelled" {
+                voice.dropping = false
+                return true
+            }
+            if voice.dropping { return true }
             voice.heard.state = f["state"].text
             if let text = f["text"].string { voice.heard.text = text }
             voice.heard.kept = f["kept"].text
@@ -360,6 +369,15 @@ extension Model {
     /// A dictation starting: its words go in from here.
     func dictationStarted() {
         voice.heard = Dictation(n: voice.heard.n + 1, state: "listening", text: "")
+    }
+
+    /// The message sent while dictating (LOO-448): the dictation is dropped, so the words
+    /// still to come don't write it back into the emptied composer, and the core is told
+    /// to drop it too.
+    func dictationSent() -> JSON {
+        voice.heard = Dictation(n: voice.heard.n, state: "cancelled", text: "")
+        voice.dropping = true
+        return ["t": "voice.cancel"]
     }
 
     /// The answers to Settings › Voice's commands and a voice_setup card's Add. Gives

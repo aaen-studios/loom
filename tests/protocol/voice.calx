@@ -7,7 +7,8 @@ module tests.protocol.voice
 // device as voice.updated, and never a key; each service uses its newest model
 // until another is picked; dictation streams to Deepgram (Nova-3, and Flux on
 // /v2/listen), ElevenLabs Scribe and OpenAI, the words coming as they're said, with
-// Dictation on and off at the real start and stop, and Groq writes the recording once
+// Dictation on and off at the real start and stop, a message sent mid-sentence dropping
+// the dictation with no word after it (LOO-448), and Groq writes the recording once
 // the mic is let go; a key the service refuses fails, saying why; speech asks OpenAI
 // over its Realtime API, ElevenLabs over its Text to Dialogue socket (v4) or its
 // text-to-speech (the others), Fish Audio, and Deepgram (Flux and Aura-2) for PCM,
@@ -146,6 +147,36 @@ impl App {
                 if not stopped { self.send(Obj.new().s("t", String("voice.stop")).done()) }
                 return (said, sounds)
             }
+        }
+    }
+
+    // Dictation the message is sent in the middle of (LOO-448): the mic pressed, `chunks`
+    // pieces heard, and once the first words come, `voice.cancel`. Gives what came after
+    // it: `cancelled`, and anything else is a word that would land in the empty composer.
+    fn dictate_and_send(mut self, chunks: usize) -> List<Json> ! Error {
+        self.send(Obj.new().s("t", String("voice.listen")).done())
+        var piece = List<u8>()
+        for i in 0..4800 {
+            bytes.put_u16_le(mut piece, u16.wrap(i * 7))
+            bytes.put_u16_le(mut piece, u16.wrap(i * 7))
+        }
+        for _ in 0..chunks {
+            self.send(Obj.new().s("t", String("voice.audio")).s("pcm", bytes.base64(piece.copy())).i("rate", 48000).i("channels", 2).done())
+        }
+        loop {
+            let f = try self.until("core.dictation", "", String(), 15000)
+            if (str_at(f, "text") ?? String()).len() > 0 { break }
+        }
+        self.send(Obj.new().s("t", String("voice.cancel")).done())
+        var after = List<Json>()
+        let start = unsafe { Instant.now() }
+        loop {
+            let waited = unsafe { Instant.now() }.nanos_since(start) / 1000000
+            if waited >= 2500 { return after }
+            let got = unsafe { self.from_core.wait_for(100000000) } else { continue }
+            let m = got.text() else { continue }
+            let f = try parse(m)
+            if str_at(f.copy(), "t") == some(String("core.dictation")) { after.push(f) }
         }
     }
 
@@ -302,6 +333,16 @@ fn run(i: Instance, fake: String) ! Error {
     let (el, _) = try app.dictate(2)
     try check(heard_while_on(el.copy(), "hei") and last_text(el) == "hei verden", "ElevenLabs Scribe streams, and commits its last words")
     try check(str_at(try seen_by(fake.copy()), "elevenlabs_model") == some(String("scribe_v3_live")), "with Scribe v3 Live")
+    // The message sent mid-sentence (LOO-448): the dictation ends at once, nothing more
+    // of it comes after the core says so, and the next one hears afresh.
+    let dropped = try app.dictate_and_send(2)
+    var cancels: usize = 0
+    for f in dropped.copy() {
+        if str_at(f, "state") == some(String("cancelled")) { cancels += 1 }
+    }
+    try check(cancels == 1 and last_state(dropped) == "cancelled", "a message sent while dictating drops it: cancelled comes, and no word after it")
+    let (again, _) = try app.dictate(2)
+    try check(heard_while_on(again.copy(), "hei") and last_text(again) == "hei verden", "and the next dictation hears afresh")
 
     // --- OpenAI ---
     try key(mut app, "v_6", "openai", "oa-key")
