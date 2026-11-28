@@ -225,6 +225,9 @@ struct RoutineCost: Equatable, Sendable {
     var runs = 0
     var quiet = 0
     var wasted = false
+    /// What its script saves, in words, as the instance says it: "80% of runs used no
+    /// tokens · 1.2M tokens saved by its script".
+    var saves = ""
 
     init() {}
 
@@ -234,14 +237,16 @@ struct RoutineCost: Equatable, Sendable {
         runs = v["runs"].int ?? 0
         quiet = v["quiet"].int ?? 0
         wasted = v["wasted"].bool ?? false
+        saves = v["saves"]["said"].text
     }
 
     /// What it costs, for its page's head: "1.4M tokens a run · 5.4M a day · mostly
-    /// quiet". Empty before it has run.
+    /// quiet", and what its script saves. Empty before it has run.
     var words: String {
         if runs == 0 { return "" }
         var w = day == 0 ? "No tokens this week" : "\(ContextFill.short(run)) tokens a run · \(ContextFill.short(day)) a day"
         if quiet * 2 > runs { w += " · mostly quiet" }
+        if !saves.isEmpty { w += " · \(saves)" }
         return w
     }
 
@@ -278,9 +283,14 @@ struct Routine: Equatable, Sendable, Identifiable {
     /// Where it posts: "chat", its agent's chat, or "thread", a thread of its own.
     var post: String
     var event: RoutineEvent?
-    /// Its gate's command, and the seconds it may take. Empty for none.
+    /// Its gate's command or Calx script, and the seconds it may take. Both empty for none.
     var gate: String
+    var calx: String
     var gateSeconds: Int
+    /// Whether it runs its script only, never waking its agent.
+    var scriptOnly: Bool
+    /// What its gate may choose for a run, in words: "The gate may choose model: …".
+    var gateMaySaid: String
     /// Its runs' model and effort, values its agent's program offers; empty for its
     /// agent's own.
     var model: String
@@ -306,7 +316,10 @@ struct Routine: Equatable, Sendable, Identifiable {
         post = r["post"].string ?? "chat"
         event = RoutineEvent(r["event"])
         gate = r["gate"]["command"].text
+        calx = r["gate"]["calx"].text
         gateSeconds = r["gate"]["timeout"].int ?? 0
+        scriptOnly = r["script_only"].bool ?? false
+        gateMaySaid = r["gate_may_said"].text
         model = r["model"].text
         effort = r["effort"].text
         cost = RoutineCost(r["cost"])
@@ -377,7 +390,11 @@ struct RoutineDraft: Equatable, Sendable {
     var schedule = Schedule()
     var event = RoutineEvent()
     var gate = ""
+    /// Its Calx script, and whether that's what its page shows, in place of a command.
+    var calx = ""
+    var useCalx = false
     var gateSeconds = ""
+    var scriptOnly = false
     var model = ""
     var effort = ""
     var on = true
@@ -405,7 +422,10 @@ struct RoutineDraft: Equatable, Sendable {
         schedule = r.schedule
         event = r.event ?? RoutineEvent()
         gate = r.gate
-        gateSeconds = r.gate.isEmpty || r.gateSeconds <= 0 ? "" : String(r.gateSeconds)
+        calx = r.calx
+        useCalx = !r.calx.isEmpty
+        scriptOnly = r.scriptOnly
+        gateSeconds = (r.gate.isEmpty && r.calx.isEmpty) || r.gateSeconds <= 0 ? "" : String(r.gateSeconds)
         model = r.model
         effort = r.effort
         on = r.on
@@ -459,13 +479,7 @@ struct RoutineDraft: Equatable, Sendable {
         case "hours", "days": s.repeatKind = repeatKind
         default: s.repeatKind = ""
         }
-        let command = gate.trimmingCharacters(in: .whitespacesAndNewlines)
-        let seconds = gateSeconds.trimmingCharacters(in: .whitespaces)
-        var timeout = 0
-        if !command.isEmpty && !seconds.isEmpty {
-            guard let n = Int(seconds), n > 0 else { return .missing("Write the seconds its gate may take as a number.") }
-            timeout = n
-        }
+        guard let script = gateJSON else { return .missing("Write the seconds its script may take as a number.") }
         var args: [String: JSON] = [
             "name": JSON(name.trimmingCharacters(in: .whitespaces)), "agent": JSON(agent), "prompt": JSON(prompt),
             "schedule": s.json, "notify": JSON(notify), "on": JSON(on), "catch_up": JSON(catchUp),
@@ -480,7 +494,8 @@ struct RoutineDraft: Equatable, Sendable {
         } else if eventAlone {
             args["event"] = .null
         }
-        args["gate"] = command.isEmpty ? .null : timeout > 0 ? ["command": JSON(command), "timeout": JSON(timeout)] : ["command": JSON(command)]
+        args["gate"] = script
+        args["script_only"] = JSON(scriptOnly)
         let options = agents.first { $0.id == agent }?.routinePicks ?? []
         func offered(_ category: String, _ value: String) -> String {
             guard let o = options.first(where: { $0.category == category }) else { return value }
@@ -493,6 +508,29 @@ struct RoutineDraft: Equatable, Sendable {
 }
 
 extension RoutineDraft {
+    /// Its script as `routine.put` and `routine.test` take it: the one its page shows, a
+    /// command or a Calx script, null for none; nil for seconds that aren't a number.
+    var gateJSON: JSON? {
+        let text = useCalx ? calx : gate.trimmingCharacters(in: .whitespacesAndNewlines)
+        if text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { return .null }
+        let seconds = gateSeconds.trimmingCharacters(in: .whitespaces)
+        var g: [String: JSON] = [useCalx ? "calx" : "command": JSON(text)]
+        if !seconds.isEmpty {
+            guard let n = Int(seconds), n > 0 else { return nil }
+            g["timeout"] = JSON(n)
+        }
+        return .object(g)
+    }
+
+    /// `routine.test` for its script as the page has it, with `id` for the command.
+    func test(id cmd: String) -> RoutineSave {
+        if agent.isEmpty { return .missing("Pick the agent it runs.") }
+        guard let script = gateJSON else { return .missing("Write the seconds its script may take as a number.") }
+        var args: [String: JSON] = ["gate": script, "agent": JSON(agent), "script_only": JSON(scriptOnly)]
+        if !id.isEmpty { args["id"] = JSON(id) }
+        return .frame(["t": "cmd", "id": JSON(cmd), "name": "routine.test", "args": .object(args)])
+    }
+
     /// Its schedule as `routine.put` would take it now, or null for none: for its page's
     /// Next.
     var scheduleJSON: JSON {
@@ -536,6 +574,9 @@ struct RoutineRun: Equatable, Sendable, Identifiable {
     var posted: [String]
     /// Whether its gate found nothing new, so its agent wasn't woken.
     var gateQuiet: Bool
+    /// What its gate or script printed, and what the gate chose for it, in words.
+    var printed: String
+    var chosen: String
     var id: String { run }
 
     init(_ v: JSON) {
@@ -549,6 +590,8 @@ struct RoutineRun: Equatable, Sendable, Identifiable {
         said = v["said"].text
         posted = v["posted"].array.compactMap(\.string)
         gateQuiet = v["status"].text == "quiet" && v["woke"].bool == false
+        printed = v["printed"].text
+        chosen = v["chosen"].text
     }
 
     /// How it ended, for its mark and pill: a run that handed its answer on to its flow
@@ -604,6 +647,46 @@ struct RoutineRun: Equatable, Sendable, Identifiable {
         default: return "\(secs / 3600) h \(secs % 3600 / 60) min"
         }
     }
+}
+
+/// A routine's script run as a test (protocol.md, `routine.test`): how it would have gone,
+/// in a line, and what it printed, posted and wrote (desktop/src/model.rs's `RoutineTest`).
+struct RoutineTest: Equatable, Sendable {
+    /// wake, quiet or failed; "running" until it's back.
+    var status = "running"
+    var said = ""
+    var printed = ""
+    var errors = ""
+    var posted: [String] = []
+    var wrote: [String] = []
+
+    init() {}
+
+    init(_ v: JSON) {
+        status = v["status"].text
+        said = v["said"].text.isEmpty ? v["error"].text : v["said"].text
+        printed = v["printed"].text
+        errors = v["errors"].text
+        posted = v["posted"].array.compactMap(\.string)
+        wrote = v["wrote"].array.compactMap(\.string)
+    }
+
+    /// Its status in a word, for its pill.
+    var pill: String {
+        switch status {
+        case "running": return "Running"
+        case "wake": return "Wakes"
+        case "quiet": return "Quiet"
+        default: return "Failed"
+        }
+    }
+}
+
+/// A key a routine's script keeps between runs (`loom state`), and its value.
+struct RoutineStateEntry: Equatable, Sendable, Identifiable {
+    var key: String
+    var value: String
+    var id: String { key }
 }
 
 /// When a routine runs next, for its page's Next: each time with its day, "Today 16:00",
@@ -756,10 +839,40 @@ extension Model {
     /// Asks for routine `id`'s runs, newest first, for its page's History; nil forgets them,
     /// as the page closes.
     func loadRoutineRuns(_ routine: String?) -> JSON? {
-        if routineRunsFor != routine { routineRuns = [] }
+        if routineRunsFor != routine {
+            routineRuns = []
+            routineState = []
+            routineTest = nil
+            routineTestAsk = ""
+        }
         routineRunsFor = routine
         guard let routine else { return nil }
         return ["t": "cmd", "id": JSON(id("app.runs_of_routine")), "name": "routine.runs", "args": ["id": JSON(routine), "limit": 100]]
+    }
+
+    /// Asks for what routine `id`'s script keeps between runs (`routine.state`).
+    func loadRoutineState(_ routine: String) -> JSON {
+        ["t": "cmd", "id": JSON(id("app.routine_state")), "name": "routine.state", "args": ["id": JSON(routine)]]
+    }
+
+    /// Takes `key` out of routine `id`'s state.
+    func forgetRoutineState(_ routine: String, key: String) -> JSON {
+        ["t": "cmd", "id": JSON(id("app.routine_state")), "name": "routine.state", "args": ["id": JSON(routine), "set": .object([key: .null])]]
+    }
+
+    /// Runs the page's script once as a test: the frame to send, or what's missing, which
+    /// shows as a notice. Nothing of it is kept.
+    func testRoutine(_ d: RoutineDraft) -> JSON? {
+        let ask = id("app.routine_test")
+        switch d.test(id: ask) {
+        case .frame(let f):
+            routineTestAsk = ask
+            routineTest = RoutineTest()
+            return f
+        case .missing(let why):
+            notice = why
+            return nil
+        }
     }
 
     /// Asks when `schedule` (as `routine.put` takes it) would run next, for its page's
@@ -783,13 +896,34 @@ extension Model {
         return d.scheduleJSON == scheduleNextFor ? scheduleNext : []
     }
 
-    /// The answers to `routine.put`, `routine.delete`, `routine.runs`, `routine.next` and
+    /// The answers to `routine.put`, `routine.delete`, `routine.runs`, `routine.test`, `routine.state`, `routine.next` and
     /// `defaults.get`. Gives whether it was one.
     func routineResult(_ f: JSON) -> Bool {
         let id = f["id"].text
         let error = f["error"].isNull ? nil : f["error"]["message"].string ?? f["error"]["code"].text
         if id.hasPrefix("app.runs_of_routine") {
             if error == nil, routineRunsFor != nil { routineRuns = f["value"]["runs"].array.map(RoutineRun.init) }
+            return true
+        }
+        if id.hasPrefix("app.routine_test") {
+            if id == routineTestAsk {
+                if let error {
+                    var t = RoutineTest()
+                    t.status = "failed"
+                    t.said = error
+                    routineTest = t
+                } else {
+                    routineTest = RoutineTest(f["value"])
+                }
+            }
+            return true
+        }
+        if id.hasPrefix("app.routine_state") {
+            if let error {
+                notice = error
+            } else if case .object(let o) = f["value"]["state"] {
+                routineState = o.map { RoutineStateEntry(key: $0.key, value: $0.value.text) }.sorted { $0.key < $1.key }
+            }
             return true
         }
         if id.hasPrefix("app.schedule_next") {

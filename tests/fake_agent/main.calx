@@ -1537,7 +1537,7 @@ fn prompt_record(values: Map<String, String>, session: String, params: Json, tur
     line.insert("model", js(value_of(values.copy(), "model")))
     line.insert("effort", js(value_of(values, "effort")))
     line.insert("text", js(text))
-    line.insert("context", js(if context.len() > 2000 { context[..2000].copy() } else { context.copy() }))
+    line.insert("context", js(if context.len() > 8000 { context[..8000].copy() } else { context.copy() }))
     return Json.Object(line)
 }
 

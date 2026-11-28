@@ -26,7 +26,7 @@ struct Command {
     does: str
 }
 
-const COMMANDS: [Command; 105] = [
+const COMMANDS: [Command; 107] = [
     Command { name: "conversation.create", args: "agent, title?", does: "Makes a conversation with an agent." },
     Command { name: "conversation.rename", args: "conversation, title", does: "Renames a conversation." },
     Command { name: "conversation.branch", args: "message, title?", does: "Branches a chat at a message: a new conversation that goes on from there, apart from the chat." },
@@ -67,11 +67,13 @@ const COMMANDS: [Command; 105] = [
     Command { name: "rule.delete", args: "id", does: "Removes a rule." },
     Command { name: "rule.check", args: "agent?, site?, path?, command?, tool?, effect?, started_by?, kind?", does: "What an action would get: allowed, asked or denied, and which rule or the permission mode decided." },
     Command { name: "routine.list", args: "", does: "Routines, with when each runs next and how it last went." },
-    Command { name: "routine.put", args: #"name, agent, prompt, schedule ({every: minutes}; {times: [HH:MM, ...], days?: [mon, ...]}; or {every: minutes, from: HH:MM, to: HH:MM, days?}), tz?, notify?, on?, catch_up?, webhook?, event? ({integration?, server?, target: {board, card?} or {thread}, kind? (moved, created, commented, assigned or all), to? (a status)}, null takes it off), flow? (steps of name, agent, prompt and after: the steps each waits for); or id and what changes"#, does: "Makes or changes a routine." },
+    Command { name: "routine.put", args: #"name, agent, prompt, schedule ({every: minutes}; {times: [HH:MM, ...], days?: [mon, ...]}; or {every: minutes, from: HH:MM, to: HH:MM, days?}), tz?, notify?, on?, catch_up?, webhook?, event? ({integration?, server?, target: {board, card?} or {thread}, kind? (moved, created, commented, assigned or all), to? (a status)}, null takes it off), flow? (steps of name, agent, prompt and after: the steps each waits for), gate? ({command, timeout?} or {calx, timeout?}: its script), script_only? (its script does it all, and no agent wakes), gate_may? ({model?, effort?, agent?}: lists of what the gate's first line may choose); or id and what changes"#, does: "Makes or changes a routine." },
     Command { name: "routine.run", args: "id", does: "Runs a routine now." },
     Command { name: "routine.next", args: "schedule, tz?", does: "When a schedule would run next: its next three times, and the schedule in words." },
     Command { name: "routine.calendar", args: "from, to (Unix ms, up to 8 days apart)", does: "When each routine that is on runs between two times, for a calendar." },
     Command { name: "routine.runs", args: "id, before? (a run id), limit? (1 to 100, 20 if left out)", does: "A routine's runs, newest first: when each ran, how it ended, what its agent answered and what it posted." },
+    Command { name: "routine.test", args: #"id? (a routine), gate? ({command} or {calx}, in place of its own), agent?, script_only?"#, does: "Runs a routine's script once as a test: what it printed, what it would post and keep, and whether it would wake its agent. It only reads, and keeps and posts nothing." },
+    Command { name: "routine.state", args: #"id, set? ({key: value, or null to take one away})"#, does: "What a routine's script keeps between runs, and changes to it." },
     Command { name: "routine.stop", args: "id", does: "Stops the flow a routine has running: its steps that have not started never do." },
     Command { name: "flow.list", args: "", does: "The routine flows running, with how far each has got." },
     Command { name: "routine.delete", args: "id", does: "Deletes a routine." },
@@ -154,7 +156,7 @@ pub fn access(name: String) -> Access {
     if name == "room.resend" or name == "room.forget" { return Access.Never(String("Where a message in a group chat goes is your person's to correct, in the app. To give one to another member, use hand_off.")) }
     if name.starts_with("scripts.") { return Access.Never(String("Scripts are your person's own: they turn them on in the app.")) }
     if name.starts_with("t3.") { return Access.Never(String("T3's threads in the chat are your person's app's. To work with T3, use the T3 tools you have, if you have them.")) }
-    let runs = ["conversation.create", "conversation.rename", "conversation.branch", "conversation.move", "messages.list", "messages.search", "messages.pinned", "message.pin", "room.create", "room.update", "agent.create", "agent.update", "agent.revisions", "agent.rollback", "activity.list", "memory.list", "memory.put", "table.list", "table.create", "table.write", "table.rows", "table.delete_rows", "profile.get", "profile.put", "voice.get", "defaults.get", "rule.list", "rule.check", "routine.list", "routine.put", "routine.run", "routine.runs", "routine.next", "routine.calendar", "routine.stop", "flow.list", "watch.list", "watch.put", "task.list", "task.start", "task.pause", "task.resume", "task.cancel", "task.retry", "queue.list", "queue.edit", "queue.order", "queue.drop", "skill.list", "skill.get", "skill.put", "plugin.list", "plugin.get", "plugin.put", "plugin.revisions", "mcp.list", "mcp.test", "secret.list", "acp.list", "acp.registry", "device.list"]
+    let runs = ["conversation.create", "conversation.rename", "conversation.branch", "conversation.move", "messages.list", "messages.search", "messages.pinned", "message.pin", "room.create", "room.update", "agent.create", "agent.update", "agent.revisions", "agent.rollback", "activity.list", "memory.list", "memory.put", "table.list", "table.create", "table.write", "table.rows", "table.delete_rows", "profile.get", "profile.put", "voice.get", "defaults.get", "rule.list", "rule.check", "routine.list", "routine.put", "routine.run", "routine.runs", "routine.test", "routine.state", "routine.next", "routine.calendar", "routine.stop", "flow.list", "watch.list", "watch.put", "task.list", "task.start", "task.pause", "task.resume", "task.cancel", "task.retry", "queue.list", "queue.edit", "queue.order", "queue.drop", "skill.list", "skill.get", "skill.put", "plugin.list", "plugin.get", "plugin.put", "plugin.revisions", "mcp.list", "mcp.test", "secret.list", "acp.list", "acp.registry", "device.list"]
     if name.starts_with("proposal.") { return Access.Never(String("Proposals are your person's to keep or drop, in the app. Use propose_skill or propose_note to make one.")) }
     for r in runs {
         if name == r { return Access.Runs }
@@ -230,7 +232,7 @@ fn reading_runs_and_harm_asks() {
     for c in COMMANDS {
         if let Access.Never(_) = access(String(c.name)) { panic("{c.name} is listed but never runs") }
     }
-    assert(catalog().len() == 105 and access(String("routine.runs")) == Access.Runs and access(String("voice.get")) == Access.Runs)
+    assert(catalog().len() == 107 and access(String("routine.runs")) == Access.Runs and access(String("voice.get")) == Access.Runs)
     assert(access(String("watch.put")) == Access.Runs and access(String("watch.remove")) == Access.Asks(String("delete")))
     assert(access(String("message.delete")) == Access.Asks(String("delete")))
     assert(access(String("device.list")) == Access.Runs)

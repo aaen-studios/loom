@@ -140,6 +140,7 @@ struct RoutinePage: View {
         .onAppear {
             fill()
             session.send(model.loadRoutineRuns(routine.isEmpty ? nil : routine))
+            if !routine.isEmpty { session.send(model.loadRoutineState(routine)) }
         }
         .onDisappear { _ = model.loadRoutineRuns(nil) }
         // A routine's page opened before the routines came fills once its routine has.
@@ -206,33 +207,23 @@ struct RoutinePage: View {
                 } label: {
                     Text("Agent").font(Fonts.body).foregroundStyle(P.ink)
                 }
-                VStack(alignment: .leading, spacing: Tokens.Space.xs) {
-                    Text("Prompt").font(Fonts.caption).foregroundStyle(P.ink3)
-                    TextField("What it's asked each time", text: d.prompt, axis: .vertical)
-                        .lineLimit(2...10)
-                }
-                .padding(.vertical, Tokens.Space.xs)
-                HStack {
-                    Text("Gate").font(Fonts.body).foregroundStyle(P.ink)
-                    TextField("Command", text: d.gate)
-                        .font(Fonts.code)
-                        .multilineTextAlignment(.trailing)
-                        .textInputAutocapitalization(.never)
-                        .autocorrectionDisabled()
-                        .foregroundStyle(P.ink2)
-                }
-                if !d.wrappedValue.gate.trimmingCharacters(in: .whitespaces).isEmpty {
-                    HStack {
-                        Text("Seconds").font(Fonts.body).foregroundStyle(P.ink)
-                        TextField("60", text: d.gateSeconds)
-                            .keyboardType(.numberPad)
-                            .multilineTextAlignment(.trailing)
-                            .foregroundStyle(P.ink3)
+                toggle("Script only", d.scriptOnly)
+                // One that runs its script only asks its agent nothing: no prompt, model
+                // or effort.
+                if !d.wrappedValue.scriptOnly {
+                    VStack(alignment: .leading, spacing: Tokens.Space.xs) {
+                        Text("Prompt").font(Fonts.caption).foregroundStyle(P.ink3)
+                        TextField("What it's asked each time", text: d.prompt, axis: .vertical)
+                            .lineLimit(2...10)
                     }
-                }
-                if let agent {
-                    ForEach(agent.routinePicks, id: \.id) { option in
-                        pick(option, agent, d)
+                    .padding(.vertical, Tokens.Space.xs)
+                    if let agent {
+                        ForEach(agent.routinePicks, id: \.id) { option in
+                            pick(option, agent, d)
+                        }
+                    }
+                    if let said = saved?.gateMaySaid, !said.isEmpty {
+                        Text(said).font(Fonts.caption).foregroundStyle(P.ink3)
                     }
                 }
             } header: {
@@ -244,6 +235,7 @@ struct RoutinePage: View {
                         .frame(maxWidth: .infinity)
                 }
             }
+            script(saved, d)
             Section("When") {
                 when(d)
                 // When it runs next, on a schedule.
@@ -268,6 +260,22 @@ struct RoutinePage: View {
                 if let saved, !saved.hook.isEmpty, d.wrappedValue.webhook || d.wrappedValue.byHookAlone {
                     copyRow("Address", hookAddress(server: server, hook: saved.hook), shown: hookAddress(server: server, hook: saved.hook))
                     copyRow("Secret", saved.secret, shown: String(repeating: "•", count: 12))
+                }
+            }
+            if let saved, !model.routineState.isEmpty, model.routineRunsFor == saved.id {
+                Section("State") {
+                    ForEach(model.routineState) { entry in
+                        HStack(spacing: Tokens.Space.s) {
+                            Text(entry.key).font(Fonts.code).foregroundStyle(P.ink)
+                            Spacer(minLength: Tokens.Space.m)
+                            Text(entry.value).font(Fonts.code).foregroundStyle(P.ink3).lineLimit(1).truncationMode(.middle)
+                        }
+                        .swipeActions {
+                            Button("Forget", role: .destructive) {
+                                session.send(model.forgetRoutineState(saved.id, key: entry.key))
+                            }
+                        }
+                    }
                 }
             }
             if runsShown {
@@ -304,6 +312,52 @@ struct RoutinePage: View {
                 proxy.scrollTo("history", anchor: .bottom)
             }
         }
+        }
+    }
+
+    /// The routine's script: a command or a Calx script, the seconds it may take, and Run
+    /// test, with how its test went under it, or else what its last run printed.
+    private func script(_ saved: Routine?, _ d: Binding<RoutineDraft>) -> some View {
+        let model = session.model
+        let testing = model.routineTest?.status == "running"
+        return Section("Script") {
+            Picker(selection: d.useCalx) {
+                Text("Command").tag(false)
+                Text("Calx").tag(true)
+            } label: {
+                EmptyView()
+            }
+            .pickerStyle(.segmented)
+            Group {
+                if d.wrappedValue.useCalx {
+                    TextField("fn main() { … }", text: d.calx, axis: .vertical)
+                        .lineLimit(4...20)
+                } else {
+                    TextField("gh pr view 8006 --json state", text: d.gate, axis: .vertical)
+                        .lineLimit(1...4)
+                }
+            }
+            .font(Fonts.code)
+            .textInputAutocapitalization(.never)
+            .autocorrectionDisabled()
+            .foregroundStyle(P.ink2)
+            HStack {
+                Text("Seconds").font(Fonts.body).foregroundStyle(P.ink)
+                TextField("60", text: d.gateSeconds)
+                    .keyboardType(.numberPad)
+                    .multilineTextAlignment(.trailing)
+                    .foregroundStyle(P.ink3)
+            }
+            Button(testing ? "Running" : "Run test") {
+                if let f = model.testRoutine(d.wrappedValue) { session.send(f) }
+            }
+            .disabled(testing)
+            .foregroundStyle(P.ink)
+            if let t = model.routineTest, model.routineRunsFor == saved?.id {
+                ScriptResult(test: t)
+            } else if let last = model.routineRuns.first(where: { !$0.printed.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }) {
+                ScriptOut(label: "Last run", text: last.printed)
+            }
         }
     }
 
@@ -516,6 +570,47 @@ private struct TimesRow: View {
     }
 }
 
+/// What a routine's script printed, or posted or wrote, under its label, in code.
+private struct ScriptOut: View {
+    var label: String
+    var text: String
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text(label).font(Fonts.ui(Tokens.PhoneSize.caption, .medium)).foregroundStyle(P.ink3)
+            Text(text.trimmingCharacters(in: .whitespacesAndNewlines))
+                .font(Fonts.code)
+                .foregroundStyle(P.ink2)
+                .lineLimit(8)
+                .textSelection(.enabled)
+        }
+    }
+}
+
+/// How a routine's test run went: a pill and its line, with what it printed, posted and
+/// wrote.
+private struct ScriptResult: View {
+    var test: RoutineTest
+
+    var body: some View {
+        let tint = test.status == "failed" ? P.bad : test.status == "running" ? P.ink3 : P.ink
+        VStack(alignment: .leading, spacing: Tokens.Space.s) {
+            HStack(spacing: Tokens.Space.s) {
+                Text(test.pill)
+                    .font(Fonts.ui(Tokens.PhoneSize.caption, .medium))
+                    .foregroundStyle(tint)
+                    .padding(.horizontal, 6).padding(.vertical, 1)
+                    .background(tint.opacity(0.16), in: RoundedRectangle(cornerRadius: Tokens.Radius.row))
+                Text(test.said).font(Fonts.small).foregroundStyle(P.ink2)
+            }
+            if !test.printed.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { ScriptOut(label: "Printed", text: test.printed) }
+            if !test.errors.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { ScriptOut(label: "Errors", text: test.errors) }
+            ForEach(Array(test.posted.enumerated()), id: \.offset) { _, text in ScriptOut(label: "Posts", text: text) }
+            if !test.wrote.isEmpty { ScriptOut(label: "State", text: test.wrote.joined(separator: " · ")) }
+        }
+    }
+}
+
 /// A routine's runs (PLAN.md, "The routine's page"): a strip of its last 20, each coloured
 /// by how it ended, over the runs, newest first: when, how it ended, its line and how long
 /// it took. A tap opens one to what it posted, why it failed and what to do, or its answer.
@@ -569,6 +664,9 @@ private struct RunHistory: View {
             if !said.isEmpty && !r.posted.contains(where: { $0.trimmingCharacters(in: .whitespacesAndNewlines) == said }) {
                 part("Its answer", said, P.ink2)
             }
+            if !r.chosen.isEmpty { part("Chosen", r.chosen, P.ink2) }
+            let printed = r.printed.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !printed.isEmpty { ScriptOut(label: "Printed", text: printed) }
         }
     }
 

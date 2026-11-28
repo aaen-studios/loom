@@ -1324,10 +1324,15 @@ pub struct Routine {
     pub flow: Vec<FlowStep>,
     /// What outside loom it runs on, if anything (PLAN.md, "Watching outside events").
     pub event: Option<watch::RoutineEvent>,
-    /// Its gate (PLAN.md, "Routines"): a command that runs before its agent wakes, and
-    /// the seconds it may take. Empty for none.
+    /// Its gate (PLAN.md, "Routines"): a command or a Calx script that runs before its
+    /// agent wakes, and the seconds it may take. Both empty for none.
     pub gate: String,
+    pub calx: String,
     pub gate_seconds: i64,
+    /// Whether it runs its script only, never waking its agent.
+    pub script_only: bool,
+    /// What its gate may choose for a run, in words: "The gate may choose model: …".
+    pub gate_may_said: String,
     /// The model and effort its runs use, as values its agent's program takes. Empty for
     /// its agent's own.
     pub model: String,
@@ -1346,6 +1351,9 @@ pub struct RoutineCost {
     pub runs: i64,
     pub quiet: i64,
     pub wasted: bool,
+    /// What its script saves, in words: "80% of runs used no tokens · 1.2M tokens saved
+    /// by its script". Empty before it has run.
+    pub saves: String,
 }
 
 impl RoutineCost {
@@ -1357,6 +1365,7 @@ impl RoutineCost {
             runs: n("runs"),
             quiet: n("quiet"),
             wasted: v.get("wasted").and_then(Value::as_bool).unwrap_or(false),
+            saves: v.get("saves").map(|x| s(x, "said")).unwrap_or_default(),
         }
     }
 
@@ -1377,6 +1386,9 @@ impl RoutineCost {
         };
         if self.quiet * 2 > self.runs {
             words.push_str(" · mostly quiet");
+        }
+        if !self.saves.is_empty() {
+            words = format!("{words} · {}", self.saves);
         }
         words
     }
@@ -1640,6 +1652,12 @@ impl Routine {
                 .unwrap_or_default(),
             event: watch::RoutineEvent::of(r.get("event").unwrap_or(&Value::Null)),
             gate: r.get("gate").map(|g| s(g, "command")).unwrap_or_default(),
+            calx: r.get("gate").map(|g| s(g, "calx")).unwrap_or_default(),
+            script_only: r
+                .get("script_only")
+                .and_then(Value::as_bool)
+                .unwrap_or(false),
+            gate_may_said: s(r, "gate_may_said"),
             gate_seconds: r
                 .get("gate")
                 .and_then(|g| g.get("timeout"))
@@ -1671,6 +1689,63 @@ pub struct RoutineRun {
     pub posted: Vec<String>,
     /// Whether its gate found nothing new, so its agent wasn't woken.
     pub gate_quiet: bool,
+    /// What its gate or script printed, what the gate chose for it in words, and
+    /// whether it ran a script only.
+    pub printed: String,
+    pub chosen: String,
+    pub script: bool,
+}
+
+/// A routine's script run as a test (protocol.md, `routine.test`): how it would have
+/// gone, in a line, and what it printed, posted and wrote.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct RoutineTest {
+    /// wake, quiet or failed; "running" until it's back.
+    pub status: String,
+    pub said: String,
+    pub printed: String,
+    pub errors: String,
+    pub posted: Vec<String>,
+    pub wrote: Vec<String>,
+}
+
+impl RoutineTest {
+    fn of(v: &Value) -> RoutineTest {
+        let list = |k: &str| {
+            v.get(k)
+                .and_then(Value::as_array)
+                .map(|a| {
+                    a.iter()
+                        .filter_map(Value::as_str)
+                        .map(String::from)
+                        .collect()
+                })
+                .unwrap_or_default()
+        };
+        let status = s(v, "status");
+        let said = match s(v, "said") {
+            said if said.is_empty() => s(v, "error"),
+            said => said,
+        };
+        RoutineTest {
+            status,
+            said,
+            printed: s(v, "printed"),
+            errors: s(v, "errors"),
+            posted: list("posted"),
+            wrote: list("wrote"),
+        }
+    }
+
+    /// Its status in a word, for its pill.
+    pub fn pill(&self) -> &'static str {
+        match self.status.as_str() {
+            "running" => "Running",
+            "wake" => "Wakes",
+            "quiet" => "Quiet",
+            _ => "Failed",
+        }
+    }
 }
 
 /// How a run ended, as the history colours it.
@@ -1707,6 +1782,9 @@ impl RoutineRun {
                 .unwrap_or_default(),
             gate_quiet: v.get("status").and_then(Value::as_str) == Some("quiet")
                 && v.get("woke").and_then(Value::as_bool) == Some(false),
+            printed: s(v, "printed"),
+            chosen: s(v, "chosen"),
+            script: v.get("script").and_then(Value::as_bool).unwrap_or(false),
         }
     }
 
@@ -1801,14 +1879,35 @@ pub struct RoutineForm {
     pub flow: Option<Vec<FlowStep>>,
     /// Its event as `routine.put` takes it, null to take it off, or none to leave it.
     pub event: Option<Value>,
-    /// Its gate's command, and the seconds it may take (0 for the instance's default).
-    /// An empty command takes the gate off.
+    /// Its gate's command or Calx script (the command when `calx` is empty), and the
+    /// seconds it may take (0 for the instance's default). Both empty take the gate off.
     pub gate: String,
+    pub calx: String,
     pub gate_seconds: i64,
+    /// Whether it runs its script only, never waking its agent.
+    pub script_only: bool,
     /// Its runs' model and effort, values its agent's program takes; empty for its
     /// agent's own.
     pub model: String,
     pub effort: String,
+}
+
+impl RoutineForm {
+    /// Its gate as `routine.put` and `routine.test` take it, or null for none.
+    pub fn gate_json(&self) -> Value {
+        let (key, text) = match self.calx.trim() {
+            "" => ("command", self.gate.trim()),
+            _ => ("calx", self.calx.as_str()),
+        };
+        if text.is_empty() {
+            return Value::Null;
+        }
+        let mut g = json!({ key: text });
+        if self.gate_seconds > 0 {
+            g["timeout"] = json!(self.gate_seconds);
+        }
+        g
+    }
 }
 
 /// One entry of the activity log.
@@ -6470,6 +6569,12 @@ pub struct Model {
     /// The open routine's runs, newest first, and which routine they're for.
     pub routine_runs: Vec<RoutineRun>,
     routine_runs_for: Option<String>,
+    /// What the open routine's script keeps between runs, key and value, by key.
+    pub routine_state: Vec<(String, String)>,
+    /// The routine form's last test run, and the ask, so a late answer to an older one
+    /// is dropped.
+    pub routine_test: Option<RoutineTest>,
+    routine_test_id: String,
     /// When the schedule in the routine form would run next (`routine.next`), the
     /// schedule that was asked about, and the ask, so a late answer to an older one is
     /// dropped.
@@ -6834,6 +6939,7 @@ impl Model {
             out.push(self.load_flows());
             if let Some(routine) = self.routine_runs_for.clone() {
                 out.extend(self.load_routine_runs(Some(&routine)));
+                out.push(self.load_routine_state(&routine));
             }
             let (from, to) = self.routine_week_span;
             if to > from {
@@ -9238,6 +9344,33 @@ impl Model {
                 .and_then(Value::as_array)
                 .map(|rs| rs.iter().map(RoutineRun::of).collect())
                 .unwrap_or_default();
+        } else if id.starts_with("app.routine_test") {
+            if id == self.routine_test_id {
+                self.routine_test = Some(match (f.get("value"), f.get("error")) {
+                    (Some(v), _) => RoutineTest::of(v),
+                    (None, e) => RoutineTest {
+                        status: "failed".into(),
+                        said: e.map(|e| s(e, "message")).unwrap_or_default(),
+                        ..RoutineTest::default()
+                    },
+                });
+            }
+        } else if id.starts_with("app.routine_state") {
+            match (
+                f.pointer("/value/state").and_then(Value::as_object),
+                f.get("error"),
+            ) {
+                (Some(state), _) => {
+                    let mut kept: Vec<(String, String)> = state
+                        .iter()
+                        .map(|(k, v)| (k.clone(), v.as_str().unwrap_or_default().to_string()))
+                        .collect();
+                    kept.sort();
+                    self.routine_state = kept;
+                }
+                (None, Some(e)) => self.notices.push(s(e, "message")),
+                _ => {}
+            }
         } else if id.starts_with("app.schedule_next") {
             // A schedule that isn't one yet, while it's typed, has no next runs.
             if id == self.schedule_next_id {
@@ -11778,15 +11911,40 @@ impl Model {
         if let Some(event) = &f.event {
             args["event"] = event.clone();
         }
-        let command = f.gate.trim();
-        args["gate"] = match (command.is_empty(), f.gate_seconds) {
-            (true, _) => Value::Null,
-            (false, s) if s > 0 => json!({"command": command, "timeout": s}),
-            (false, _) => json!({"command": command}),
-        };
+        args["gate"] = f.gate_json();
+        args["script_only"] = json!(f.script_only);
         args["model"] = json!(f.model);
         args["effort"] = json!(f.effort);
         json!({"t": "cmd", "id": cmd, "name": "routine.put", "args": args})
+    }
+
+    /// Runs the routine form's script once as a test (`routine.test`): routine `f.id`'s,
+    /// or one not kept yet, as it's typed. Nothing of it is kept.
+    pub fn test_routine(&mut self, f: &RoutineForm) -> Value {
+        let cmd = self.id("app.routine_test");
+        self.routine_test_id = cmd.clone();
+        self.routine_test = Some(RoutineTest {
+            status: "running".into(),
+            ..RoutineTest::default()
+        });
+        let mut args =
+            json!({"gate": f.gate_json(), "agent": f.agent, "script_only": f.script_only});
+        if !f.id.is_empty() {
+            args["id"] = json!(f.id);
+        }
+        json!({"t": "cmd", "id": cmd, "name": "routine.test", "args": args})
+    }
+
+    /// Asks for what routine `id`'s script keeps between runs (`routine.state`).
+    pub fn load_routine_state(&mut self, id: &str) -> Value {
+        let cmd = self.id("app.routine_state");
+        json!({"t": "cmd", "id": cmd, "name": "routine.state", "args": {"id": id}})
+    }
+
+    /// Takes key `key` out of routine `id`'s state.
+    pub fn forget_routine_state(&mut self, id: &str, key: &str) -> Value {
+        let cmd = self.id("app.routine_state");
+        json!({"t": "cmd", "id": cmd, "name": "routine.state", "args": {"id": id, "set": {key: Value::Null}}})
     }
 
     /// Asks for the routine flows running.
@@ -11806,6 +11964,9 @@ impl Model {
     pub fn load_routine_runs(&mut self, id: Option<&str>) -> Option<Value> {
         if self.routine_runs_for.as_deref() != id {
             self.routine_runs.clear();
+            self.routine_state.clear();
+            self.routine_test = None;
+            self.routine_test_id.clear();
         }
         self.routine_runs_for = id.map(String::from);
         let id = id?;
@@ -17002,6 +17163,93 @@ mod tests {
             m.save_routine(&default_seconds)["args"]["gate"],
             json!({"command": "./changed.sh"})
         );
+    }
+
+    #[test]
+    fn a_routines_script_is_saved_tested_and_keeps_state() {
+        let r = Routine::of(&json!({
+            "id": "rt_6", "name": "Label new mail", "agent": "a_1", "prompt": "",
+            "gate": {"calx": "fn main() {}", "timeout": 60}, "script_only": true,
+            "gate_may_said": "The gate may choose model: Haiku 5.5",
+            "cost": {"run": 0, "day": 0, "runs": 10, "quiet": 10,
+                     "saves": {"said": "100% of runs used no tokens"}}
+        }));
+        assert_eq!(
+            (r.gate.as_str(), r.calx.as_str(), r.script_only),
+            ("", "fn main() {}", true)
+        );
+        assert_eq!(r.gate_may_said, "The gate may choose model: Haiku 5.5");
+        assert_eq!(
+            r.cost.words(),
+            "No tokens this week · mostly quiet · 100% of runs used no tokens"
+        );
+        // A Calx script is saved as one, with its seconds, and the routine runs it alone.
+        let mut m = Model::new();
+        let form = RoutineForm {
+            id: "rt_6".into(),
+            agent: "a_1".into(),
+            calx: "fn main() {}".into(),
+            gate_seconds: 60,
+            script_only: true,
+            ..RoutineForm::default()
+        };
+        let args = &m.save_routine(&form)["args"];
+        assert_eq!(
+            (&args["gate"], &args["script_only"]),
+            (
+                &json!({"calx": "fn main() {}", "timeout": 60}),
+                &json!(true)
+            )
+        );
+        // Run test sends the script as the form has it; the answer to the last one asked
+        // shows, and a refusal says why.
+        let f = m.test_routine(&form);
+        assert_eq!(f["name"], "routine.test");
+        assert_eq!(f["args"]["id"], "rt_6");
+        assert_eq!(
+            f["args"]["gate"],
+            json!({"calx": "fn main() {}", "timeout": 60})
+        );
+        assert_eq!(
+            m.routine_test.as_ref().map(RoutineTest::pill),
+            Some("Running")
+        );
+        let id = s(&f, "id");
+        m.result(
+            &json!({"id": id, "value": {"status": "quiet", "printed": "{\"wake\": false}",
+            "posted": ["3 labelled"], "wrote": ["set since"], "said": "3 labelled"}}),
+        );
+        let t = m.routine_test.clone().unwrap_or_default();
+        assert_eq!((t.pill(), t.said.as_str()), ("Quiet", "3 labelled"));
+        assert_eq!((t.posted.len(), t.wrote.len()), (1, 1));
+        let again = m.test_routine(&form);
+        m.result(&json!({"id": id, "value": {"status": "wake", "said": "late"}}));
+        assert_eq!(
+            m.routine_test.as_ref().map(RoutineTest::pill),
+            Some("Running")
+        );
+        m.result(&json!({"id": s(&again, "id"), "error": {"code": "bad_request", "message": "No script."}}));
+        let t = m.routine_test.clone().unwrap_or_default();
+        assert_eq!((t.pill(), t.said.as_str()), ("Failed", "No script."));
+        // Its state, by key; Forget takes a key away.
+        let ask = m.load_routine_state("rt_6");
+        m.result(&json!({"id": s(&ask, "id"), "value": {"state": {"since": "17", "count": "4"}}}));
+        assert_eq!(
+            m.routine_state,
+            vec![
+                ("count".to_string(), "4".to_string()),
+                ("since".to_string(), "17".to_string())
+            ]
+        );
+        let forget = m.forget_routine_state("rt_6", "since");
+        assert_eq!(forget["args"]["set"], json!({"since": null}));
+        // A run says what its gate chose and printed.
+        let run = RoutineRun::of(
+            &json!({"run": "rr_1", "status": "done", "printed": "{\"wake\": true}",
+            "chosen": "Ran on Haiku 5.5, chosen by the gate"}),
+        );
+        assert_eq!(run.chosen, "Ran on Haiku 5.5, chosen by the gate");
+        assert_eq!(run.printed, "{\"wake\": true}");
     }
 
     #[test]

@@ -292,12 +292,47 @@ import Testing
         d.gate = "./check.sh"
         d.gateSeconds = "soon"
         #expect(m.saveRoutine(d) == nil)
-        #expect(m.notice == "Write the seconds its gate may take as a number.")
+        #expect(m.notice == "Write the seconds its script may take as a number.")
         d.gateSeconds = ""
         #expect(try #require(m.saveRoutine(d))["args"]["gate"] == ["command": "./check.sh"])
         // A model its agent's program doesn't offer goes back to the agent's own.
         d.model = "gpt-5"
         #expect(try #require(m.saveRoutine(d))["args"]["model"] == "")
+    }
+
+    @Test func aScriptIsSavedTestedAndKeepsState() throws {
+        let m = caughtUp(agents: [])
+        m.take(data("agents", [builder]))
+        let r = Routine(["id": "rt_7", "name": "Label new mail", "agent": "a_1", "prompt": "", "schedule": ["every": 15], "on": true,
+                         "gate": ["calx": "fn main() {}", "timeout": 60], "script_only": true,
+                         "gate_may_said": "The gate may choose model: Haiku 5.5",
+                         "cost": ["runs": 10, "quiet": 10, "saves": ["said": "100% of runs used no tokens"]]])
+        #expect(r.calx == "fn main() {}" && r.scriptOnly && r.gateMaySaid == "The gate may choose model: Haiku 5.5")
+        #expect(r.cost.words == "No tokens this week · mostly quiet · 100% of runs used no tokens")
+        var d = RoutineDraft(r)
+        #expect(d.useCalx && d.scriptOnly && d.gateSeconds == "60")
+        let f = try #require(m.saveRoutine(d))
+        #expect(f["args"]["gate"] == ["calx": "fn main() {}", "timeout": 60] && f["args"]["script_only"] == true)
+        // Run test sends the script as the page has it; the last one asked shows.
+        let test = try #require(m.testRoutine(d))
+        #expect(test["name"] == "routine.test" && test["args"]["id"] == "rt_7" && test["args"]["gate"] == ["calx": "fn main() {}", "timeout": 60])
+        #expect(m.routineTest?.pill == "Running")
+        answer(m, test, ["value": ["status": "quiet", "printed": "{}", "posted": ["3 labelled"], "wrote": ["set since"], "said": "3 labelled"]])
+        #expect(m.routineTest?.pill == "Quiet" && m.routineTest?.said == "3 labelled" && m.routineTest?.wrote == ["set since"])
+        let refused = try #require(m.testRoutine(d))
+        answer(m, refused, ["error": ["code": "bad_request", "message": "No script."]])
+        #expect(m.routineTest?.pill == "Failed" && m.routineTest?.said == "No script.")
+        // The command shows in place of the script: that's what's kept.
+        d.useCalx = false
+        d.gate = "./check.sh"
+        #expect(try #require(m.saveRoutine(d))["args"]["gate"] == ["command": "./check.sh", "timeout": 60])
+        // Its state, by key.
+        let ask = m.loadRoutineState("rt_7")
+        answer(m, ask, ["value": ["state": ["since": "17", "count": "4"]]])
+        #expect(m.routineState == [RoutineStateEntry(key: "count", value: "4"), RoutineStateEntry(key: "since", value: "17")])
+        #expect(m.forgetRoutineState("rt_7", key: "since")["args"]["set"] == ["since": .null])
+        let run = RoutineRun(["run": "rr_1", "status": "done", "printed": "{}", "chosen": "Ran on Haiku 5.5, chosen by the gate"])
+        #expect(run.chosen == "Ran on Haiku 5.5, chosen by the gate" && run.printed == "{}")
     }
 
     @Test func onAnEventSavesThePickedEventOrSaysWhatsMissing() throws {

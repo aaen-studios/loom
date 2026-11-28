@@ -34,9 +34,13 @@ pub(super) struct RoutineUi {
     /// The event it runs on, for "On an event", as it's picked, and the T3 thread typed.
     pub event: model::watch::RoutineEvent,
     pub thread_in: Entity<InputState>,
-    /// Its gate's command and the seconds it may take, as typed.
+    /// Its script, a command or a Calx script (`use_calx` says which shows), and the
+    /// seconds it may take, as typed, and whether it runs its script only.
     pub gate_in: Entity<InputState>,
+    pub calx_in: Entity<TextareaState>,
+    pub use_calx: bool,
     pub gate_seconds_in: Entity<InputState>,
+    pub script_only: bool,
     /// Its runs' model and effort as picked, values its agent's program takes; empty for
     /// its agent's own.
     pub model: String,
@@ -55,9 +59,15 @@ impl RoutineUi {
         let thread_in = field(window, cx, "Thread id");
         let gate_in = field(window, cx, "gh pr view 8006 --json state | ./changed.sh");
         let gate_seconds_in = field(window, cx, "60");
+        let calx_in = cx.new(|cx| {
+            TextareaState::new(window, cx)
+                .auto_grow(6, 24)
+                .placeholder("fn main() { … }")
+        });
         for state in [&thread_in, &gate_in, &gate_seconds_in] {
             super::form_drafts::watch(state, window, cx);
         }
+        super::form_drafts::watch(&calx_in, window, cx);
         // A change to the hours or the window asks again when it runs next.
         for state in [&every_in, &from_in, &to_in] {
             cx.subscribe_in(
@@ -97,7 +107,10 @@ impl RoutineUi {
             event: model::watch::RoutineEvent::default(),
             thread_in,
             gate_in,
+            calx_in,
+            use_calx: false,
             gate_seconds_in,
+            script_only: false,
             model: String::new(),
             effort: String::new(),
         }
@@ -232,6 +245,8 @@ impl Loom {
         if let Some(f) = self.model.load_routine_runs(Some(&r.id)) {
             self.send(f);
         }
+        let f = self.model.load_routine_state(&r.id);
+        self.send(f);
         self.routine_open = Some(Some(r.id.clone()));
         self.routine_schedule_changed(cx);
     }
@@ -1344,40 +1359,241 @@ impl Loom {
         if !said.is_empty() && !r.posted.iter().any(|t| t.trim() == said) {
             detail = detail.child(part("Its answer", said.to_string(), p.ink_2));
         }
+        if !r.chosen.is_empty() {
+            detail = detail.child(part("Chosen", r.chosen.clone(), p.ink_2));
+        }
+        if !r.printed.trim().is_empty() {
+            detail = detail.child(
+                part("Printed", r.printed.trim().to_string(), p.ink_2).font_family(font::MONO),
+            );
+        }
         detail.into_any_element()
     }
 
-    /// The routine's gate (PLAN.md, "Routines"): the command, and the seconds it may take.
-    fn routine_gate_row(&self) -> AnyElement {
+    /// The routine's script (PLAN.md, "Routines"): a command or a Calx script, the
+    /// seconds it may take, and Run test, with how its test went under it, or else what
+    /// its last run printed.
+    fn routine_script_row(&self, cx: &mut Context<Self>) -> AnyElement {
         let p = self.p;
         let ui = &self.routine_ui;
-        self.field_row(
-            "Gate",
+        let calx = ui.use_calx;
+        let mut kinds = div().flex().gap(px(space::XS + 2.0));
+        for (word, is_calx) in [("Command", false), ("Calx", true)] {
+            kinds = kinds.child(
+                self.chip(
+                    format!("routine-script-{word}"),
+                    word,
+                    calx == is_calx,
+                    false,
+                )
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.routine_ui.use_calx = is_calx;
+                    this.keep_draft(cx);
+                    cx.notify();
+                })),
+            );
+        }
+        let testing =
+            self.model.routine_test.as_ref().map(|t| t.status.as_str()) == Some("running");
+        let test = self
+            .small_button("test-routine", "Run test", false)
+            .when(testing, |b| b.opacity(0.5))
+            .on_click(cx.listener(move |this, _, _, cx| {
+                if testing {
+                    return;
+                }
+                let Some(form) = this.routine_form_now(cx) else {
+                    cx.notify();
+                    return;
+                };
+                let f = this.model.test_routine(&form);
+                this.send(f);
+                cx.notify();
+            }));
+        let head = div()
+            .flex()
+            .items_center()
+            .gap(px(space::M))
+            .child(
+                div()
+                    .w(px(layout::FIELD_LABEL))
+                    .flex_none()
+                    .text_size(px(size::BODY))
+                    .text_color(p.ink)
+                    .child("Script"),
+            )
+            .child(kinds);
+        // Under the script, the seconds it may take, and Run test.
+        let foot = div()
+            .flex()
+            .items_center()
+            .gap(px(space::S))
+            .child(
+                div()
+                    .w(px(56.0))
+                    .flex_none()
+                    .child(Input::new(&ui.gate_seconds_in)),
+            )
+            .child(
+                div()
+                    .flex_none()
+                    .text_size(px(size::SMALL))
+                    .text_color(p.ink_3)
+                    .child("s"),
+            )
+            .child(div().flex_1())
+            .child(test);
+        let field = if calx {
+            Textarea::new(&ui.calx_in).into_any_element()
+        } else {
+            Input::new(&ui.gate_in).into_any_element()
+        };
+        let mut row = div()
+            .px(px(space::L))
+            .py(px(space::S + 2.0))
+            .flex()
+            .flex_col()
+            .gap(px(space::S))
+            .child(head)
+            .child(div().font_family(font::MONO).child(field))
+            .child(foot);
+        if let Some(line) = self.routine_script_result() {
+            row = row.child(line);
+        }
+        row.into_any_element()
+    }
+
+    /// Under the script: how its test went, a pill and a line with what it printed,
+    /// posted and wrote; or, before one, what its last run printed.
+    fn routine_script_result(&self) -> Option<AnyElement> {
+        let p = self.p;
+        let out = |label: &str, text: &str| {
             div()
                 .flex()
-                .items_center()
                 .gap(px(space::S))
+                .child(
+                    div()
+                        .flex_none()
+                        .w(px(52.0))
+                        .text_size(px(size::CAPTION))
+                        .text_color(p.ink_3)
+                        .child(label.to_string()),
+                )
                 .child(
                     div()
                         .flex_1()
                         .min_w_0()
                         .font_family(font::MONO)
-                        .child(Input::new(&ui.gate_in)),
+                        .text_size(px(size::CAPTION))
+                        .text_color(p.ink_2)
+                        .line_clamp(6)
+                        .child(text.trim().to_string()),
                 )
-                .child(
-                    div()
-                        .w(px(56.0))
-                        .flex_none()
-                        .child(Input::new(&ui.gate_seconds_in)),
-                )
-                .child(
-                    div()
-                        .flex_none()
-                        .text_size(px(size::SMALL))
-                        .text_color(p.ink_3)
-                        .child("s"),
-                ),
-        )
+        };
+        if let Some(t) = &self.model.routine_test {
+            let tint = match t.status.as_str() {
+                "failed" => p.bad,
+                "running" => p.ink_3,
+                _ => p.ink,
+            };
+            let mut d = div().flex().flex_col().gap(px(space::XS)).child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(space::S))
+                    .child(
+                        div()
+                            .flex_none()
+                            .px(px(6.0))
+                            .py(px(1.0))
+                            .rounded(px(radius::ROW))
+                            .bg(motion::mix(self.card_fill(), tint, 0.18))
+                            .text_size(px(size::CAPTION))
+                            .font_weight(FontWeight::MEDIUM)
+                            .text_color(tint)
+                            .child(t.pill()),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .text_size(px(size::SMALL))
+                            .text_color(p.ink_2)
+                            .child(t.said.clone()),
+                    ),
+            );
+            if !t.printed.trim().is_empty() {
+                d = d.child(out("Printed", &t.printed));
+            }
+            if !t.errors.trim().is_empty() {
+                d = d.child(out("Errors", &t.errors));
+            }
+            for text in &t.posted {
+                d = d.child(out("Posts", text));
+            }
+            if !t.wrote.is_empty() {
+                d = d.child(out("State", &t.wrote.join(" · ")));
+            }
+            return Some(d.into_any_element());
+        }
+        let last = self
+            .model
+            .routine_runs
+            .iter()
+            .find(|r| !r.printed.trim().is_empty())?;
+        Some(out("Last run", &last.printed).into_any_element())
+    }
+
+    /// What the open routine's script keeps between runs (`loom state`), a row a key,
+    /// each with Forget.
+    fn routine_state_group(&self, id: &str, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let p = self.p;
+        if self.model.routine_state.is_empty() {
+            return None;
+        }
+        let mut rows = Vec::new();
+        for (key, value) in &self.model.routine_state {
+            let routine = id.to_string();
+            let forget = key.clone();
+            rows.push(
+                div()
+                    .px(px(space::L))
+                    .py(px(space::S))
+                    .flex()
+                    .items_center()
+                    .gap(px(space::M))
+                    .child(
+                        div()
+                            .w(px(layout::FIELD_LABEL))
+                            .flex_none()
+                            .truncate()
+                            .font_family(font::MONO)
+                            .text_size(px(size::SMALL))
+                            .text_color(p.ink)
+                            .child(key.clone()),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .truncate()
+                            .font_family(font::MONO)
+                            .text_size(px(size::SMALL))
+                            .text_color(p.ink_2)
+                            .child(value.clone()),
+                    )
+                    .child(
+                        self.small_button(format!("forget-state-{key}"), "Forget", false)
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                let f = this.model.forget_routine_state(&routine, &forget);
+                                this.send(f);
+                                cx.notify();
+                            })),
+                    )
+                    .into_any_element(),
+            );
+        }
+        Some(self.group(Some("State"), rows))
     }
 
     /// The routine's model or effort (`effort`), as chips of what its agent's program
@@ -1425,6 +1641,124 @@ impl Loom {
         self.field_row(label, row)
     }
 
+    /// What the routine form says, to save or to test: none, with a notice why, while
+    /// something in it can't be saved.
+    fn routine_form_now(&mut self, cx: &mut Context<Self>) -> Option<model::RoutineForm> {
+        let editing = self.routine_open.clone().flatten().unwrap_or_default();
+        let name = self.routine_name_in.read(cx).value().to_string();
+        let prompt = self.routine_prompt_in.read(cx).value().to_string();
+        let Some(agent) = self.routine_agent.clone() else {
+            self.model.notices.push("Pick the agent it runs.".into());
+            cx.notify();
+            return None;
+        };
+        let schedule = self.routine_schedule(cx).to_json();
+        let repeat = self.routine_ui.schedule.repeat.clone();
+        let webhook = self.routine_webhook || matches!(repeat.as_str(), "" | "webhook");
+        // On an event: the one picked. Off one it ran on alone: taken away. One
+        // it runs on beside its schedule stays as it is.
+        let event = if repeat == "event" {
+            let mut e = self.routine_ui.event.clone();
+            e.thread = self.routine_ui.thread_in.read(cx).value().to_string();
+            if let Some(why) = e.missing() {
+                self.model.notices.push(why.into());
+                cx.notify();
+                return None;
+            }
+            Some(e.to_json())
+        } else {
+            let saved = self.model.routines.iter().find(|r| r.id == editing);
+            saved
+                .filter(|r| r.event.is_some() && r.schedule.repeat.is_empty())
+                .map(|_| Value::Null)
+        };
+        // The flow, one step after another; one an agent made
+        // with steps side by side stays as it is.
+        let flow = if self.routine_flow_kept.is_empty() {
+            let mut steps = Vec::new();
+            let mut before = "routine".to_string();
+            for (k, (agent, prompt_in)) in self.routine_flow.iter().enumerate() {
+                let Some(agent) = agent.clone() else {
+                    self.model
+                        .notices
+                        .push(format!("Pick step {}'s agent.", k + 1));
+                    cx.notify();
+                    return None;
+                };
+                let name = (k + 1).to_string();
+                steps.push(model::FlowStep {
+                    name: name.clone(),
+                    agent,
+                    prompt: prompt_in.read(cx).value().to_string(),
+                    after: vec![before],
+                });
+                before = name;
+            }
+            Some(steps)
+        } else {
+            None
+        };
+        // Its script is the one shown, a command or a Calx script.
+        let ui = &self.routine_ui;
+        let (gate, calx) = if ui.use_calx {
+            (String::new(), ui.calx_in.read(cx).value().to_string())
+        } else {
+            (
+                ui.gate_in.read(cx).value().trim().to_string(),
+                String::new(),
+            )
+        };
+        let seconds = ui.gate_seconds_in.read(cx).value().trim().to_string();
+        let gate_seconds = match seconds.parse::<i64>() {
+            Ok(s) if s > 0 => s,
+            _ if seconds.is_empty() || (gate.is_empty() && calx.trim().is_empty()) => 0,
+            _ => {
+                self.model
+                    .notices
+                    .push("Write the seconds its script may take as a number.".into());
+                cx.notify();
+                return None;
+            }
+        };
+        // A model or effort the agent's program doesn't offer, as when the agent
+        // was changed, goes back to the agent's own.
+        let offered = |category: &str, value: &str| {
+            let a = self.model.agent(&agent);
+            let options = a.map(|a| a.picks()).unwrap_or_default();
+            match options.iter().find(|o| o.category == category) {
+                Some(o) if !o.values.iter().any(|(v, _)| v == value) => String::new(),
+                _ => value.to_string(),
+            }
+        };
+        let model_picked = offered("model", &ui.model);
+        let effort_picked = offered("thought_level", &ui.effort);
+        Some(model::RoutineForm {
+            id: editing,
+            name,
+            agent,
+            prompt,
+            schedule,
+            gate,
+            calx,
+            gate_seconds,
+            script_only: ui.script_only,
+            model: model_picked,
+            effort: effort_picked,
+            notify: self.routine_notify,
+            on: self.routine_on,
+            catch_up: self.routine_catch_up,
+            post: if self.routine_thread {
+                "thread"
+            } else {
+                "chat"
+            }
+            .into(),
+            webhook,
+            flow,
+            event,
+        })
+    }
+
     /// The page of the routine picked, beside the list, with its form and history, or a
     /// new routine's form.
     fn routine_form(&mut self, cx: &mut Context<Self>) -> Vec<AnyElement> {
@@ -1445,36 +1779,60 @@ impl Loom {
             cx,
             |this, id| this.routine_agent = Some(id),
         );
+        let script_only = self.routine_ui.script_only;
         let mut first = vec![
             self.field_row("Name", Input::new(&self.routine_name_in)),
             self.field_row("Agent", chips),
-            div()
-                .p(px(space::L))
-                .flex()
-                .flex_col()
-                .gap(px(space::S))
-                .child(
-                    div()
-                        .text_size(px(size::BODY))
-                        .text_color(p.ink)
-                        .child("Prompt"),
-                )
-                .child(Textarea::new(&self.routine_prompt_in))
-                .into_any_element(),
-            self.routine_gate_row(),
+            self.switch_row(
+                "routine-script-only",
+                "Script only",
+                "",
+                script_only,
+                cx,
+                |this| this.routine_ui.script_only = !this.routine_ui.script_only,
+            ),
         ];
+        // One that runs its script only asks its agent nothing, so it has no prompt,
+        // model or effort.
+        if !script_only {
+            first.push(
+                div()
+                    .p(px(space::L))
+                    .flex()
+                    .flex_col()
+                    .gap(px(space::S))
+                    .child(
+                        div()
+                            .text_size(px(size::BODY))
+                            .text_color(p.ink)
+                            .child("Prompt"),
+                    )
+                    .child(Textarea::new(&self.routine_prompt_in))
+                    .into_any_element(),
+            );
+        }
+        first.push(self.routine_script_row(cx));
         // Its model and effort, from those its agent's program offers.
         let agent = self
             .routine_agent
             .as_deref()
             .and_then(|id| self.model.agent(id))
             .cloned();
-        if let Some(a) = agent {
+        if let (Some(a), false) = (agent, script_only) {
             for option in a.picks() {
                 let effort = option.category == "thought_level";
                 let label = if effort { "Effort" } else { "Model" };
                 first.push(self.routine_pick_row(label, &option, a.chosen(&option.id), effort, cx));
             }
+        }
+        // What its script may choose for a run in place of these, set by an agent.
+        let may = open
+            .as_ref()
+            .and_then(|id| self.model.routines.iter().find(|r| &r.id == id))
+            .map(|r| r.gate_may_said.clone())
+            .filter(|said| !said.is_empty() && !script_only);
+        if let Some(said) = may {
+            first.push(self.note_row(said, p.ink_3));
         }
         groups.push(self.group(None, first));
         groups.push(self.routine_when_group(open.as_deref(), cx));
@@ -1561,6 +1919,12 @@ impl Loom {
         }
         groups.push(self.group(Some("Options"), options));
         groups.push(self.routine_flow_group(cx));
+        if let Some(state) = open
+            .as_deref()
+            .and_then(|id| self.routine_state_group(id, cx))
+        {
+            groups.push(state);
+        }
         // Its runs, which leave nothing in the chat but what they post.
         if open.is_some() && !self.model.routine_runs.is_empty() {
             groups.push(self.routine_history_group(cx));
@@ -1569,107 +1933,9 @@ impl Loom {
         let save = self
             .small_button("save-routine", "Save", true)
             .on_click(cx.listener(move |this, _, _, cx| {
-                let name = this.routine_name_in.read(cx).value().to_string();
-                let prompt = this.routine_prompt_in.read(cx).value().to_string();
-                let Some(agent) = this.routine_agent.clone() else {
-                    this.model.notices.push("Pick the agent it runs.".into());
+                let Some(form) = this.routine_form_now(cx) else {
                     cx.notify();
                     return;
-                };
-                let schedule = this.routine_schedule(cx).to_json();
-                let repeat = this.routine_ui.schedule.repeat.clone();
-                let webhook = this.routine_webhook || matches!(repeat.as_str(), "" | "webhook");
-                // On an event: the one picked. Off one it ran on alone: taken away. One
-                // it runs on beside its schedule stays as it is.
-                let event = if repeat == "event" {
-                    let mut e = this.routine_ui.event.clone();
-                    e.thread = this.routine_ui.thread_in.read(cx).value().to_string();
-                    if let Some(why) = e.missing() {
-                        this.model.notices.push(why.into());
-                        cx.notify();
-                        return;
-                    }
-                    Some(e.to_json())
-                } else {
-                    let saved = this.model.routines.iter().find(|r| r.id == editing);
-                    saved
-                        .filter(|r| r.event.is_some() && r.schedule.repeat.is_empty())
-                        .map(|_| Value::Null)
-                };
-                // The flow, one step after another; one an agent made
-                // with steps side by side stays as it is.
-                let flow = if this.routine_flow_kept.is_empty() {
-                    let mut steps = Vec::new();
-                    let mut before = "routine".to_string();
-                    for (k, (agent, prompt_in)) in this.routine_flow.iter().enumerate() {
-                        let Some(agent) = agent.clone() else {
-                            this.model
-                                .notices
-                                .push(format!("Pick step {}'s agent.", k + 1));
-                            cx.notify();
-                            return;
-                        };
-                        let name = (k + 1).to_string();
-                        steps.push(model::FlowStep {
-                            name: name.clone(),
-                            agent,
-                            prompt: prompt_in.read(cx).value().to_string(),
-                            after: vec![before],
-                        });
-                        before = name;
-                    }
-                    Some(steps)
-                } else {
-                    None
-                };
-                let ui = &this.routine_ui;
-                let gate = ui.gate_in.read(cx).value().trim().to_string();
-                let seconds = ui.gate_seconds_in.read(cx).value().trim().to_string();
-                let gate_seconds = match seconds.parse::<i64>() {
-                    Ok(s) if s > 0 => s,
-                    _ if seconds.is_empty() || gate.is_empty() => 0,
-                    _ => {
-                        this.model
-                            .notices
-                            .push("Write the seconds its gate may take as a number.".into());
-                        cx.notify();
-                        return;
-                    }
-                };
-                // A model or effort the agent's program doesn't offer, as when the agent
-                // was changed, goes back to the agent's own.
-                let offered = |category: &str, value: &str| {
-                    let a = this.model.agent(&agent);
-                    let options = a.map(|a| a.picks()).unwrap_or_default();
-                    match options.iter().find(|o| o.category == category) {
-                        Some(o) if !o.values.iter().any(|(v, _)| v == value) => String::new(),
-                        _ => value.to_string(),
-                    }
-                };
-                let model_picked = offered("model", &ui.model);
-                let effort_picked = offered("thought_level", &ui.effort);
-                let form = model::RoutineForm {
-                    id: editing.clone(),
-                    name,
-                    agent,
-                    prompt,
-                    schedule,
-                    gate,
-                    gate_seconds,
-                    model: model_picked,
-                    effort: effort_picked,
-                    notify: this.routine_notify,
-                    on: this.routine_on,
-                    catch_up: this.routine_catch_up,
-                    post: if this.routine_thread {
-                        "thread"
-                    } else {
-                        "chat"
-                    }
-                    .into(),
-                    webhook,
-                    flow,
-                    event,
                 };
                 let now = this.form_now(DraftPage::Routines, cx);
                 let f = this.model.save_routine(&form);

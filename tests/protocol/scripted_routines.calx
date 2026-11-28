@@ -1,0 +1,233 @@
+module tests.protocol.scripted_routines
+
+// Scripted routines (LOO-455, PLAN.md, "Routines"): a gate that steers its run
+// with a first line of JSON, choosing only what its routine lets it; a routine
+// whose script does all the work and posts with `loom post`, keeping what it
+// saw with `loom state`; `loom tool`, which calls one of the person's MCP
+// servers from a gate under its agent's rules and permission mode, and asks no
+// one; a test run, which keeps and posts nothing; and what routine.list says a
+// script saved.
+//
+// The agents run on the fake agent with --record, which writes down every
+// prompt it gets, with the model and effort its session was set to.
+//
+//     calx tests/protocol/scripted_routines.calx
+import std.env
+import std.fs
+import std.json.{Json, parse}
+import std.process.{exit}
+import shared.obj.{Obj, at, bool_at, int_at, str_at}
+import shared.client.{Session, reply_text}
+import tests.kit.{Instance, calx, check}
+
+// How long a gate here may take: the fake MCP server is built the first time.
+const GATE_SECONDS: i64 = 300
+
+struct Prompt {
+    model: String
+    context: String
+}
+
+fn recorded(path: String, skip: usize) -> List<Prompt> ! Error {
+    var out = List<Prompt>()
+    let text = try fs.read_text(path) ?? String()
+    var n: usize = 0
+    for line in text.split("\n") {
+        if line.trim().len() == 0 { continue }
+        n += 1
+        if n <= skip { continue }
+        let j = try parse(line.copy())
+        if str_at(j.copy(), "closed") != none { continue }
+        out.push(Prompt { model: str_at(j.copy(), "model") ?? String(), context: str_at(j, "context") ?? String() })
+    }
+    return out
+}
+
+fn lines_now(path: String) -> usize ! Error {
+    let text = try fs.read_text(path) ?? String()
+    var n: usize = 0
+    for line in text.split("\n") {
+        if line.trim().len() > 0 { n += 1 }
+    }
+    return n
+}
+
+fn over(status: String) -> bool {
+    return status != "running" and status != "waiting" and status.len() > 0
+}
+
+// Runs routine `id` by hand and waits for that run to end: the run, as routine.runs keeps it.
+fn run_it(app: mut Session, id: String) -> Json ! Error {
+    let from = app.frames.len()
+    let ran = try app.cmd("q_run", "routine.run", Obj.new().s("id", id.copy()).done())
+    let run = str_at(at(ran.copy(), "value"), "run") ?? String()
+    if run.len() == 0 { fail "routine.run didn't run it: {ran}" }
+    var k = from
+    loop {
+        let f = if k < app.frames.len() { app.frames[k].copy() } else { try app.until("event", "routine.updated", 400000) }
+        k += 1
+        if str_at(f.copy(), "kind") != some(String("routine.updated")) { continue }
+        let r = at(f, "routine")
+        let last = at(r.copy(), "last")
+        if str_at(r.copy(), "id") == some(id.copy()) and str_at(last.copy(), "run") == some(run.copy()) and over(str_at(last, "status") ?? String()) { break }
+    }
+    if let Json.Array(runs) = at(at(try app.cmd("q_runs", "routine.runs", Obj.new().s("id", id).done()), "value"), "runs") {
+        for r in runs {
+            if str_at(r.copy(), "run") == some(run.copy()) { return r.copy() }
+        }
+    }
+    fail "routine.runs doesn't have {run}"
+}
+
+fn make(app: mut Session, args: Json) -> Json ! Error {
+    let put = try app.cmd("q_put", "routine.put", args)
+    if bool_at(put.copy(), "ok") == some(false) { fail "routine.put was refused: {put}" }
+    return at(at(put, "value"), "routine")
+}
+
+fn id_of(r: Json) -> String {
+    return str_at(r, "id") ?? String()
+}
+
+// A command that prints the file at `path`, on this system's shell: how a gate
+// here prints JSON, which a shell's quoting would change.
+fn shows(path: String) -> String {
+    if env.os() == "windows" { return "type {path.replace("/", "\\")}" }
+    return "cat {path}"
+}
+
+fn gate(command: String) -> Json {
+    return Obj.new().s("command", command).i("timeout", GATE_SECONDS).done()
+}
+
+fn posted_in(app: Session, from: usize, chat: String, text: str) -> bool {
+    for f in app.frames[from..] {
+        if str_at(f.copy(), "kind") == some(String("message.created")) and str_at(at(f.copy(), "message"), "conversation") == some(chat.copy()) and reply_text(at(f, "message")).contains(text) { return true }
+    }
+    return false
+}
+
+fn scripted(i: Instance) ! Error {
+    let record = "{i.data}/record.jsonl"
+    try i.add_fake(String("rec"), "--record={record}")
+    var app = try Session.connect(i.base.copy(), i.token.copy(), 0)
+    let server = try fs.absolute(String("tests/fake_mcp/main.calx"))
+    _ = try app.cmd("q_mcp", "mcp.put", Obj.new().s("name", String("fake")).s("command", calx()).j("args", Json.Array([Json.Str(server)])).done())
+    let made = try app.cmd("q_1", "agent.create", Obj.new().s("name", String("Hermes")).s("acp_agent", String("rec")).s("instructions", String("Test.")).j("mcp", Json.Array([Json.Str(String("fake"))])).done())
+    let hermes = str_at(at(at(made, "value"), "agent"), "id") ?? String()
+    let other = try app.cmd("q_2", "agent.create", Obj.new().s("name", String("Ledger")).s("acp_agent", String("rec")).s("instructions", String("Test.")).done())
+    let ledger = str_at(at(at(other, "value"), "agent"), "id") ?? String()
+    // Its mode allows what only reads, and asks about the rest.
+    _ = try app.cmd("q_3", "agent.update", Obj.new().s("agent", hermes.copy()).s("permission", String("auto")).done())
+    let c = try app.cmd("q_4", "conversation.create", Obj.new().s("agent", hermes.copy()).done())
+    let chat = str_at(at(c, "value"), "conversation") ?? String()
+    // A first turn, so loom knows the models and efforts its program offers.
+    try app.send(Obj.new().s("t", String("send")).s("cid", String("m_0")).s("conversation", chat.copy()).s("text", String("/tokens 10\nHi.")).done())
+    _ = try app.until("event", "run.finished", 120000)
+
+    // --- A gate's first line of JSON steers its run ---
+    try fs.write_text("{i.data}/asleep.json", String(#"{"wake":false}"#))
+    let quiet = try make(mut app, Obj.new().s("name", String("Quiet mail")).s("agent", hermes.copy()).s("prompt", String("/tokens 99\nx")).b("webhook", true).j("gate", gate(shows("{i.data}/asleep.json"))).done())
+    var mark = try lines_now(record.copy())
+    let slept = try run_it(mut app, id_of(quiet.copy()))
+    try check(str_at(slept.copy(), "status") == some(String("quiet")) and bool_at(slept, "woke") == some(false) and (try recorded(record.copy(), mark)).len() == 0, "a gate whose first line says wake: false keeps its agent asleep")
+
+    try fs.write_text("{i.data}/exam.json", String("\{\"wake\":true,\"model\":\"fake-2\",\"prompt\":\"Label the exam mail.\",\"data\":\{\"ids\":[7]\}\}\nFrom: the exam office"))
+    let steered = try make(mut app, Obj.new().s("name", String("Label new mail")).s("agent", hermes.copy()).s("prompt", String("/tokens 50\n/mcp routine_quiet \{\}")).b("webhook", true).j("gate", gate(shows("{i.data}/exam.json"))).j("gate_may", Obj.new().j("model", Json.Array([Json.Str(String("fake-2"))])).done()).done())
+    try check((str_at(steered.copy(), "gate_may_said") ?? String()).starts_with("The gate may choose model:"), "the routine says what its gate may choose")
+    mark = try lines_now(record.copy())
+    let chosen_run = try run_it(mut app, id_of(steered.copy()))
+    let picked = try recorded(record.copy(), mark)
+    try check(picked.len() == 1 and picked[0].model == "fake-2", "a gate may pick the model of its run, where its routine lets it")
+    try check(picked[0].context.contains("Label the exam mail.") and picked[0].context.contains(#""ids":[7]"#) and picked[0].context.contains("From: the exam office"), "and its agent is given what it asked, its data and what else it printed")
+    try check((str_at(chosen_run.copy(), "chosen") ?? String()).contains("chosen by the gate") and str_at(chosen_run, "model") == some(String("fake-2")), "and the run's history says the gate chose it")
+
+    try fs.write_text("{i.data}/greedy.json", String(#"{"wake":true,"model":"fake-2","agent":"Ledger"}"#))
+    let strict = try make(mut app, Obj.new().s("name", String("Strict")).s("agent", hermes.copy()).s("prompt", String("/tokens 5\n/mcp routine_quiet \{\}")).b("webhook", true).j("gate", gate(shows("{i.data}/greedy.json"))).done())
+    mark = try lines_now(record.copy())
+    let refused_run = try run_it(mut app, id_of(strict))
+    let plain = try recorded(record.copy(), mark)
+    try check(plain.len() == 1 and plain[0].model == "fake-1" and str_at(refused_run.copy(), "agent") == none, "what the routine doesn't let its gate choose, the run goes without: its own agent, on its own model")
+    try check((str_at(refused_run, "chosen") ?? String()).contains("doesn't let it choose"), "and its history says what the gate asked for")
+
+    try fs.write_text("{i.data}/ledger.json", String(#"{"wake":true,"agent":"Ledger"}"#))
+    let handed = try make(mut app, Obj.new().s("name", String("Hand over")).s("agent", hermes.copy()).s("prompt", String("/tokens 5\n/mcp routine_quiet \{\}")).b("webhook", true).j("gate", gate(shows("{i.data}/ledger.json"))).j("gate_may", Obj.new().j("agent", Json.Array([Json.Str(String("Ledger"))])).done()).done())
+    let handed_run = try run_it(mut app, id_of(handed))
+    try check(str_at(handed_run.copy(), "agent") == some(ledger.copy()) and (str_at(handed_run, "chosen") ?? String()).contains("Ledger"), "and may hand the run to another agent it lets it")
+
+    // --- A script that does it all, keeping what it saw ---
+    var from = app.frames.len()
+    mark = try lines_now(record.copy())
+    let version = try make(mut app, Obj.new().s("name", String("Version check")).s("agent", hermes.copy()).b("script_only", true).b("webhook", true).j("gate", gate(String("loom state set version 1.21.5 && loom post Version 1.21.5 is out"))).done())
+    try check(str_at(version.copy(), "prompt") == some(String()) and bool_at(version.copy(), "script_only") == some(true), "a routine that runs its script only needs no prompt")
+    let script_run = try run_it(mut app, id_of(version.copy()))
+    try check(str_at(script_run.copy(), "status") == some(String("done")) and bool_at(script_run.copy(), "script") == some(true) and bool_at(script_run, "woke") == some(false), "it runs with no agent, and its run is done once it posted")
+    if not posted_in(app, from, chat.copy(), "Version 1.21.5 is out") { _ = try app.until("event", "message.created") }
+    try check(posted_in(app, from, chat.copy(), "Version 1.21.5 is out") and (try recorded(record.copy(), mark)).len() == 0, "loom post puts it in the agent's chat, and no agent ran")
+    let state = at(at(try app.cmd("q_state", "routine.state", Obj.new().s("id", id_of(version.copy())).done()), "value"), "state")
+    try check(str_at(state, "version") == some(String("1.21.5")), "loom state keeps what it saw, for its next run")
+    let reader = try make(mut app, Obj.new().s("id", id_of(version.copy())).j("gate", gate(String("loom state get version"))).done())
+    let read_run = try run_it(mut app, id_of(reader))
+    try check(str_at(read_run.copy(), "status") == some(String("quiet")) and str_at(read_run, "printed") == some(String("1.21.5")), "and reads it back, and what it printed is kept as its last output")
+    let wakes = try make(mut app, Obj.new().s("name", String("Wakes")).s("agent", hermes.copy()).b("script_only", true).b("webhook", true).j("gate", gate(shows("{i.data}/ledger.json"))).done())
+    let wake_run = try run_it(mut app, id_of(wakes))
+    try check(str_at(wake_run.copy(), "status") == some(String("failed")) and (str_at(wake_run, "error") ?? String()).contains("script only"), "one that asks to wake an agent fails, saying why")
+
+    // --- loom tool: the person's MCP servers, under the agent's rules ---
+    mark = try lines_now(record.copy())
+    let mail = try make(mut app, Obj.new().s("name", String("Fetch")).s("agent", hermes.copy()).s("prompt", String("/tokens 5\n/mcp routine_quiet \{\}")).b("webhook", true).j("gate", gate(String("loom tool fake echo text=hi"))).done())
+    let fetched = try run_it(mut app, id_of(mail))
+    let woken = try recorded(record.copy(), mark)
+    try check(str_at(fetched, "status") == some(String("quiet")) and woken.len() == 1 and woken[0].context.contains(#"{"said":"hi"}"#), "loom tool calls a tool that only reads, as its agent's mode allows, and gives what it answered")
+    let adds = try make(mut app, Obj.new().s("name", String("Adds")).s("agent", hermes.copy()).b("script_only", true).b("webhook", true).j("gate", gate(String("loom tool fake add a=2 b=3"))).done())
+    let asked = try run_it(mut app, id_of(adds.copy()))
+    try check(str_at(asked.copy(), "status") == some(String("failed")) and (str_at(asked, "error") ?? String()).contains("needs your person's yes"), "one its agent's mode would ask about is refused, since a script asks no one")
+    let rule = try app.cmd("q_rule", "rule.put", Obj.new().s("then", String("allow")).s("tool", String("fake.add")).s("agent", hermes.copy()).done())
+    let added = try run_it(mut app, id_of(adds.copy()))
+    try check(str_at(added.copy(), "status") == some(String("quiet")) and str_at(added, "printed") == some(String("5")), "and goes where a rule allows it")
+    _ = try app.cmd("q_unrule", "rule.delete", Obj.new().s("id", str_at(at(at(rule, "value"), "rule"), "id") ?? String()).done())
+    _ = try app.cmd("q_deny", "rule.put", Obj.new().s("then", String("deny")).s("tool", String("fake.echo")).s("agent", hermes.copy()).done())
+    let denied = try make(mut app, Obj.new().s("name", String("Denied")).s("agent", hermes.copy()).b("script_only", true).b("webhook", true).j("gate", gate(String("loom tool fake echo text=hi"))).done())
+    let denied_run = try run_it(mut app, id_of(denied))
+    try check(str_at(denied_run, "status") == some(String("failed")), "and a rule that denies it refuses it")
+
+    // --- A test run keeps and posts nothing ---
+    from = app.frames.len()
+    let tested = try app.cmd("q_test", "routine.test", Obj.new().s("id", id_of(version.copy())).j("gate", gate(String("loom state set version 9 && loom post Version 9 is out"))).done())
+    let t = at(tested, "value")
+    try check(str_at(t.copy(), "status") == some(String("quiet")) and "{at(t.copy(), "posted")}" == #"["Version 9 is out"]"# and "{at(t, "wrote")}" == #"["set version"]"#, "routine.test says what the script would post and keep")
+    let after = at(at(try app.cmd("q_state2", "routine.state", Obj.new().s("id", id_of(version.copy())).done()), "value"), "state")
+    try check(str_at(after, "version") == some(String("1.21.5")) and not posted_in(app, from, chat.copy(), "Version 9"), "and keeps and posts none of it")
+    let write_test = try app.cmd("q_test2", "routine.test", Obj.new().s("agent", String("Hermes")).j("gate", gate(String("loom tool fake add a=1 b=1"))).done())
+    try check(str_at(at(write_test, "value"), "status") == some(String("failed")), "a test run only reads")
+    // Script only, as the form has it before it's saved: what the script printed
+    // wakes no one.
+    let alone_test = try app.cmd("q_test3", "routine.test", Obj.new().s("agent", String("Hermes")).b("script_only", true).j("gate", gate(String("echo 3 new mails"))).done())
+    let woke_test = try app.cmd("q_test4", "routine.test", Obj.new().s("agent", String("Hermes")).j("gate", gate(String("echo 3 new mails"))).done())
+    try check(str_at(at(alone_test, "value"), "status") == some(String("quiet")) and str_at(at(woke_test, "value"), "status") == some(String("wake")), "a test run is script only as it's asked")
+
+    // --- What the script saved ---
+    var saves = Json.Null
+    if let Json.Array(list) = at(at(try app.cmd("q_list", "routine.list", Obj.new().done()), "value"), "routines") {
+        for r in list {
+            if str_at(r.copy(), "id") == some(id_of(quiet.copy())) { saves = at(at(r, "cost"), "saves") }
+        }
+    }
+    try check(int_at(saves.copy(), "zero") == some(1) and int_at(saves, "zero_share") == some(100), "routine.list says how many of a routine's runs used no tokens")
+    app.close()
+}
+
+fn main() ! Error {
+    let inst = try Instance.start()
+    var failure: String? = none
+    match scripted(inst.copy()) {
+        ok => {},
+        err(e) => failure = some("{e}"),
+    }
+    inst.stop()
+    if let f = failure {
+        eprintln("\n{f}")
+        exit(1)
+    }
+    println("\nscripted routines: all good")
+}
