@@ -68,7 +68,7 @@ Under **This computer**:
 
 Under **Notifications**:
 
-- **Notifications**: loom tells you when an agent says something while you're away.
+- **Notifications**: loom tells you when an agent says something you haven't seen: while loom isn't in front of you, or another chat is open. Once you read it, on any device, the notification goes.
 - **Show what was said**: a notification shows the message. Turn it off and it says only who it's from.
 Under **Sounds**:
 

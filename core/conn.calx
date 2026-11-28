@@ -29,6 +29,8 @@ import shared.files.{is_sha}
 import shared.reply as replies
 import shared.emoji
 import shared.sounds
+import shared.notices.{Notice, Shown}
+import shared.notices
 import core.login.{Kind, Outcome, Pending, address, request_body}
 import core.link
 import core.relay
@@ -216,6 +218,7 @@ pub struct Conn {
     emojis: emoji.Table   // the built-in emoji, for the composer's shortcodes and the picker
     sounds: sounds.Prefs  // this device's sound prefs, as the app last gave them (`app.sounds`)
     front: String         // the conversation the app shows, or "" for none (`app.front`)
+    shown: List<Shown>    // the notifications this device showed that aren't read yet (shared/notices.calx)
     pub voice: Voice      // dictation and speech on this device (core/voice.calx)
     pub live: Live        // talking with an agent in live mode (core/live.calx)
 }
@@ -299,6 +302,7 @@ impl Conn {
             emojis: emoji.load(),
             sounds: sounds.prefs(Json.Null),
             front: String(),
+            shown: List<Shown>(),
             voice: Voice.new(),
             live: Live.new(),
         }
@@ -522,7 +526,7 @@ impl Conn {
         // A connection that died without a close, as a sleeping laptop's does, ends
         // after 45 s with nothing from the instance, and the core reconnects.
         let ws = open(url, ping_interval_ms: APP_QUIET_MS, ping_timeout_ms: APP_WAIT_MS)
-        let hello = Obj.new().s("t", String("hello")).s("token", token).j("versions", versions()).i("after", after).j("device", Obj.new().b("active", self.active).maybe("tz", self.tz.copy()).done()).done()
+        let hello = Obj.new().s("t", String("hello")).s("token", token).j("versions", versions()).i("after", after).j("device", Obj.new().b("active", self.active).s("front", self.front.copy()).maybe("tz", self.tz.copy()).done()).done()
         match ws.send_text("{hello}") {
             ok => {},
             err(_) => {},    // receive says how it ended
@@ -682,8 +686,8 @@ impl Conn {
 
     /// The cue a live event gets, with its agent and conversation, read before the cache
     /// applies it, while the run it ends is there (shared/sounds.calx). None for one
-    /// with no sound, and for a routine's quiet run, whose post or failure comes as its
-    /// own notify.
+    /// with no sound, for a routine's quiet run, whose post or failure comes as its own
+    /// notify, and for an agent looking back over its chat, which the person never sees.
     fn cue_of(self, e: Json) -> (String, String, String)? {
         let kind = str_at(e.copy(), "kind") ?? String()
         if kind == "notify" {
@@ -696,7 +700,7 @@ impl Conn {
             ok(some(r)) => r,
             _ => return none,
         }
-        if kind == "run.finished" and str_at(run.copy(), "routine") != none { return none }
+        if kind == "run.finished" and quiet_run(run.copy()) { return none }
         let conversation = str_at(run.copy(), "conversation") ?? String()
         let room = match self.cache.conversation(conversation.copy()) {
             ok(some(c)) => at(c, "room") != Json.Null,
@@ -859,65 +863,145 @@ impl Conn {
         if let file = sounds.plays(self.sounds.copy(), name.copy(), true, m) { self.tell_sound(name, file) }
     }
 
-    /// Tells the app what's worth a system notification, while no one is looking at it:
-    /// a reply that's done or failed, and a question an agent is waiting on, and, looking
-    /// or not, what an agent sends with its notify tool. Only live events count, not
-    /// catch-up, so waking up doesn't bring a flood of old news. Its `sound` is what it
-    /// sounds with (shared/sounds.calx): a file of loom's, `default` or "". Gives whether
-    /// it told one.
+    /// Tells the app what's worth a system notification (shared/notices.calx): a reply
+    /// that's done or failed, a routine's post and a question an agent is waiting on,
+    /// unless the person is looking at that chat here or has read it on any device; and,
+    /// looking or not, what an agent sends with its notify tool, a routine's failure and
+    /// loom's own news. Never an agent looking back over its chat, or a routine's quiet
+    /// run, which the person doesn't see. Only live events count, not catch-up, so
+    /// waking up doesn't bring a flood of old news. Its `sound` is what it sounds with
+    /// (shared/sounds.calx): a file of loom's, `default` or "". Its `tag` names it, so
+    /// `core.unnotify` can take it back once it's read or answered. Gives whether it told one.
     fn notify(mut self, e: Json, cue: (String, String, String)?) -> bool {
+        let kind = str_at(e.copy(), "kind") ?? String()
+        var n = Notice { kind: kind.copy(), about: String(), conversation: String(), quiet: false, kept: false, status: String(), at: 0, read: 0 }
+        var title = String()
+        var body = String()
+        var agent_id = String()
+        var tag = String()
+        if kind == "notify" {
+            agent_id = str_at(e.copy(), "agent") ?? String()
+            n.about = str_at(e.copy(), "about") ?? String()
+            n.conversation = str_at(e.copy(), "conversation") ?? String()
+            // A routine's post is the newest reply in its chat, which came just before.
+            if n.about == "routine.posted" { n.at = self.replied(n.conversation.copy()) }
+            n.read = self.read_of(n.conversation.copy())
+            if not notices.shows(n.copy(), self.active, self.front.copy()) { return false }
+            let name = self.agent_name(agent_id.copy())
+            let said = str_at(e.copy(), "title") ?? String()
+            // One from loom itself, with no agent, such as an update it made, is its title alone.
+            title = if agent_id.len() == 0 and said.len() > 0 { said.copy() } else if said.len() > 0 { "{name}: {said}" } else { name }
+            body = str_at(e.copy(), "body") ?? String()
+            tag = "n_{int_at(e.copy(), "seq") ?? now()}"
+        } else if kind == "run.finished" or kind == "approval.needed" {
+            let run = match self.cache.run(str_at(e.copy(), "run") ?? String()) {
+                ok(some(r)) => r,
+                _ => return false,
+            }
+            agent_id = str_at(run.copy(), "agent") ?? String()
+            n.conversation = str_at(run.copy(), "conversation") ?? String()
+            n.quiet = quiet_run(run.copy())
+            n.read = self.read_of(n.conversation.copy())
+            let name = self.agent_name(agent_id.copy())
+            if kind == "approval.needed" {
+                title = "{name} is asking"
+                body = str_at(e.copy(), "title") ?? String("Can it go ahead?")
+                tag = str_at(e.copy(), "call") ?? String()
+            } else {
+                n.status = str_at(e.copy(), "status") ?? String()
+                // The reply the run ended with, which message.created brought just before.
+                tag = str_at(run, "message") ?? String()
+                if let ok(some(m)) = self.cache.message(tag.copy()) {
+                    n.kept = true
+                    n.at = int_at(m.copy(), "at") ?? 0
+                    body = summary(m)
+                }
+                if n.status == "failed" {
+                    body = "Couldn't finish: {str_at(e.copy(), "error") ?? String("it stopped")}"
+                } else if body.len() == 0 {
+                    body = String("Done.")
+                }
+                title = name
+            }
+            if not notices.shows(n.copy(), self.active, self.front.copy()) { return false }
+        } else {
+            return false
+        }
         var sound = String()
-        if let (name, agent, conversation) = cue {
-            sound = sounds.with_notification(self.sounds.copy(), name, self.moment(agent, conversation))
+        if let (cue_name, agent, conversation) = cue {
+            sound = sounds.with_notification(self.sounds.copy(), cue_name, self.moment(agent, conversation))
         }
         let volume = Json.Float(self.sounds.volume)
-        let kind = str_at(e.copy(), "kind") ?? String()
-        if kind == "notify" {
-            let agent_id = str_at(e.copy(), "agent") ?? String()
-            let name = match self.cache.agent(agent_id.copy()) {
-                ok(some(a)) => str_at(a, "name") ?? String("An agent"),
-                _ => String("An agent"),
-            }
-            let title = str_at(e.copy(), "title") ?? String()
-            // One from loom itself, with no agent, such as an update it made, is its title alone.
-            let shown = if agent_id.len() == 0 and title.len() > 0 { title.copy() } else if title.len() > 0 { "{name}: {title}" } else { name }
-            self.tell(Obj.new().s("t", String("core.notify")).s("title", shown).s("body", emoji.as_names(str_at(e.copy(), "body") ?? String())).s("agent", agent_id).s("conversation", str_at(e, "conversation") ?? String()).s("kind", String("notify")).s("sound", sound).j("volume", volume).done())
-            return true
+        if tag.len() > 0 and (n.conversation.len() > 0 or kind == "approval.needed") {
+            self.shown.push(Shown { tag: tag.copy(), conversation: n.conversation.copy(), at: if kind == "approval.needed" { 0 } else { n.at } })
+            if self.shown.len() > notices.MOST { _ = self.shown.remove(0) }
         }
-        if kind != "run.finished" and kind != "approval.needed" { return false }
-        let run = match self.cache.run(str_at(e.copy(), "run") ?? String()) {
-            ok(some(r)) => r,
-            _ => return false,
-        }
-        // A routine's quiet run is told by the instance, with notify, when its agent
-        // posts or it fails (PLAN.md, "Routines"), never as a reply.
-        if kind == "run.finished" and str_at(run.copy(), "routine") != none { return false }
-        let agent_id = str_at(run.copy(), "agent") ?? String()
-        let conversation = str_at(run, "conversation") ?? String()
-        let name = match self.cache.agent(agent_id.copy()) {
+        self.tell(Obj.new().s("t", String("core.notify")).s("title", title).s("body", emoji.as_names(body)).s("agent", agent_id).s("conversation", n.conversation.copy()).s("kind", kind).s("tag", tag).s("sound", sound).j("volume", volume).done())
+        return true
+    }
+
+    /// The name of agent `agent`, for a notification's title.
+    fn agent_name(self, agent: String) -> String {
+        return match self.cache.agent(agent) {
             ok(some(a)) => str_at(a, "name") ?? String("An agent"),
             _ => String("An agent"),
         }
-        var title = name.copy()
-        var body = String()
-        if kind == "approval.needed" {
-            title = "{name} is asking"
-            body = str_at(e.copy(), "title") ?? String("Can it go ahead?")
-        } else {
-            let status = str_at(e.copy(), "status") ?? String()
-            if status == "cancelled" { return false }
-            if status == "failed" {
-                body = "Couldn't finish: {str_at(e.copy(), "error") ?? String("it stopped")}"
-            } else {
-                body = match self.cache.messages(conversation.copy(), none, 1) {
-                    ok((ms, _)) => if ms.len() > 0 { summary(ms[0].copy()) } else { String() },
-                    err(_) => String(),
-                }
-                if body.len() == 0 { body = String("Done.") }
-            }
+    }
+
+    /// How far the person has read `conversation`, on any device, as the cache has it.
+    fn read_of(self, conversation: String) -> i64 {
+        if conversation.len() == 0 { return 0 }
+        return match self.cache.conversation(conversation) {
+            ok(some(c)) => int_at(c, "read") ?? 0,
+            _ => 0,
         }
-        self.tell(Obj.new().s("t", String("core.notify")).s("title", title).s("body", emoji.as_names(body)).s("agent", agent_id).s("conversation", conversation).s("kind", kind).s("sound", sound).j("volume", volume).done())
-        return true
+    }
+
+    /// When `conversation`'s newest agent's message is from, as the cache has it.
+    fn replied(self, conversation: String) -> i64 {
+        if conversation.len() == 0 { return 0 }
+        return match self.cache.replied(conversation) {
+            ok(n) => n,
+            err(_) => 0,
+        }
+    }
+
+    /// The notifications shown here that `conversation` is read past now, on any device,
+    /// are taken back (`core.unnotify`), and once nothing in it is unread, every one
+    /// about it, a push's too, with `conversation`.
+    fn withdraw_read(mut self, conversation: String) {
+        let read = self.read_of(conversation.copy())
+        let (gone, kept) = notices.withdrawn(self.shown.copy(), conversation.copy(), read)
+        self.shown = kept
+        let all = notices.is_read(self.replied(conversation.copy()), read)
+        if gone.len() == 0 and not all { return }
+        self.tell_unnotify(gone, if all { conversation.copy() } else { String() })
+    }
+
+    /// The question `call` was answered, here or on another device: its notification goes.
+    fn withdraw_answered(mut self, call: String) {
+        let (gone, kept) = notices.without(self.shown.copy(), call)
+        self.shown = kept
+        if gone.len() > 0 { self.tell_unnotify(gone, String()) }
+    }
+
+    fn tell_unnotify(mut self, tags: List<String>, conversation: String) {
+        var list = List<Json>()
+        for t in tags {
+            list.push(Json.Str(t.copy()))
+        }
+        var o = Obj.new().s("t", String("core.unnotify")).j("tags", Json.Array(list))
+        if conversation.len() > 0 { o = o.s("conversation", conversation) }
+        self.tell(o.done())
+    }
+
+    /// Tells the instance whether someone is using this device and what's in front of
+    /// them (the `device` frame), so a reply that comes there is read at once, for every
+    /// device, before any of them would notify for it.
+    fn tell_looking(self) {
+        if self.state == State.Live {
+            _ = self.put("{Obj.new().s("t", String("device")).b("active", self.active).s("front", self.front.copy()).done()}")
+        }
     }
 
     /// A frame from the instance. What changes the cache is applied before the app hears
@@ -999,11 +1083,11 @@ impl Conn {
             self.tell_server()
         } else if t == "event" {
             // Before the cache applies it, while the run it ends is still there to read.
-            // An agent's own notify is for now, looking or not. A live event with a cue
-            // and no notification to carry it sounds by itself, as the prefs let it.
+            // A live event with a cue and no notification to carry it sounds by itself,
+            // as the prefs let it.
             if self.synced {
                 let cue = self.cue_of(f.copy())
-                let told = if not self.active or str_at(f, "kind") == some(String("notify")) { self.notify(f, cue.copy()) } else { false }
+                let told = self.notify(f, cue.copy())
                 if not told {
                     if let c = cue { self.event_sound(c) }
                 }
@@ -1027,6 +1111,14 @@ impl Conn {
                     self.resync("the cache couldn't keep an event: {e}")
                     return
                 },
+            }
+            // Read on any device, or answered: what this device showed of it goes, from
+            // catch-up too, so a phone that was away clears what it was pushed.
+            let event_kind = str_at(f, "kind") ?? String()
+            if event_kind == "conversation.updated" and int_at(at(f.copy(), "conversation"), "read") != none {
+                self.withdraw_read(str_at(at(f.copy(), "conversation"), "id") ?? String())
+            } else if event_kind == "approval.answered" {
+                self.withdraw_answered(str_at(f, "call") ?? String())
             }
             // A server an agent offered, that the person said yes to on this device:
             // the app adds it, signed in with its link code when it came with one.
@@ -1336,12 +1428,11 @@ impl Conn {
             return true
         }
         if t == "app.active" {
-            // Someone started or stopped looking at the app: it notifies only when no one is,
-            // and the instance hears it too (the `device` frame).
+            // Someone started or stopped looking at the app: a reply in the chat in front
+            // of them isn't a notification, and the instance hears it too (the `device`
+            // frame), which reads such a reply at once for every device.
             self.active = bool_at(m.copy(), "active") ?? true
-            if self.state == State.Live {
-                _ = self.put("{Obj.new().s("t", String("device")).b("active", self.active).done()}")
-            }
+            self.tell_looking()
             return true
         }
         if t == "app.sounds" {
@@ -1357,7 +1448,11 @@ impl Conn {
         }
         if t == "app.front" {
             // The conversation the app shows, which is silent while the person looks at it.
-            self.front = str_at(m, "conversation") ?? String()
+            let front = str_at(m, "conversation") ?? String()
+            if front != self.front {
+                self.front = front
+                self.tell_looking()
+            }
             return true
         }
         if t.starts_with("voice.") {
@@ -2455,6 +2550,15 @@ fn a_move_is_signed_with_the_instance_key() {
 }
 
 @test
+fn a_run_the_person_never_sees_is_quiet() {
+    // An agent looking back over its paused chat, as its run.started says.
+    assert(quiet_run(Obj.new().s("run", String("run_1")).b("quiet", true).done()))
+    // A routine's quiet run.
+    assert(quiet_run(Obj.new().s("run", String("run_2")).s("routine", String("rt_1")).done()))
+    assert(not quiet_run(Obj.new().s("run", String("run_3")).done()))
+}
+
+@test
 fn waits_double_up_to_thirty_seconds() {
     assert(wait_ms(0) == 500)
     assert(wait_ms(1) == 1000)
@@ -2468,6 +2572,13 @@ fn makes_the_websocket_address() {
     assert(ws_url(String("http://127.0.0.1:8080")) == some(String("ws://127.0.0.1:8080/ws")))
     assert(ws_url(String("https://loom.example.com/")) == some(String("wss://loom.example.com/ws")))
     assert(ws_url(String("ftp://x")) == none)
+}
+
+/// Whether `run`, as its run.started has it, is one the person never sees: a routine's
+/// quiet run, whose post or failure comes as its own notify, or an agent looking back
+/// over its chat.
+fn quiet_run(run: Json) -> bool {
+    return str_at(run.copy(), "routine") != none or bool_at(run, "quiet") == some(true)
 }
 
 /// A message's text, cut short for a notification.

@@ -6276,6 +6276,11 @@ pub struct Model {
     conversation_read: HashMap<String, i64>,
     /// The instance keeps what's read: some conversation came with `read`.
     reads_known: bool,
+    /// No one is looking at this model's chat: the window isn't focused (minimised, in
+    /// the tray or behind another), or its server isn't the one on screen. Nothing is
+    /// marked read meanwhile, so the person's other devices still notify, until they
+    /// look again.
+    unseen: bool,
     /// How full each conversation's session context is, as its program last said.
     contexts: HashMap<String, ContextFill>,
     /// The list has come, so a chat with no conversation is known to be empty.
@@ -7281,7 +7286,7 @@ impl Model {
     /// keeps it for every device, once it's further than it had (protocol.md,
     /// "Unread").
     fn mark_read(&mut self, conversation: &str, at: i64) {
-        if at <= 0 || conversation.is_empty() {
+        if at <= 0 || conversation.is_empty() || self.unseen {
             return;
         }
         let had = self
@@ -7294,6 +7299,17 @@ impl Model {
         *had = at;
         let id = self.id("app.read");
         self.to_send.push(json!({"t": "cmd", "id": id, "name": "conversation.read", "args": {"conversation": conversation, "at": at}}));
+    }
+
+    /// Someone started or stopped looking at this model's chat: its window was focused
+    /// or left, or its server came on screen or went away. Looking again reads what's
+    /// open.
+    pub fn set_looked_at(&mut self, looked_at: bool) {
+        let was = !self.unseen;
+        self.unseen = !looked_at;
+        if looked_at && !was {
+            self.read_open();
+        }
     }
 
     /// Opening an agent's chat reads every conversation of its that marks it unread:
@@ -14560,6 +14576,21 @@ mod tests {
         m.to_send.clear();
         m.take(&json!({"t": "event", "kind": "message.created", "conversation": "c_3", "message": {"id": "msg_5", "conversation": "c_3", "role": "agent", "agent": "a_3", "at": 80}}));
         assert_eq!(reads(&m), vec![("c_3".to_string(), 80)]);
+        // Away from the window, what comes isn't read, so the person's other devices
+        // still notify for it; looking again reads it.
+        m.set_looked_at(false);
+        m.to_send.clear();
+        m.take(&json!({"t": "event", "kind": "message.created", "conversation": "c_3", "message": {"id": "msg_6", "conversation": "c_3", "role": "agent", "agent": "a_3", "at": 90}}));
+        assert!(
+            reads(&m).is_empty(),
+            "what comes while no one looks at the window isn't read"
+        );
+        m.set_looked_at(true);
+        assert_eq!(
+            reads(&m),
+            vec![("c_3".to_string(), 90)],
+            "and it's read once someone does"
+        );
         // An instance that keeps no reads leaves the dots as replies come.
         let mut old = Model::new();
         old.take(&agents);

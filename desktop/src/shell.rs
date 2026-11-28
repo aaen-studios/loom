@@ -178,46 +178,215 @@ impl Sound {
     }
 }
 
+/// A notification showing, until the core takes it back once it's read or answered
+/// (`core.unnotify`): the server it came from, the core's tag for it, the conversation
+/// it's about, and the system's own id for it.
+#[derive(Clone, Debug, PartialEq)]
+struct Showing {
+    server: String,
+    tag: String,
+    conversation: String,
+    id: String,
+}
+
+/// The notifications showing, the oldest first, as many as `MOST_SHOWING`.
+static SHOWING: std::sync::Mutex<Vec<Showing>> = std::sync::Mutex::new(Vec::new());
+
+#[cfg(any(windows, target_os = "macos"))]
+const MOST_SHOWING: usize = 200;
+
+/// Keeps `s` until it's taken back.
+#[cfg(any(windows, target_os = "macos"))]
+fn keep_showing(s: Showing) {
+    if s.tag.is_empty() {
+        return;
+    }
+    if let Ok(mut showing) = SHOWING.lock() {
+        showing.push(s);
+        if showing.len() > MOST_SHOWING {
+            showing.remove(0);
+        }
+    }
+}
+
+/// The system's ids of the notifications from `server` that `tags` name, and, with a
+/// `conversation`, of every one about it, which stop being kept.
+fn taken_back(
+    showing: &mut Vec<Showing>,
+    server: &str,
+    tags: &[String],
+    conversation: &str,
+) -> Vec<String> {
+    let mut ids = Vec::new();
+    showing.retain(|s| {
+        let gone = s.server == server
+            && (tags.contains(&s.tag)
+                || (!conversation.is_empty() && s.conversation == conversation));
+        if gone {
+            ids.push(s.id.clone());
+        }
+        !gone
+    });
+    ids
+}
+
+/// Takes back what a `core.unnotify` from the core of `server` names: from Action
+/// Center on Windows, and from the Notification Centre on a Mac.
+pub fn unnotify(server: &str, frame: &serde_json::Value) {
+    let tags: Vec<String> = frame
+        .get("tags")
+        .and_then(serde_json::Value::as_array)
+        .map(|t| {
+            t.iter()
+                .filter_map(|x| x.as_str().map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default();
+    let conversation = frame
+        .get("conversation")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default();
+    let ids = match SHOWING.lock() {
+        Ok(mut showing) => taken_back(&mut showing, server, &tags, conversation),
+        Err(_) => return,
+    };
+    if !ids.is_empty() {
+        remove_shown(&ids);
+    }
+}
+
+/// The group every loom toast is in, which with its tag finds it in Action Center.
+#[cfg(windows)]
+const GROUP: &str = "loom";
+
+/// A toast's XML: its title and body, silent but for the system's notification sound
+/// when it has it.
+#[cfg(any(windows, test))]
+fn toast_xml(title: &str, body: &str, system_sound: bool) -> String {
+    let escape = |s: &str| {
+        s.replace('&', "&amp;")
+            .replace('<', "&lt;")
+            .replace('>', "&gt;")
+            .replace('"', "&quot;")
+            .replace('\'', "&apos;")
+    };
+    let audio = if system_sound {
+        ""
+    } else {
+        "<audio silent=\"true\"/>"
+    };
+    format!(
+        "<toast><visual><binding template=\"ToastGeneric\"><text>{}</text><text>{}</text></binding></visual>{audio}</toast>",
+        escape(title),
+        escape(body)
+    )
+}
+
 /// A system notification, with its sound or without. One of loom's own the app plays
 /// itself, at its volume and not while Focus Assist or Do Not Disturb is on, so the
-/// toast stays silent. A click on it, while the app runs, opens what it's about.
+/// toast stays silent. A click on it, while the app runs, opens what it's about. `tag`
+/// is the core's for it, which takes it back from Action Center once it's read.
 #[cfg(windows)]
-pub fn notify(title: &str, body: &str, about: Option<About>, sound: Sound) {
-    let toast = tauri_winrt_notification::Toast::new(app_id())
-        .title(title)
-        .text1(body)
-        .sound((sound == Sound::System).then_some(tauri_winrt_notification::Sound::Default))
-        .on_activated(move |_| {
+pub fn notify(title: &str, body: &str, about: Option<About>, sound: Sound, tag: &str) {
+    use windows::core::HSTRING;
+    use windows::Data::Xml::Dom::XmlDocument;
+    use windows::Foundation::TypedEventHandler;
+    use windows::UI::Notifications::{ToastNotification, ToastNotificationManager};
+    static COUNT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let id = format!(
+        "n{}",
+        COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    );
+    let server = about.as_ref().map(|a| a.server.clone()).unwrap_or_default();
+    let conversation = about
+        .as_ref()
+        .map(|a| a.conversation.clone())
+        .unwrap_or_default();
+    let shown = (|| -> windows::core::Result<()> {
+        let xml = XmlDocument::new()?;
+        xml.LoadXml(&HSTRING::from(toast_xml(
+            title,
+            body,
+            sound == Sound::System,
+        )))?;
+        let toast = ToastNotification::CreateToastNotification(&xml)?;
+        toast.SetTag(&HSTRING::from(id.as_str()))?;
+        toast.SetGroup(&HSTRING::from(GROUP))?;
+        toast.Activated(&TypedEventHandler::new(move |_, _| {
             if let (Some(a), Ok(mut c)) = (about.clone(), CLICKED.lock()) {
                 c.push(a);
             }
             crate::wake::wake();
             Ok(())
-        });
-    if let Err(e) = toast.show() {
-        eprintln!("loom: the notification didn't show: {e}");
+        }))?;
+        ToastNotificationManager::CreateToastNotifierWithId(&HSTRING::from(app_id()))?.Show(&toast)
+    })();
+    match shown {
+        Ok(()) => keep_showing(Showing {
+            server,
+            tag: tag.to_string(),
+            conversation,
+            id,
+        }),
+        Err(e) => eprintln!("loom: the notification didn't show: {e}"),
     }
     if let Sound::Loom(file, volume) = &sound {
         crate::sound::play(file, *volume);
     }
 }
 
+/// Takes the toasts `ids` back, out of Action Center too.
+#[cfg(windows)]
+fn remove_shown(ids: &[String]) {
+    use windows::core::HSTRING;
+    use windows::UI::Notifications::ToastNotificationManager;
+    let Ok(history) = ToastNotificationManager::History() else {
+        return;
+    };
+    for id in ids {
+        if let Err(e) = history.RemoveGroupedTagWithId(
+            &HSTRING::from(id.as_str()),
+            &HSTRING::from(GROUP),
+            &HSTRING::from(app_id()),
+        ) {
+            eprintln!("loom: the notification wasn't taken back: {e}");
+        }
+    }
+}
+
+/// Takes the notifications `ids` back, delivered or not yet.
+#[cfg(target_os = "macos")]
+fn remove_shown(ids: &[String]) {
+    crate::mac::withdraw(ids);
+}
+
+#[cfg(all(not(windows), not(target_os = "macos")))]
+fn remove_shown(_ids: &[String]) {}
+
 /// The notifications waiting for the window's task to post, which on a Mac goes through
 /// UNUserNotificationCenter (`mac::notify`), on the main thread.
 #[cfg(target_os = "macos")]
 static TO_POST: std::sync::Mutex<Vec<Note>> = std::sync::Mutex::new(Vec::new());
 
-/// A notification waiting: its title, its body, what it's about and what it sounds with.
+/// A notification waiting: its title, its body, what it's about, what it sounds with
+/// and the core's tag for it.
 #[cfg(target_os = "macos")]
-type Note = (String, String, Option<About>, Sound);
+type Note = (String, String, Option<About>, Sound, String);
 
 /// A system notification, with the system's notification sound, one of loom's by name
 /// (so Focus silences it as any app's), or none. A click on it opens what it's about. It
-/// goes out from the window's task (`post_notifications`).
+/// goes out from the window's task (`post_notifications`). `tag` is the core's for it,
+/// which takes it back from the Notification Centre once it's read.
 #[cfg(target_os = "macos")]
-pub fn notify(title: &str, body: &str, about: Option<About>, sound: Sound) {
+pub fn notify(title: &str, body: &str, about: Option<About>, sound: Sound, tag: &str) {
     if let Ok(mut n) = TO_POST.lock() {
-        n.push((title.to_string(), body.to_string(), about, sound));
+        n.push((
+            title.to_string(),
+            body.to_string(),
+            about,
+            sound,
+            tag.to_string(),
+        ));
     }
     crate::wake::wake();
 }
@@ -251,10 +420,17 @@ pub fn post_notifications(_cx: &gpui_kit::App) {
         .lock()
         .map(|mut n| std::mem::take(&mut *n))
         .unwrap_or_default();
-    for (title, body, about, sound) in waiting {
+    for (title, body, about, sound, core_tag) in waiting {
         let n = COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let tag = tag_of(n, &about.unwrap_or_default());
-        crate::mac::notify(&tag, &title, &body, &sound);
+        let about = about.unwrap_or_default();
+        let id = tag_of(n, &about);
+        crate::mac::notify(&id, &title, &body, &sound);
+        keep_showing(Showing {
+            server: about.server,
+            tag: core_tag,
+            conversation: about.conversation,
+            id,
+        });
     }
 }
 
@@ -277,7 +453,7 @@ pub fn hear_notifications(_cx: &gpui_kit::App) {}
 
 /// A system notification.
 #[cfg(all(not(windows), not(target_os = "macos")))]
-pub fn notify(title: &str, body: &str, _about: Option<About>, sound: Sound) {
+pub fn notify(title: &str, body: &str, _about: Option<About>, sound: Sound, _tag: &str) {
     let mut n = notify_rust::Notification::new();
     n.summary(title).body(body);
     if sound != Sound::None {
@@ -1097,6 +1273,43 @@ mod tests {
             super::run_program("/Applications/loom"),
             "/Applications/loom"
         );
+    }
+
+    /// What the core takes back goes from the system, and only that server's.
+    #[test]
+    fn a_notification_read_is_taken_back() {
+        let showing = |server: &str, tag: &str, conversation: &str, id: &str| super::Showing {
+            server: server.into(),
+            tag: tag.into(),
+            conversation: conversation.into(),
+            id: id.into(),
+        };
+        let mut all = vec![
+            showing("", "msg_1", "c_1", "n0"),
+            showing("", "msg_2", "c_1", "n1"),
+            showing("", "msg_3", "c_2", "n2"),
+            showing("servers/2", "msg_1", "c_1", "n3"),
+        ];
+        let tags = vec!["msg_1".to_string()];
+        assert_eq!(super::taken_back(&mut all, "", &tags, ""), vec!["n0"]);
+        assert_eq!(all.len(), 3);
+        // A conversation read through takes back every one about it.
+        assert_eq!(super::taken_back(&mut all, "", &[], "c_1"), vec!["n1"]);
+        assert_eq!(
+            super::taken_back(&mut all, "servers/2", &tags, ""),
+            vec!["n3"]
+        );
+        assert_eq!(all, vec![showing("", "msg_3", "c_2", "n2")]);
+    }
+
+    /// A toast's words are its own, whatever they hold, and it's silent unless it has
+    /// the system's sound.
+    #[test]
+    fn a_toast_says_its_words_as_they_are() {
+        let xml = super::toast_xml("Juniper", "a < b & \"c\"", false);
+        assert!(xml.contains("<text>Juniper</text><text>a &lt; b &amp; &quot;c&quot;</text>"));
+        assert!(xml.contains("<audio silent=\"true\"/>"));
+        assert!(!super::toast_xml("Juniper", "hi", true).contains("<audio"));
     }
 
     /// A Mac notification's tag carries what it's about back from a click.

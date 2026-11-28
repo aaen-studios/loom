@@ -868,7 +868,7 @@ pub(super) fn notify_as(prefs: &Prefs, frame: &serde_json::Value, about: shell::
     } else {
         "Sent you a message"
     };
-    shell::notify(&s("title"), body, Some(about), sound);
+    shell::notify(&s("title"), body, Some(about), sound, &s("tag"));
 }
 
 /// Plays what a `core.sound` says.

@@ -98,6 +98,8 @@ final class Session {
             case "core.notify":
                 Notifications.show(f)
                 model.take(f)
+            case "core.unnotify":
+                Notifications.withdraw(f)
             case "core.sound":
                 Sounds.play(f["file"].text, volume: f["volume"].double ?? 1)
             case "core.speak":
@@ -237,6 +239,9 @@ final class Session {
             endLive()
         }
         send(["t": "app.active", "active": JSON(active)])
+        // What's open is read only while the app is in front of the person.
+        model.unseen = !active
+        if active { flush() }
         if active && returning {
             send(["t": "app.wake"])
         }

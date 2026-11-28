@@ -47,6 +47,13 @@ import Testing
         // Opened again: read.
         m.select("a_1")
         #expect(reads(m) == ["c_1": 90])
+        // The app in the background: what comes stays unread, so the person's other
+        // devices still notify for it, until they come back to it.
+        m.unseen = true
+        listed(m, builder: 100)
+        #expect(reads(m).isEmpty)
+        m.unseen = false
+        #expect(reads(m) == ["c_1": 100])
     }
 
     @Test func aThreadOrAGroupChatIsReadAsItShows() {
