@@ -58,9 +58,9 @@ Agents made before the defaults keep the permission mode they were made with unt
 
 ## MCP servers and secrets
 
-Set up MCP servers once, on the **MCP servers** page, and pick which each agent gets on its edit page. A setting can name one of your secrets, such as `ACTA_KEY=secret:ACTA_KEY`, which loom fills in only for the agent's process. Secrets are yours alone, sealed like program settings, and kept on the **Secrets** page.
+Set up MCP servers once, in **Spools**, and pick which each agent gets on its edit page. A setting can name one of your secrets, such as `ACTA_KEY=secret:ACTA_KEY`, which loom fills in only for the agent's process. Secrets are yours alone, sealed like program settings, and kept on the **Secrets** page.
 
-**Spools**, in Settings, has Acta and T3 Code first, then MCP servers by category, and its search finds the MCP Registry's servers too, marked Community. Each shows what it can do, its tools marked as reading or changing something, where it runs and how it signs in. **Connect** signs in or asks for its key, then asks which agents get it. **Installed** lists your servers and how each stands, with **Reconnect**, **Disconnect** and **Remove**. **Spools…** in the + menu and **Add from Spools** on an agent's edit page open it too.
+**Spools**, in Settings, has Acta and T3 Code first, then MCP servers by category, and its search finds the MCP Registry's servers too, marked Community. Each shows what it can do, its tools marked as reading or changing something, where it runs and how it signs in. **Connect** signs in or asks for its key, then asks which agents get it. **Installed** lists your servers and how each stands, with **Try it** or **Reconnect**, **Disconnect** and **Remove**, and the form that changes how one is reached: its name, its command or address, and its settings, one `NAME=value` a line. **Add by hand…** adds one Spools doesn't have, by its command or its address. **Spools…** in the + menu and **Add from Spools** on an agent's edit page open it too.
 
 In Code Mode, loom connects to the agent's MCP servers for it, and the agent reaches their tools through its scripts. With Code Mode off, the agent connects to them itself.
 
@@ -72,7 +72,7 @@ An agent can add a server for you too, when you ask it to. A card in its reply, 
 
 ### Servers you sign in to
 
-Hosted servers such as Acta, Cloudflare and Vercel ask you to sign in instead of taking a key. Add one by its address. When it needs a sign-in, its row on the MCP servers page shows **Sign in**, which opens the server's sign-in page in your own browser. Once you've signed in, the row says whom you're signed in as, with **Sign out**, and Test says it's signed in.
+Hosted servers such as Acta, Cloudflare and Vercel ask you to sign in instead of taking a key. Add one by its address, with **Add by hand…** under **Installed**. When it needs a sign-in, Installed shows **Sign in** for it, which opens the server's sign-in page in your own browser. Once you've signed in, it says whom you're signed in as, with **Disconnect**, and **Reconnect** says it's signed in.
 
 Loom keeps the sign-in on your instance, sealed like your secrets, renews it before it runs out, and sends it to the server for every agent that has it. An agent never signs in for you: when a server needs you to, the agent is told so and you get a card in the chat with **Sign in**.
 

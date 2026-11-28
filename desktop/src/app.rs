@@ -26,9 +26,7 @@ use serde_json::Value;
 
 use crate::core::Core;
 use crate::meter;
-use crate::model::{
-    self, Approval, Conn, ImportSource, Message, Model, Mood, Offer, ServerUpdate, SignIn,
-};
+use crate::model::{self, Approval, Conn, ImportSource, Message, Model, Mood, Offer, ServerUpdate};
 use crate::motion::{self, SoftHover};
 use crate::prefs::{Prefs, Text, Theme, Thoughts, Tools, Width};
 use crate::shell;
@@ -283,19 +281,19 @@ enum Screen {
     NewAgent,
     EditAgent,
     Activity,
+    /// Skills, with what agents propose at the top of its list.
     Skills,
-    Proposals,
     Memory,
+    /// About you, with the notes agents propose, and Import.
     Profile,
+    /// Agent defaults, with the rules every agent follows.
     Defaults,
-    Rules,
     Routines,
     Tasks,
     Programs,
     ThisDevice,
     Hosts,
     AddDevice,
-    Mcp,
     Secrets,
     Plugins,
     Move,
@@ -310,12 +308,12 @@ enum Screen {
     Tables,
     /// The form that starts a T3 thread.
     T3Start,
-    Import,
+    /// Appearance, with Emoji.
     Appearance,
     ChatPrefs,
     AppPrefs,
-    Emoji,
-    /// Spools, the integrations catalog: its Find tab, and its Installed tab.
+    /// Spools, the integrations catalog: its Find tab, and its Installed tab, which
+    /// has the person's MCP servers and adds one by hand.
     Spools,
     Installed,
     /// Settings › Voice: dictation and speech.
@@ -1002,6 +1000,21 @@ fn spool_of(model: &Model) -> Spool {
 }
 
 /// A server's name as the sidebar shows it: its host, or where it is.
+/// A proposal's key in Skills' list, kept apart from the skills' names.
+fn proposal_key(id: &str) -> String {
+    format!("proposal:{id}")
+}
+
+/// The keys of Skills' list, in its order: what's proposed (`proposal_key`), then each
+/// skill by its name.
+fn skill_keys(proposed: &[model::Proposal], skills: &[model::Skill]) -> Vec<String> {
+    proposed
+        .iter()
+        .map(|k| proposal_key(&k.id))
+        .chain(skills.iter().map(|k| k.name.clone()))
+        .collect()
+}
+
 /// Which server a name the person gave is for: its address, or empty for the instance
 /// in the app.
 fn server_key(model: &Model, dir: &str) -> String {
@@ -2332,23 +2345,27 @@ ACTA_KEY=secret:ACTA_KEY",
                     self.send(f);
                 }
             }
-            Screen::Rules => {
-                let f = self.model.load_rules();
-                self.send(f);
-                self.rule_open = false;
-                self.model.what_if = None;
-            }
             Screen::Defaults => {
                 // Shown as they were when the page opened, the instructions too.
                 let f = self.model.load_defaults();
                 self.send(f);
                 let f = self.model.programs();
                 self.send(f);
+                // Its rules, and the what-if under them.
+                let f = self.model.load_rules();
+                self.send(f);
+                self.rule_open = false;
+                self.model.what_if = None;
             }
             Screen::Profile => {
                 let f = self.model.load_profile();
                 self.send(f);
                 self.model.profile = None;
+                // The notes agents propose, and what Import finds to bring over.
+                let f = self.model.load_proposals();
+                self.send(f);
+                let f = self.model.load_imports();
+                self.send(f);
             }
             Screen::Routines => {
                 let f = self.model.load_routines();
@@ -2366,22 +2383,17 @@ ACTA_KEY=secret:ACTA_KEY",
                 let f = self.model.load_tasks();
                 self.send(f);
             }
-            Screen::Proposals => {
-                let f = self.model.load_proposals();
-                self.send(f);
-                self.proposal_open = None;
-            }
             Screen::Skills => {
                 let f = self.model.load_skills();
                 self.send(f);
+                // What agents propose, at the top of the list.
+                let f = self.model.load_proposals();
+                self.send(f);
                 self.skill_open = None;
+                self.proposal_open = None;
             }
             Screen::Plugins => {
                 let f = self.model.load_plugins();
-                self.send(f);
-            }
-            Screen::Import => {
-                let f = self.model.load_imports();
                 self.send(f);
             }
             Screen::Programs => {
@@ -2396,11 +2408,10 @@ ACTA_KEY=secret:ACTA_KEY",
                 }
                 self.program_open = None;
             }
-            Screen::Mcp | Screen::Secrets => {
+            Screen::Secrets => {
                 for f in self.model.load_mcp() {
                     self.send(f);
                 }
-                self.mcp_open = None;
             }
             Screen::Voice => {
                 let f = self.model.voice.load();
@@ -2411,6 +2422,7 @@ ACTA_KEY=secret:ACTA_KEY",
                     self.send(f);
                 }
                 self.model.spools.picked = None;
+                self.mcp_open = None;
             }
             Screen::ThisDevice => {
                 let f = self.model.device_get();
@@ -4168,12 +4180,21 @@ ACTA_KEY=secret:ACTA_KEY",
             } else if i > 0 {
                 list = list.child(div().h(px(space::S)));
             }
+            let (skills_waiting, notes_waiting) = self.model.waiting();
             for (id, icon, label, screen) in pages {
                 // Spools is lit on either of its tabs.
                 let lit = screen == open || (screen == Screen::Spools && open == Screen::Installed);
+                // What agents propose waits on Skills and About you: how much, beside
+                // their names.
+                let waiting = match screen {
+                    Screen::Skills if !server => skills_waiting,
+                    Screen::Profile if !server => notes_waiting,
+                    _ => 0,
+                };
                 list = list.child(
                     self.menu_item(id, icon, label, false)
                         .when(lit, |d| d.bg(p.active))
+                        .when(waiting > 0, |d| d.child(self.count_badge(waiting)))
                         .on_click(cx.listener(move |this, _, _, cx| this.open(screen, cx))),
                 );
             }
@@ -4249,9 +4270,7 @@ ACTA_KEY=secret:ACTA_KEY",
             Screen::Server => self.server_page(cx),
             Screen::Profile => self.profile_page(cx),
             Screen::Defaults => self.defaults_page(cx),
-            Screen::Rules => self.rules_page(cx),
             Screen::Skills => self.skills_page(cx),
-            Screen::Proposals => self.proposals_page(cx),
             Screen::Routines => self.routines_page(cx),
             Screen::Tasks => self.tasks_page(cx),
             Screen::Programs => self.programs_page(cx),
@@ -4260,14 +4279,11 @@ ACTA_KEY=secret:ACTA_KEY",
             Screen::Move => self.move_page(cx),
             Screen::People => self.people_page(cx),
             Screen::AddDevice => self.add_device_page(cx),
-            Screen::Mcp => self.mcp_page(cx),
             Screen::Secrets => self.secrets_page(cx),
             Screen::Plugins => self.plugins_page(cx),
-            Screen::Import => self.import_page(cx),
             Screen::Appearance => self.appearance_page(cx),
             Screen::ChatPrefs => self.chat_prefs_page(cx),
             Screen::AppPrefs => self.app_prefs_page(cx),
-            Screen::Emoji => self.emoji_page(cx),
             Screen::Spools => self.spools_page(cx),
             Screen::Installed => self.installed_page(cx),
             Screen::Voice => self.voice_page(cx),
@@ -8871,6 +8887,25 @@ ACTA_KEY=secret:ACTA_KEY",
                     .child(Icon::new(icon).small()),
             )
             .child(div().flex_1().child(title.to_string()))
+    }
+
+    /// How many wait, as a small pill in ink at the end of a nav row.
+    fn count_badge(&self, n: usize) -> Div {
+        let p = self.p;
+        div()
+            .flex_none()
+            .min_w(px(18.0))
+            .h(px(18.0))
+            .px(px(5.0))
+            .flex()
+            .items_center()
+            .justify_center()
+            .rounded_full()
+            .bg(p.button)
+            .text_color(p.button_ink)
+            .text_size(px(size::CAPTION))
+            .font_weight(FontWeight::SEMIBOLD)
+            .child(n.to_string())
     }
 
     /// What's attached to the next message, over the composer's words, as the sent
@@ -14031,91 +14066,33 @@ ACTA_KEY=secret:ACTA_KEY",
         self.fill_form(DraftPage::Mcp, Some(m.name.clone()), own, window, cx);
     }
 
-    /// The MCP servers page: the person's servers down the left, which each agent gets if
-    /// it has them, and the one picked beside them, to test, sign in to and change.
-    fn mcp_page(&mut self, cx: &mut Context<Self>) -> Div {
-        let new_server = |this: &Self, cx: &mut Context<Self>, primary: bool| {
-            this.small_button("new-mcp", "New server", primary)
-                .on_click(cx.listener(|this, _, window, cx| {
-                    let own = model::drafts::mcp_form(None);
-                    this.fill_form(DraftPage::Mcp, None, own, window, cx);
-                    this.mcp_open = Some(None);
-                    cx.notify();
-                }))
-        };
-        // The agents' browser isn't one of these: it's loom's own.
-        let servers = self.model.mcp_servers.clone();
-        if servers.is_empty() && self.mcp_open.is_none() {
-            let actions = new_server(self, cx, true).into_any_element();
-            let groups = vec![self.empty(Ico::Plug, "No MCP servers yet", None, Some(actions))];
-            return self.settings_page("mcp-page", "MCP servers", None, groups);
+    /// What's open on Spools' Installed, as `popup::shows` takes it: a server added by
+    /// hand (`Some(None)`), the server picked, or nothing yet.
+    pub(super) fn installed_open(&self) -> Option<Option<&str>> {
+        if self.mcp_open == Some(None) {
+            return Some(None);
         }
-        let keys: Vec<&str> = servers.iter().map(|m| m.name.as_str()).collect();
-        let open = self.mcp_open.clone();
-        let shows = popup::shows(
-            self.list_split(),
-            open.as_ref().map(|o| o.as_deref()),
-            &keys,
-            false,
-        );
-        let query = self.list_query(cx);
-        let found = (0..servers.len())
-            .filter(|&i| popup::finds(&query, &servers[i].name))
-            .collect();
-        let (pane_key, pane) = match shows.pane {
-            Pane::Item(i) => (
-                servers[i].name.clone(),
-                self.mcp_pane(Some(&servers[i]), cx),
-            ),
-            Pane::New => ("new".to_string(), self.mcp_pane(None, cx)),
-            _ => (String::new(), Vec::new()),
-        };
-        let action = Some(new_server(self, cx, false).into_any_element());
-        self.list_detail(
-            ListPage {
-                id: "mcp-page",
-                title: "MCP servers",
-                action,
-                shows,
-                found,
-                row: Loom::mcp_row,
-                head: None,
-                foot: None,
-                pane_key,
-                pane,
-            },
-            cx,
-        )
+        self.model.spools.picked.as_deref().map(Some)
     }
 
-    /// One of the person's MCP servers, as a row of the list: how many tools its last
-    /// test found, or how it signs in, and a dot for how it is.
-    fn mcp_row(&mut self, ix: usize, picked: bool, cx: &mut Context<Self>) -> AnyElement {
-        let Some(m) = self.model.mcp_servers.get(ix).cloned() else {
-            return div().into_any_element();
-        };
-        let (line, dot) = popup::mcp_line(&m, self.model.mcp_tests.get(&m.name));
-        self.list_row_unsaved(
-            format!("mcp-{}", m.name),
-            self.tile(Ico::Plug),
-            m.name.clone(),
-            line,
-            dot,
-            self.unsaved(DraftPage::Mcp, &m.name),
-            picked,
-        )
-        .on_click(cx.listener(move |this, _, window, cx| {
-            this.mcp_open = Some(Some(m.name.clone()));
-            this.fill_mcp(&m, window, cx);
-            cx.notify();
-        }))
-        .into_any_element()
+    /// Installed's Add by hand…: a new server's form beside the list, for one Spools
+    /// doesn't have, by its command or its address.
+    pub(super) fn add_by_hand_button(&self, primary: bool, cx: &mut Context<Self>) -> AnyElement {
+        self.small_button("new-mcp", "Add by hand…", primary)
+            .on_click(cx.listener(|this, _, window, cx| {
+                let own = model::drafts::mcp_form(None);
+                this.fill_form(DraftPage::Mcp, None, own, window, cx);
+                this.mcp_open = Some(None);
+                cx.notify();
+            }))
+            .into_any_element()
     }
 
-    /// The MCP server picked, beside the list: its name, what its last test found or
-    /// whom it's signed in as, Test and its sign-in, and its form to change; or a new
-    /// one's form.
-    fn mcp_pane(
+    /// A server's form, on Installed: its name, its command or address, its settings, and
+    /// for one over HTTP a client of the person's own; with Cancel and Save. For `m`, one
+    /// of the person's servers, under its head and how it stands; for none, a new one
+    /// added by hand, under its own head.
+    pub(super) fn mcp_form(
         &mut self,
         m: Option<&model::McpServer>,
         cx: &mut Context<Self>,
@@ -14153,31 +14130,22 @@ ACTA_KEY=secret:ACTA_KEY",
                 // (`moved_in`); refused, it stays as it is.
                 this.form_saving(DraftPage::Mcp, Some(name.trim().to_string()), &f, now);
                 this.send(f);
-                this.mcp_open = Some(saving.clone());
                 cx.notify();
             }));
         let changing = open.is_some();
         let cancel = self
             .small_button("cancel-mcp", "Cancel", false)
             .on_click(cx.listener(move |this, _, _, cx| {
-                // Its changes go. Side by side, its form goes back to how it was; else
-                // back to the list.
+                // Its changes go. Side by side, a server's form goes back to how it was;
+                // else back to the list.
                 this.model.drafts.discard();
-                if !(split && changing) {
+                if !changing {
                     this.mcp_open = None;
+                } else if !split {
+                    this.model.spools.picked = None;
                 }
                 cx.notify();
             }));
-        let delete = open.clone().map(|name| {
-            self.small_button("delete-mcp", "Delete", false)
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    let f = this.model.delete_mcp(&name);
-                    this.send(f);
-                    this.mcp_open = None;
-                    this.model.drafts.discard();
-                    cx.notify();
-                }))
-        });
         let mut fields = vec![
             self.field_row("Name", Input::new(&self.mcp_name_in)),
             self.field_row("Command or URL", Input::new(&self.mcp_cmd_in)),
@@ -14187,78 +14155,25 @@ ACTA_KEY=secret:ACTA_KEY",
             fields.push(self.field_row("Client ID", Input::new(&self.mcp_client_in)));
             fields.push(self.field_row("Client secret", Input::new(&self.mcp_client_secret_in)));
         }
-        let head = match m {
-            Some(m) => self.mcp_head(m, cx),
-            None => self.pane_head(None, "New MCP server", None, None),
-        };
-        vec![
-            head,
-            self.group(None, fields),
-            self.form_actions(delete, cancel, save),
-        ]
-    }
-
-    /// The head of the MCP server picked: its name, its last test, once there's been one,
-    /// or whom it's signed in as; and Test, with Sign in for a server that needs it, in
-    /// place of the error, or Sign out once signed in.
-    fn mcp_head(&mut self, m: &model::McpServer, cx: &mut Context<Self>) -> AnyElement {
-        let tested = self.model.mcp_tests.get(&m.name).cloned();
-        let signed = match &m.sign_in {
-            SignIn::SignedIn(who) if who.is_empty() => Some("Signed in".to_string()),
-            SignIn::SignedIn(who) => Some(format!("Signed in as {who}")),
-            _ => None,
-        };
-        let needs =
-            m.sign_in == SignIn::Needed || tested == Some(crate::model::McpTest::NeedsSignIn);
-        let line = if needs && tested.is_none() {
-            Some("Needs you to sign in".to_string())
-        } else {
-            tested.as_ref().map(|t| t.said()).or(signed)
-        };
-        let testing = tested == Some(crate::model::McpTest::Testing);
-        let test_name = m.name.clone();
-        let test = self
-            .small_button(
-                format!("test-mcp-{}", m.name),
-                if testing { "Testing…" } else { "Test" },
-                false,
-            )
-            .on_click(cx.listener(move |this, _, _, cx| {
-                if this.model.mcp_tests.get(&test_name) == Some(&crate::model::McpTest::Testing) {
-                    return;
-                }
-                let f = this.model.test_mcp(&test_name);
-                this.send(f);
-                cx.notify();
-            }));
-        let account = match &m.sign_in {
-            SignIn::SignedIn(_) => {
-                let out_name = m.name.clone();
-                Some(
-                    self.small_button(format!("sign-out-mcp-{}", m.name), "Sign out", false)
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            let f = this.model.sign_out_mcp(&out_name);
-                            this.send(f);
-                            cx.notify();
-                        })),
-                )
-            }
-            _ if needs => Some(self.sign_in_button(&m.name, cx)),
-            _ => None,
-        };
         let actions = div()
             .flex()
-            .items_center()
+            .justify_end()
             .gap(px(space::S))
-            .children(account)
-            .child(test)
+            .child(cancel)
+            .child(save)
             .into_any_element();
-        self.pane_head(
-            Some(self.big_tile(Ico::Plug, None)),
-            m.name.clone(),
-            line,
-            Some(actions),
-        )
+        let mut out = Vec::new();
+        if m.is_none() {
+            out.push(self.pane_head(
+                Some(self.big_tile(Ico::Plug, None)),
+                "Add by hand",
+                None,
+                None,
+            ));
+        }
+        out.push(self.group(Some("Connection"), fields));
+        out.push(actions);
+        out
     }
 
     /// The Secrets page: the person's secrets, sealed on the instance, of which only the
@@ -14362,41 +14277,88 @@ ACTA_KEY=secret:ACTA_KEY",
         self.fill_form(DraftPage::Skills, Some(k.name.clone()), own, window, cx);
     }
 
-    /// The skills page: the person's skills down the left, which every agent reads when a
-    /// task fits one, and the one picked beside them to change, or a new one.
+    /// What's open on Skills, as its list's keys name it (`skill_keys`): a proposal, a
+    /// skill, a new one's form (`Some(None)`), or nothing yet.
+    pub(super) fn skills_open(&self) -> Option<Option<String>> {
+        match &self.proposal_open {
+            Some(k) => Some(Some(proposal_key(&k.id))),
+            None => self.skill_open.clone(),
+        }
+    }
+
+    /// The skills page: what agents propose (skills, and fixes to the person's), marked
+    /// Proposed, at the top of the list, then the person's skills, which every agent
+    /// reads when a task fits one; and the one picked beside them, a proposal to keep or
+    /// drop, a skill to change, or a new one. Under the list, the agent on screen can be
+    /// asked to look over its chats for more.
     fn skills_page(&mut self, cx: &mut Context<Self>) -> Div {
         let skills = self.model.skills.clone();
-        if skills.is_empty() && self.skill_open.is_none() {
-            let action = self.new_skill_button(cx);
-            let groups = vec![self.empty(Ico::BookOpen, "No skills yet", None, Some(action))];
+        let proposed = self.model.proposed_skills();
+        // Asking the agent on screen to look over its chats for more.
+        let ask = |this: &Self, cx: &mut Context<Self>| {
+            this.model.selected.clone().map(|agent| {
+                let name = this.who(&agent);
+                this.small_button(
+                    "ask-proposals",
+                    &format!("Ask {name} to look over its chats"),
+                    false,
+                )
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    let f = this.model.ask_proposals(&agent);
+                    this.send(f);
+                    this.model
+                        .said
+                        .push(format!("{name} is looking over your chats"));
+                    cx.notify();
+                }))
+                .into_any_element()
+            })
+        };
+        if skills.is_empty() && proposed.is_empty() && self.skill_open.is_none() {
+            let actions = div()
+                .flex()
+                .gap(px(space::S))
+                .child(self.new_skill_button(cx))
+                .children(ask(self, cx))
+                .into_any_element();
+            let groups = vec![self.empty(Ico::BookOpen, "No skills yet", None, Some(actions))];
             return self.settings_page("skills-page", "Skills", None, groups);
         }
-        let keys: Vec<&str> = skills.iter().map(|k| k.name.as_str()).collect();
-        let open = self.skill_open.clone();
+        let keys = skill_keys(&proposed, &skills);
+        let key_refs: Vec<&str> = keys.iter().map(String::as_str).collect();
+        let open = self.skills_open();
         let shows = popup::shows(
             self.list_split(),
             open.as_ref().map(|o| o.as_deref()),
-            &keys,
+            &key_refs,
             false,
         );
         let query = self.list_query(cx);
-        let found = (0..skills.len())
+        let found = (0..keys.len())
             .filter(|&i| {
-                popup::finds(
-                    &query,
-                    &format!("{} {}", skills[i].name, skills[i].description),
-                )
+                let text = match proposed.get(i) {
+                    Some(k) => format!("{} {} proposed", k.title(), self.proposal_line(k)),
+                    None => {
+                        let k = &skills[i - proposed.len()];
+                        format!("{} {}", k.name, k.description)
+                    }
+                };
+                popup::finds(&query, &text)
             })
             .collect();
         let (pane_key, pane) = match shows.pane {
-            Pane::Item(i) => (
-                skills[i].name.clone(),
-                self.skill_pane(Some(&skills[i]), cx),
-            ),
+            Pane::Item(i) if i < proposed.len() => {
+                (keys[i].clone(), self.proposal_pane(proposed[i].clone(), cx))
+            }
+            Pane::Item(i) => {
+                let k = skills[i - proposed.len()].clone();
+                (k.name.clone(), self.skill_pane(Some(&k), cx))
+            }
             Pane::New => ("new".to_string(), self.skill_pane(None, cx)),
             _ => (String::new(), Vec::new()),
         };
         let action = Some(self.new_skill_button(cx));
+        let foot = ask(self, cx).map(|b| div().flex().child(b).into_any_element());
         self.list_detail(
             ListPage {
                 id: "skills-page",
@@ -14406,7 +14368,7 @@ ACTA_KEY=secret:ACTA_KEY",
                 found,
                 row: Loom::skill_row,
                 head: None,
-                foot: None,
+                foot,
                 pane_key,
                 pane,
             },
@@ -14495,15 +14457,21 @@ ACTA_KEY=secret:ACTA_KEY",
             .on_click(cx.listener(|this, _, window, cx| {
                 let own = model::drafts::skill_form(None);
                 this.fill_form(DraftPage::Skills, None, own, window, cx);
+                this.proposal_open = None;
                 this.skill_open = Some(None);
                 cx.notify();
             }))
             .into_any_element()
     }
 
-    /// One skill, as a row of the list, with when it's for under its name.
+    /// One row of Skills' list: what's proposed first (`proposal_row`), then each skill,
+    /// with when it's for under its name.
     fn skill_row(&mut self, ix: usize, picked: bool, cx: &mut Context<Self>) -> AnyElement {
-        let Some(k) = self.model.skills.get(ix).cloned() else {
+        let proposed = self.model.proposed_skills();
+        if let Some(k) = proposed.get(ix).cloned() {
+            return self.proposal_row(k, picked, cx);
+        }
+        let Some(k) = self.model.skills.get(ix - proposed.len()).cloned() else {
             return div().into_any_element();
         };
         self.list_row_unsaved(
@@ -14516,6 +14484,7 @@ ACTA_KEY=secret:ACTA_KEY",
             picked,
         )
         .on_click(cx.listener(move |this, _, window, cx| {
+            this.proposal_open = None;
             this.skill_open = Some(Some(k.name.clone()));
             this.fill_skill(&k, window, cx);
             cx.notify();
@@ -14536,88 +14505,43 @@ ACTA_KEY=secret:ACTA_KEY",
         self.fill_form(DraftPage::Proposals, Some(k.id.clone()), own, window, cx);
     }
 
-    /// What a proposal is, as its row says it: "Skill from Juniper".
+    /// What a proposal is, as its row says it, marked Proposed: "Proposed by Juniper",
+    /// or for a fix, "Proposed fix, by Juniper".
     fn proposal_line(&self, k: &model::Proposal) -> String {
-        let kind = match k.kind.as_str() {
-            "skill" => "Skill",
-            "fix" => "Fix",
-            _ => "Note",
-        };
-        format!("{kind} from {}", self.who(&k.agent))
-    }
-
-    /// What waits for the person: notes and fixes to skills agents propose from their
-    /// chats, when their permission mode asks, and skills written from a task the
-    /// person recorded in an agent's browser. They're down the left, and the one picked
-    /// is beside them, to be read, and changed, before it's kept or dropped.
-    fn proposals_page(&mut self, cx: &mut Context<Self>) -> Div {
-        // Asking the agent on screen to look over its chats for more.
-        let ask = self.model.selected.clone().map(|agent| {
-            let name = self.who(&agent);
-            self.small_button("ask-proposals", &format!("Ask {name}"), false)
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    let f = this.model.ask_proposals(&agent);
-                    this.send(f);
-                    this.model
-                        .said
-                        .push(format!("{name} is looking over your chats"));
-                    cx.notify();
-                }))
-                .into_any_element()
-        });
-        let proposals = self.model.proposals.clone();
-        if proposals.is_empty() {
-            let groups = vec![self.empty(Ico::Lightbulb, "Nothing to look at", None, ask)];
-            return self.settings_page("proposals-page", "Proposals", None, groups);
+        let who = self.who(&k.agent);
+        match k.kind.as_str() {
+            "fix" => format!("Proposed fix, by {who}"),
+            _ => format!("Proposed by {who}"),
         }
-        let keys: Vec<&str> = proposals.iter().map(|k| k.id.as_str()).collect();
-        let open = self.proposal_open.as_ref().map(|k| k.id.clone());
-        let shows = popup::shows(self.list_split(), open.as_deref().map(Some), &keys, false);
-        let query = self.list_query(cx);
-        let found = (0..proposals.len())
-            .filter(|&i| {
-                let k = &proposals[i];
-                popup::finds(&query, &format!("{} {}", k.title(), self.proposal_line(k)))
-            })
-            .collect();
-        let (pane_key, pane) = match shows.pane {
-            Pane::Item(i) => (
-                proposals[i].id.clone(),
-                self.proposal_pane(proposals[i].clone(), cx),
-            ),
-            _ => (String::new(), Vec::new()),
-        };
-        self.list_detail(
-            ListPage {
-                id: "proposals-page",
-                title: "Proposals",
-                action: ask,
-                shows,
-                found,
-                row: Loom::proposal_row,
-                head: None,
-                foot: None,
-                pane_key,
-                pane,
-            },
-            cx,
-        )
     }
 
-    /// One proposal, as a row of the list.
-    fn proposal_row(&mut self, ix: usize, picked: bool, cx: &mut Context<Self>) -> AnyElement {
-        let Some(k) = self.model.proposals.get(ix).cloned() else {
-            return div().into_any_element();
-        };
-        let icon = if k.kind == "skill" || k.kind == "fix" {
-            Ico::BookOpen
-        } else {
-            Ico::Lightbulb
-        };
+    /// A skill or a fix an agent proposed, as a row at the top of Skills' list: marked
+    /// Proposed, with who proposed it.
+    fn proposal_row(
+        &mut self,
+        k: model::Proposal,
+        picked: bool,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let p = self.p;
         let line = self.proposal_line(&k);
+        // A dashed tile, where a skill's is whole: it isn't one of the person's yet.
+        let tile = div()
+            .size(px(control::LEAD))
+            .flex_none()
+            .flex()
+            .items_center()
+            .justify_center()
+            .rounded(px(radius::ROW))
+            .border_1()
+            .border_dashed()
+            .border_color(p.line_strong)
+            .text_color(p.ink_2)
+            .child(Icon::new(Ico::Lightbulb).small())
+            .into_any_element();
         self.list_row_unsaved(
             format!("proposal-{}", k.id),
-            self.tile(icon),
+            tile,
             k.title(),
             line,
             None,
@@ -14625,6 +14549,7 @@ ACTA_KEY=secret:ACTA_KEY",
             picked,
         )
         .on_click(cx.listener(move |this, _, window, cx| {
+            this.skill_open = None;
             this.proposal_open = Some(k.clone());
             this.fill_proposal(&k, window, cx);
             cx.notify();
@@ -14937,9 +14862,9 @@ ACTA_KEY=secret:ACTA_KEY",
         )
     }
 
-    /// The Import page: OpenBot and Grok Bot, each with what the instance's computer has of
-    /// it and a button to bring it over, then how the last import went.
-    fn import_page(&mut self, cx: &mut Context<Self>) -> Div {
+    /// About you's Import: OpenBot and Grok Bot, each with what the instance's computer has
+    /// of it and a button to bring it over, then how the last import went.
+    fn import_groups(&mut self, cx: &mut Context<Self>) -> Vec<AnyElement> {
         let p = self.p;
         let here = if self.local() {
             "this computer"
@@ -14993,7 +14918,7 @@ ACTA_KEY=secret:ACTA_KEY",
                 .into_any_element(),
             );
         }
-        let mut groups = vec![self.group(None, rows)];
+        let mut groups = vec![self.group(Some("Import"), rows)];
         // What someone would expect to come and doesn't.
         groups.push(
             div()
@@ -15011,7 +14936,88 @@ ACTA_KEY=secret:ACTA_KEY",
             }
             groups.push(self.group(Some("Last import"), lines));
         }
-        self.settings_page("import-page", "Import", None, groups)
+        groups
+    }
+
+    /// About you's proposed notes: each note an agent proposed that waits, who it's from
+    /// and where it shows, with Keep and Drop. None while nothing waits.
+    fn proposed_notes_group(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let p = self.p;
+        let notes: Vec<model::Proposal> = self
+            .model
+            .proposals
+            .iter()
+            .filter(|k| !k.is_skill())
+            .cloned()
+            .collect();
+        if notes.is_empty() {
+            return None;
+        }
+        let mut rows = Vec::new();
+        for k in notes {
+            let mut line = vec![format!("From {}", self.who(&k.agent))];
+            if k.shared {
+                line.push("every agent reads it".into());
+            }
+            if !k.site.is_empty() {
+                line.push(format!("shown on {}", k.site));
+            }
+            let (kept, dropped) = (k.clone(), k.id.clone());
+            let keep = self
+                .small_button(format!("keep-note-{}", k.id), "Keep", true)
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    let f = this.model.keep_proposal(&kept);
+                    this.send(f);
+                    cx.notify();
+                }));
+            let drop = self
+                .small_button(format!("drop-note-{}", k.id), "Drop", false)
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    let f = this.model.drop_proposal(&dropped);
+                    this.send(f);
+                    cx.notify();
+                }));
+            // A note is a sentence or two: it wraps, where a row's title is cut.
+            rows.push(
+                div()
+                    .min_h(px(control::ROW))
+                    .flex()
+                    .items_center()
+                    .gap(px(space::M))
+                    .px(px(space::L))
+                    .py(px(space::S + 2.0))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .flex()
+                            .flex_col()
+                            .gap(px(2.0))
+                            .child(
+                                div()
+                                    .text_size(px(size::BODY))
+                                    .text_color(p.ink)
+                                    .child(k.text.clone()),
+                            )
+                            .child(
+                                div()
+                                    .text_size(px(size::CAPTION))
+                                    .text_color(p.ink_3)
+                                    .child(line.join(", ")),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .flex_none()
+                            .flex()
+                            .gap(px(space::S))
+                            .child(drop)
+                            .child(keep),
+                    )
+                    .into_any_element(),
+            );
+        }
+        Some(self.group(Some("Proposed notes"), rows))
     }
 
     /// The plugins page: each plugin, what it asks for that waits for the person's yes, and
@@ -17694,8 +17700,12 @@ ACTA_KEY=secret:ACTA_KEY",
     }
 
     /// The Agent defaults page: what every agent follows where it has nothing of its
-    /// own, changed live for every agent that follows it.
+    /// own, changed live for every agent that follows it, and the rules every agent
+    /// follows, kept apart from the defaults; or a new rule's form, while it's open.
     fn defaults_page(&mut self, cx: &mut Context<Self>) -> Div {
+        if self.rule_open {
+            return self.rule_form(cx);
+        }
         let p = self.p;
         let d = self.model.defaults.clone();
         let put = |args: Value| {
@@ -17864,15 +17874,15 @@ ACTA_KEY=secret:ACTA_KEY",
             }))
             .into_any_element();
         let rooms = self.router_group(&d, cx);
-        self.settings_page(
-            "defaults-page",
-            "Agent defaults",
-            Some(save),
-            vec![new_agents, ways, models, rooms, instructions],
-        )
+        // The rules sit by the permission mode, which they tighten or loosen.
+        let mut groups = vec![new_agents, ways];
+        groups.extend(self.rules_groups(cx));
+        groups.extend([models, rooms, instructions]);
+        self.settings_page("defaults-page", "Agent defaults", Some(save), groups)
     }
 
-    /// The About you page: the person's profile, which every agent's session starts with.
+    /// The About you page: the person's profile, which every agent's session starts with,
+    /// the notes agents propose that wait to be kept or dropped, and Import.
     fn profile_page(&mut self, cx: &mut Context<Self>) -> Div {
         let p = self.p;
         let said = match &self.model.profile {
@@ -17891,7 +17901,7 @@ ACTA_KEY=secret:ACTA_KEY",
                 cx.notify();
             }))
             .into_any_element();
-        let groups = vec![self.group(
+        let mut groups = vec![self.group(
             None,
             vec![
                 div()
@@ -17907,6 +17917,8 @@ ACTA_KEY=secret:ACTA_KEY",
                     .into_any_element(),
             ],
         )];
+        groups.extend(self.proposed_notes_group(cx));
+        groups.extend(self.import_groups(cx));
         self.settings_page("profile-page", "About you", Some(save), groups)
     }
 

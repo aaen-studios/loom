@@ -136,7 +136,7 @@ fn run(i: Instance) ! Error {
     // --- A server the agent has, started by its session ---
     let blue = try kept_sha(30, 90, 220)
     let put = try app.cmd("q_3", "mcp.put", try spec("later", "blue"))
-    try check(at(put, "ok") == Json.Bool(true), "the person adds a server on the MCP servers page, without testing it")
+    try check(at(put, "ok") == Json.Bool(true), "the person adds a server by hand in Spools, without testing it")
     let (before, _, _) = try fetch(i.base.copy(), i.token.copy(), "/files/{blue}")
     try check(before == 404, "it has no icon kept yet")
     _ = try app.cmd("q_4", "agent.update", Obj.new().s("agent", agent.copy()).j("mcp", Json.Array([Json.Str(String("fake")), Json.Str(String("later"))])).done())

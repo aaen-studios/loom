@@ -81,8 +81,11 @@ const POOL: { total: Limit[]; accounts: { name: string; state: string; ink?: 'wa
 };
 const ready = POOL.accounts.filter((a) => a.state === 'Ready').length;
 
-// The Rules page as the app draws it (desktop/src/rules.rs), each rule in the server's own words
-// (server/rules.calx, said).
+// Agent defaults as the app draws it (desktop/src/app.rs, defaults_page): the permission mode in
+// the app's words (desktop/src/model.rs, mode_name), then the rules every agent follows
+// (desktop/src/rules.rs), each in the server's own words (server/rules.calx, said), with New rule
+// at their end, and What if.
+const MODES = ['Asks first', "Asks when it's risky", "Doesn't ask"];
 const rules = [
 	{ said: 'Ask before commands like git push *', then: 'Asks you' },
 	{ said: 'Deny the path ~/.ssh/**', then: 'Denies' },
@@ -418,13 +421,22 @@ const faq = {
 				</p>
 			</div>
 			<div class="visual" data-reveal>
-				<div class="page rules" aria-label="The Rules page in loom's settings">
+				<div class="page rules" aria-label="Agent defaults in loom's settings, with the rules every agent follows">
 					<div class="page-head">
-						<span class="page-title">Rules</span>
-						<span class="btn-small">New rule</span>
+						<span class="page-title">Agent defaults</span>
+						<span class="btn-small primary">Save</span>
 					</div>
 					<div class="group">
-						<div class="group-label">Every agent</div>
+						<div class="group-label">How they work</div>
+						<div class="box">
+							<div class="row">
+								<span class="row-text"><span class="row-title">Permission</span></span>
+								<span class="segments">{MODES.map((m, i) => <span class:list={['segment', { on: i === 0 }]}>{m}</span>)}</span>
+							</div>
+						</div>
+					</div>
+					<div class="group">
+						<div class="group-label">Rules</div>
 						<div class="box">
 							{
 								rules.map((r) => (
@@ -437,6 +449,12 @@ const faq = {
 									</div>
 								))
 							}
+							<div class="row">
+								<span class="lead">
+									<svg class="i" viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12h14"></path><path d="M12 5v14"></path></svg>
+								</span>
+								<span class="row-text"><span class="row-title">New rule</span></span>
+							</div>
 						</div>
 					</div>
 					<div class="group what-if">
@@ -1031,6 +1049,23 @@ const faq = {
 	/* What if says why only once it has an answer, as the app does. */
 	.row-sub:empty {
 		display: none;
+	}
+	/* A row's icon in a small square of its own, as New rule's +. */
+	.lead {
+		flex: none;
+		width: var(--control-lead);
+		height: var(--control-lead);
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		border: 1px solid var(--line);
+		border-radius: var(--radius-row);
+		background: var(--bg);
+		color: var(--ink-2);
+	}
+	.lead .i {
+		width: 16px;
+		height: 16px;
 	}
 	/* A brain's icon from the ACP Registry, drawn in the ink as the app draws it, in a square of its own. */
 	.tile {

@@ -66,9 +66,9 @@ pub(super) fn learned_under(
     if v.later > 0 {
         any = true;
         let words = if v.later == 1 {
-            "1 waiting in Proposals".to_string()
+            "1 waiting in Skills".to_string()
         } else {
-            format!("{} waiting in Proposals", v.later)
+            format!("{} waiting in Skills", v.later)
         };
         let opener = this.clone();
         out = out.child(
@@ -85,7 +85,7 @@ pub(super) fn learned_under(
                 .child(Icon::new(Ico::Lightbulb).xsmall())
                 .child(words)
                 .on_click(move |_, _, cx| {
-                    let _ = opener.update(cx, |loom, cx| loom.open(Screen::Proposals, cx));
+                    let _ = opener.update(cx, |loom, cx| loom.open(Screen::Skills, cx));
                 }),
         );
     }
@@ -361,10 +361,10 @@ impl Loom {
         cx.notify();
     }
 
-    /// Opens a fix on the Proposals page, to change it before keeping it, as the person
-    /// left it if they changed it before.
+    /// Opens a fix at the top of Skills' list, to change it before keeping it, as the
+    /// person left it if they changed it before.
     fn change_fix(&mut self, l: &Learned, window: &mut Window, cx: &mut Context<Self>) {
-        self.open(Screen::Proposals, cx);
+        self.open(Screen::Skills, cx);
         let fix = l.proposal();
         self.proposal_open = Some(fix.clone());
         self.fill_proposal(&fix, window, cx);

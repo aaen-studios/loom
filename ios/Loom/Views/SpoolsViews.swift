@@ -173,7 +173,11 @@ struct SpoolsView: View {
         if rows.isEmpty {
             VStack(spacing: Tokens.Space.m) {
                 Text("Nothing connected yet").font(Fonts.body).foregroundStyle(P.ink3)
-                Button("Find one") { installedTab = false }.buttonStyle(.loom)
+                HStack(spacing: Tokens.Space.s) {
+                    Button("Find one") { installedTab = false }.buttonStyle(.loom)
+                    NavigationLink("Add by hand…") { ServerForm(server: nil) }
+                        .buttonStyle(CardButtonStyle(primary: false))
+                }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         } else {
@@ -195,6 +199,12 @@ struct SpoolsView: View {
                         }
                     }
                     .accessibilityLabel("\(r.title), \(r.line)")
+                }
+                // One Spools doesn't have, by its command or its address.
+                NavigationLink {
+                    ServerForm(server: nil)
+                } label: {
+                    Label("Add by hand…", systemImage: "plus").font(Fonts.body).foregroundStyle(P.ink)
                 }
             }
             // As close under the tabs as Find's search.
@@ -589,8 +599,8 @@ private struct SpoolDetailSheet: View {
 }
 
 /// One of the person's servers, pushed from Installed: its badge and name, with its own
-/// name and its host under it where they say more, then how it stands, its agents, and
-/// what can be done with it.
+/// name and its host under it where they say more, then how it stands, its agents, what
+/// can be done with it, and Edit… for its form.
 private struct InstalledDetail: View {
     @Environment(Session.self) private var session
     @Environment(\.dismiss) private var dismiss
@@ -613,6 +623,8 @@ private struct InstalledDetail: View {
                         }
                     }
                     ServerBlock(server: row.server) { dismiss() }
+                    NavigationLink("Edit…") { ServerForm(server: row.server) }
+                        .buttonStyle(CardButtonStyle(primary: false))
                 }
                 .padding(.horizontal, Tokens.PhoneSpace.gutter)
                 .padding(.vertical, Tokens.Space.l)
@@ -622,6 +634,78 @@ private struct InstalledDetail: View {
         .background(P.side)
         .navigationTitle(row?.title ?? "")
         .navigationBarTitleDisplayMode(.inline)
+    }
+}
+
+/// A server's form, pushed from Installed, as the desktop's Connection: its name, its
+/// command or address, its settings, one `NAME=value` or `NAME=secret:KEY` a line, and for
+/// one over HTTP a client of the person's own. For `server`, one of the person's servers,
+/// changed, a new name renaming it; for none, one added by hand. Save goes back.
+struct ServerForm: View {
+    @Environment(Session.self) private var session
+    @Environment(\.dismiss) private var dismiss
+    var server: McpServer?
+    @State private var name = ""
+    @State private var line = ""
+    @State private var settings = ""
+    @State private var clientId = ""
+    @State private var clientSecret = ""
+    @State private var missing = false
+    @State private var filled = false
+
+    var body: some View {
+        List {
+            Section("Connection") {
+                TextField("Name", text: $name)
+                    .textInputAutocapitalization(.never)
+                    .autocorrectionDisabled()
+                TextField("Command or URL", text: $line)
+                    .textInputAutocapitalization(.never)
+                    .autocorrectionDisabled()
+                    .keyboardType(.URL)
+                TextField("NAME=value", text: $settings, axis: .vertical)
+                    .font(Fonts.mono(Tokens.PhoneSize.small, relativeTo: .body))
+                    .textInputAutocapitalization(.never)
+                    .autocorrectionDisabled()
+                    .lineLimit(3...8)
+                if line.trimmingCharacters(in: .whitespaces).hasPrefix("http") {
+                    TextField("Client ID", text: $clientId)
+                        .textInputAutocapitalization(.never)
+                        .autocorrectionDisabled()
+                    SecureField("Client secret", text: $clientSecret)
+                }
+            }
+            .font(Fonts.body)
+            if missing {
+                Text("Needs a name, and a command or an address").font(Fonts.small).foregroundStyle(P.bad)
+            }
+        }
+        .scrollContentBackground(.hidden)
+        .background(P.side)
+        .navigationTitle(server == nil ? "Add by hand" : "Edit \(server?.name ?? "")")
+        .navigationBarTitleDisplayMode(.inline)
+        .toolbar {
+            ToolbarItem(placement: .confirmationAction) {
+                Button("Save") { save() }.font(Fonts.ui(Tokens.PhoneSize.body, .semibold))
+            }
+        }
+        .onAppear {
+            guard !filled, let s = server else { return }
+            filled = true
+            name = s.name
+            line = s.url.isEmpty ? s.command : s.url
+            settings = s.settings
+            clientId = s.clientId
+        }
+    }
+
+    private func save() {
+        guard let f = session.model.putServer(name: name, line: line, settings: settings, clientId: clientId, clientSecret: clientSecret, was: server?.name) else {
+            missing = true
+            return
+        }
+        session.send(f)
+        dismiss()
     }
 }
 

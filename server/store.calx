@@ -2268,7 +2268,7 @@ impl Store {
     }
 
     // Waiting proposals the person put off on the card under their reply, to
-    // decide on the Proposals page.
+    // decide on, at the top of Skills' list or on About you.
     pub fn later_proposal(self, user: String, id: String) -> bool ! Error {
         return try self.db.execute(String("UPDATE proposals SET later = 1 WHERE user = ? AND id = ? AND status = 'waiting'"), [t(user), t(id)]) > 0
     }

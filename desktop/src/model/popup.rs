@@ -2,7 +2,7 @@
 //! opens or as the person resized it, and what a list page shows: its list, the one
 //! picked from it beside the list, or one of them at a time where there isn't room.
 
-use super::{McpServer, McpTest, Routine, SignIn};
+use super::Routine;
 use crate::tokens::{layout, space};
 
 /// How much of the window the popup opens at, up to its largest.
@@ -142,29 +142,6 @@ pub enum Dot {
     Warn,
     Bad,
     Quiet,
-}
-
-/// An MCP server's row in the list: the short line under its name and its dot. Its
-/// last test, once there's been one, says how many tools it found or that it failed;
-/// before that, whom it's signed in as, that it needs a sign-in, or what it runs.
-pub fn mcp_line(m: &McpServer, test: Option<&McpTest>) -> (String, Option<Dot>) {
-    let count = |n: usize| match n {
-        0 => "No tools".to_string(),
-        1 => "1 tool".to_string(),
-        n => format!("{n} tools"),
-    };
-    match (test, &m.sign_in) {
-        (Some(McpTest::Testing), _) => ("Testing…".into(), Some(Dot::Quiet)),
-        (Some(McpTest::Works(tools, _)), _) => (count(tools.len()), Some(Dot::Ok)),
-        (Some(McpTest::NeedsSignIn), _) | (None, SignIn::Needed) => {
-            ("Needs you to sign in".into(), Some(Dot::Warn))
-        }
-        (Some(McpTest::Failed(why)), _) => (why.clone(), Some(Dot::Bad)),
-        (None, SignIn::SignedIn(who)) if who.is_empty() => ("Signed in".into(), Some(Dot::Ok)),
-        (None, SignIn::SignedIn(who)) => (format!("Signed in as {who}"), Some(Dot::Ok)),
-        (None, SignIn::No) if m.url.is_empty() => (m.command.clone(), None),
-        (None, SignIn::No) => (m.url.clone(), None),
-    }
 }
 
 /// A routine's dot in the list: on, paused (none), or how its last run went wrong. One
@@ -317,52 +294,6 @@ mod tests {
         assert!(finds("git", "GitHub 12 tools"));
         assert!(finds("HUB tools", "GitHub 12 tools"));
         assert!(!finds("gitlab", "GitHub 12 tools"));
-    }
-
-    #[test]
-    fn an_mcp_row_says_what_its_last_test_found() {
-        let server = |url: &str, sign_in: SignIn| McpServer {
-            name: "acta".into(),
-            command: "npx acta-mcp".into(),
-            url: url.into(),
-            settings: Vec::new(),
-            sign_in,
-            ..McpServer::default()
-        };
-        let local = server("", SignIn::No);
-        assert_eq!(mcp_line(&local, None), ("npx acta-mcp".into(), None));
-        let web = server("https://acta.example/mcp", SignIn::No);
-        assert_eq!(mcp_line(&web, None).0, "https://acta.example/mcp");
-        let tools = McpTest::Works(vec!["list_tasks".into(), "get_task".into()], None);
-        assert_eq!(
-            mcp_line(&web, Some(&tools)),
-            ("2 tools".into(), Some(Dot::Ok))
-        );
-        let one = McpTest::Works(vec!["read".into()], None);
-        assert_eq!(mcp_line(&web, Some(&one)).0, "1 tool");
-        let failed = McpTest::Failed("It didn't start".into());
-        assert_eq!(
-            mcp_line(&web, Some(&failed)),
-            ("It didn't start".into(), Some(Dot::Bad))
-        );
-        let needs = server("https://acta.example/mcp", SignIn::Needed);
-        assert_eq!(mcp_line(&needs, None).1, Some(Dot::Warn));
-        assert_eq!(
-            mcp_line(&web, Some(&McpTest::NeedsSignIn)).1,
-            Some(Dot::Warn)
-        );
-        let signed = server(
-            "https://acta.example/mcp",
-            SignIn::SignedIn("Elliot".into()),
-        );
-        assert_eq!(
-            mcp_line(&signed, None),
-            ("Signed in as Elliot".into(), Some(Dot::Ok))
-        );
-        assert_eq!(
-            mcp_line(&signed, Some(&McpTest::Testing)).1,
-            Some(Dot::Quiet)
-        );
     }
 
     #[test]

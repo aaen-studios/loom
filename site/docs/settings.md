@@ -2,21 +2,31 @@
 
 The gear at the bottom of the sidebar opens Settings, as a popup over the chat. Its pages are down the left, under three headings:
 
-- **You**: About you, Appearance, Chat, Emoji, App & notifications, and Voice.
-- **Agents**: Defaults, Rules, Brains, Skills, Proposals, Spools, MCP servers, Secrets and Plugins.
+- **You**: About you, Appearance, Chat, App & notifications, and Voice.
+- **Agents**: Defaults, Brains, Skills, Spools, Secrets and Plugins.
 - **Work**: Routines and Tasks.
 
-Import sits under them. Click outside the popup, or press Esc, to close it. Drag its bottom-right corner to make it bigger or smaller, and it opens at that size next time.
+Some things are on the page they belong with:
 
-Brains, Skills, Proposals, MCP servers and Routines list theirs down the left, with the one you pick beside them. What you change in one stays, with a dot on its row, until you **Save** or **Cancel**, even if you pick another or close Settings. A new name in an MCP server's or a skill's form renames it.
+- **About you** has the notes agents propose, each with **Keep** and **Drop**, and **Import**.
+- **Appearance** has your emoji and how emoji show ([Emoji](#emoji)).
+- **Defaults** has the rules every agent follows, and What if ([Permissions](permissions.md)).
+- **Skills** has the skills and fixes agents propose at the top of its list, marked Proposed.
+- **Spools**, under **Installed**, has your MCP servers, and **Add by hand…** adds one Spools doesn't have ([MCP servers and secrets](agents.md#mcp-servers-and-secrets)).
 
-The search at the top finds a page by its name or by what's on it: "dark" finds Appearance, and "steer" or "group chats" finds Defaults.
+While something agents propose waits for you, Skills and About you show how many beside their names.
+
+Click outside the popup, or press Esc, to close it. Drag its bottom-right corner to make it bigger or smaller, and it opens at that size next time.
+
+Brains, Skills, Spools' Installed and Routines list theirs down the left, with the one you pick beside them. What you change in one stays, with a dot on its row, until you **Save** or **Cancel**, even if you pick another or close Settings. A new name in an MCP server's or a skill's form renames it.
+
+The search at the top finds a page by its name or by what's on it: "dark" finds Appearance, and "steer" or "group chats" finds Defaults. The names of pages that moved find where they went: "rules" finds Defaults, "emoji" Appearance, "import" About you, "proposals" Skills and About you, and "mcp" Spools.
 
 What's about the server rather than you (Add a device, People, Move, Add a server) is in the server popup instead. Click the server's name at the bottom of the sidebar to open it.
 
 ## This device's settings
 
-Appearance, Chat, App & notifications, the options under your emoji in Emoji, and Voice's two Shortcuts and Hold to talk belong to the device you set them on, not to your account. They're kept in `prefs.json` in the app's data folder, so your laptop and your desktop can each be set their own way.
+Appearance (but your emoji), Chat, App & notifications, and Voice's two Shortcuts and Hold to talk belong to the device you set them on, not to your account. They're kept in `prefs.json` in the app's data folder, so your laptop and your desktop can each be set their own way.
 
 Everything else in Settings is kept on the instance, so every device you sign in on has it.
 
@@ -25,6 +35,17 @@ Everything else in Settings is kept on the instance, so every device you sign in
 - **Theme**: System (it follows Windows or macOS), Light or Dark.
 - **Chat text**: Small, Default or Large.
 - **Fonts**: the words in loom's own font, Geist, or the system's, and code in Geist Mono or the system's monospace font.
+
+### Emoji
+
+**Your emoji** are pictures you add to use as emoji, up to 200. **Add** takes a PNG or a JPEG of up to 256 KB. It's made 128 × 128 on the instance and named after its file. Click a name to change it: 2 to 32 letters a to z, digits and `_`. Point at one and click × to delete it, and **Undo** brings it back. Moving GIFs, WebP and animated PNGs can't be added yet.
+
+The rest belong to this device:
+
+- **Play animated emoji**: Always, or On hover. Neither plays while the system's reduce motion is on.
+- **Skin tone**: the tone emoji that have one come in, from six hands.
+- **Turn :) into 🙂**: an emoticon followed by a space becomes its emoji. Off by default.
+- **Show the emoji button in the composer**. On by default.
 
 ## Chat
 
@@ -46,17 +67,6 @@ Under **Composer**:
 Under **Sidebar**:
 
 - **Search in the sidebar**: a search box over the agents that finds words in every chat. Off by default; Ctrl+Shift+F (⌘⇧F on a Mac) opens it either way.
-
-## Emoji
-
-**Your emoji** are pictures you add to use as emoji, up to 200. **Add** takes a PNG or a JPEG of up to 256 KB. It's made 128 × 128 on the instance and named after its file. Click a name to change it: 2 to 32 letters a to z, digits and `_`. Point at one and click × to delete it, and **Undo** brings it back. Moving GIFs, WebP and animated PNGs can't be added yet.
-
-The rest belong to this device:
-
-- **Play animated emoji**: Always, or On hover. Neither plays while the system's reduce motion is on.
-- **Skin tone**: the tone emoji that have one come in, from six hands.
-- **Turn :) into 🙂**: an emoticon followed by a space becomes its emoji. Off by default.
-- **Show the emoji button in the composer**. On by default.
 
 ## App & notifications
 

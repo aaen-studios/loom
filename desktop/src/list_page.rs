@@ -72,10 +72,8 @@ pub(super) struct ListPage {
 /// What the find field over a list page's list says, by its page.
 fn find_words(screen: Screen) -> &'static str {
     match screen {
-        Screen::Mcp => "Find a server",
         Screen::Programs => "Find a brain",
         Screen::Skills => "Find a skill",
-        Screen::Proposals => "Find a proposal",
         Screen::Routines => "Find a routine",
         Screen::Installed => "Find a server",
         _ => "Find",
@@ -128,48 +126,62 @@ impl Loom {
         }
         self.keep_draft(cx);
         let split = self.list_split();
-        let filled = |this: &Self, key: &str| {
-            form_drafts::draft_page(open).is_some_and(|p| this.model.drafts.is_open(p, Some(key)))
-        };
+        let filled =
+            |this: &Self, page: DraftPage, key: &str| this.model.drafts.is_open(page, Some(key));
         match open {
-            Screen::Mcp => {
-                let servers = self.model.mcp_servers.clone();
-                let keys: Vec<&str> = servers.iter().map(|m| m.name.as_str()).collect();
-                // One saved under a new name: the page follows it there.
-                for (was, now) in self.model.drafts.moved_in(DraftPage::Mcp, &keys) {
-                    if self.mcp_open.as_ref() == Some(&was) {
-                        self.mcp_open = Some(Some(now));
+            Screen::Installed => {
+                let rows = self.model.installed_rows();
+                let keys: Vec<String> = rows
+                    .iter()
+                    .map(|r| self.model.mcp_servers[r.server].name.clone())
+                    .collect();
+                let names: Vec<&str> = keys.iter().map(String::as_str).collect();
+                // One saved under a new name, or one added by hand, once the list has it:
+                // the page follows it there.
+                for (was, now) in self.model.drafts.moved_in(DraftPage::Mcp, &names) {
+                    let adding = was.is_none() && self.mcp_open == Some(None);
+                    if adding || (was.is_some() && self.model.spools.picked == was) {
+                        self.mcp_open = None;
+                        self.model.spools.picked = Some(now);
                     }
                 }
-                let open_at = self.mcp_open.as_ref().map(|o| o.as_deref());
-                if let Pane::Item(i) = popup::shows(split, open_at, &keys, false).pane {
-                    if !filled(self, &servers[i].name) {
-                        self.fill_mcp(&servers[i], window, cx);
+                let open_at = self.installed_open();
+                if let Pane::Item(i) = popup::shows(split, open_at, &names, false).pane {
+                    if !filled(self, DraftPage::Mcp, &keys[i]) {
+                        let m = self.model.mcp_servers[rows[i].server].clone();
+                        self.fill_mcp(&m, window, cx);
                     }
                 }
             }
             Screen::Skills => {
                 let skills = self.model.skills.clone();
-                let keys: Vec<&str> = skills.iter().map(|k| k.name.as_str()).collect();
-                for (was, now) in self.model.drafts.moved_in(DraftPage::Skills, &keys) {
+                let names: Vec<&str> = skills.iter().map(|k| k.name.as_str()).collect();
+                for (was, now) in self.model.drafts.moved_in(DraftPage::Skills, &names) {
                     if self.skill_open.as_ref() == Some(&was) {
                         self.skill_open = Some(Some(now));
                     }
                 }
-                let open_at = self.skill_open.as_ref().map(|o| o.as_deref());
-                if let Pane::Item(i) = popup::shows(split, open_at, &keys, false).pane {
-                    if !filled(self, &skills[i].name) {
-                        self.fill_skill(&skills[i], window, cx);
-                    }
-                }
-            }
-            Screen::Proposals => {
-                let proposals = self.model.proposals.clone();
-                let keys: Vec<&str> = proposals.iter().map(|k| k.id.as_str()).collect();
-                let open_at = self.proposal_open.as_ref().map(|k| Some(k.id.as_str()));
-                if let Pane::Item(i) = popup::shows(split, open_at, &keys, false).pane {
-                    if !filled(self, &proposals[i].id) {
-                        self.fill_proposal(&proposals[i], window, cx);
+                // What's proposed is at the top of the list, then the skills.
+                let proposed = self.model.proposed_skills();
+                let keys = skill_keys(&proposed, &skills);
+                let key_refs: Vec<&str> = keys.iter().map(String::as_str).collect();
+                let open_at = self.skills_open();
+                if let Pane::Item(i) = popup::shows(
+                    split,
+                    open_at.as_ref().map(|o| o.as_deref()),
+                    &key_refs,
+                    false,
+                )
+                .pane
+                {
+                    if let Some(k) = proposed.get(i) {
+                        if !filled(self, DraftPage::Proposals, &k.id) {
+                            self.fill_proposal(k, window, cx);
+                        }
+                    } else if let Some(k) = skills.get(i - proposed.len()) {
+                        if !filled(self, DraftPage::Skills, &k.name) {
+                            self.fill_skill(k, window, cx);
+                        }
                     }
                 }
             }
@@ -183,7 +195,7 @@ impl Loom {
                 let names: Vec<&str> = keys.iter().map(String::as_str).collect();
                 let open_at = self.program_open.as_ref().map(|o| o.as_deref());
                 if let Pane::Item(i) = popup::shows(split, open_at, &names, false).pane {
-                    if !filled(self, &keys[i]) {
+                    if !filled(self, DraftPage::Brains, &keys[i]) {
                         self.fill_brain(&keys[i], window, cx);
                     }
                 }
@@ -197,12 +209,16 @@ impl Loom {
     fn list_back(&mut self, cx: &mut Context<Self>) {
         self.leave_form(cx);
         match self.popup {
-            Some(Screen::Mcp) => self.mcp_open = None,
-            Some(Screen::Skills) => self.skill_open = None,
-            Some(Screen::Proposals) => self.proposal_open = None,
+            Some(Screen::Skills) => {
+                self.skill_open = None;
+                self.proposal_open = None;
+            }
             Some(Screen::Programs) => self.program_open = None,
             Some(Screen::Routines) => self.routine_open = None,
-            Some(Screen::Installed) => self.model.spools.picked = None,
+            Some(Screen::Installed) => {
+                self.model.spools.picked = None;
+                self.mcp_open = None;
+            }
             _ => {}
         }
         cx.notify();
