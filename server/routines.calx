@@ -382,10 +382,15 @@ pub fn hint(status: String, error: String) -> String {
 // What a routine's agent is told with each run's prompt, and each step's of
 // its flow (PLAN.md, "Routines"): that the turn is quiet, so nothing of it
 // reaches the person but what it posts with routine_post. `flow` says whether
-// its answer goes on to steps of the routine's flow.
-pub fn quiet_note(flow: bool) -> String {
+// its answer goes on to steps of the routine's flow, and `code` whether its
+// agent is in Code Mode, where those tools, and any other a prompt names by
+// its own name, are called in run_code (LOO-461): its program lists only
+// search_tools and run_code, so an agent told to call routine_post took it
+// that it had no such tool.
+pub fn quiet_note(flow: bool, code: bool) -> String {
     let on = if flow { " Your answer goes on to the routine's next steps, which the person doesn't see either." } else { "" }
-    return "[loom: Your person sees nothing of this turn: not this message, nor what you answer. It runs in a session of its own, apart from your chat with them, so none of that chat is here; search_messages finds it if you need it. When there's something worth telling them, post it with routine_post: it goes in your chat with them as your message, and they're notified. With nothing new, just finish, or end with routine_quiet. If it can't be done, say why with routine_failed, which they're told.{on}]"
+    let tools = if code { #" You're in Code Mode, so these and every other tool are called inside run_code, not directly: `await loom.routine_post({text})`, `await loom.routine_quiet({})`, `await loom.routine_failed({why})`. A tool the prompt names by its own name, such as one of a connection's, is there too, under `loom.` for loom's own and `mcp.<server>.` for the rest; search_tools finds it by that name."# } else { "" }
+    return "[loom: Your person sees nothing of this turn: not this message, nor what you answer. It runs in a session of its own, apart from your chat with them, so none of that chat is here; search_messages finds it if you need it. When there's something worth telling them, post it with routine_post: it goes in your chat with them as your message, and they're notified. With nothing new, just finish, or end with routine_quiet. If it can't be done, say why with routine_failed, which they're told.{tools}{on}]"
 }
 
 // --- What a run is given in its own session ---
@@ -924,9 +929,21 @@ fn openbot_tools_are_loom_tools() {
 
 @test
 fn the_agent_is_told_the_run_is_quiet() {
-    let told = quiet_note(false)
+    let told = quiet_note(false, false)
     assert(told.starts_with("[loom: ") and told.contains("routine_post") and told.contains("routine_quiet") and told.contains("routine_failed") and not told.contains("next steps"))
-    assert(quiet_note(true).contains("next steps"))
+    assert(not told.contains("run_code"))
+    assert(quiet_note(true, false).contains("next steps"))
+}
+
+@test
+fn an_agent_in_code_mode_is_told_its_routine_tools_are_in_run_code() {
+    let told = quiet_note(false, true)
+    assert(told.contains("Code Mode") and told.contains("run_code"))
+    assert(told.contains(#"loom.routine_post({text})"#) and told.contains("loom.routine_quiet(") and told.contains(#"loom.routine_failed({why})"#))
+    assert(told.contains("mcp.<server>.") and told.contains("search_tools"))
+    assert(told.ends_with("]"))
+    let flowing = quiet_note(true, true)
+    assert(flowing.contains("run_code") and flowing.contains("next steps"))
 }
 
 @test
