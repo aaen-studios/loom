@@ -160,6 +160,69 @@ fn code_mode(runtime: String, ann: mut Session, owner: mut Session, ann_id: Stri
     try check(reply_text(try reply_in(mut ann, LONG)) == "run_code: Returned:\n5", "and her yes lets it go on")
 }
 
+// The folders `box` sees, by where they're mounted in it, each with a space after.
+fn mounts(runtime: own String, box: own String) -> String ! Error {
+    let out = try Command.new(runtime).args([String("inspect"), String("--format"), String(#"{{range .Mounts}}{{.Destination}} {{end}}"#), box]).output()
+    if not out.status.success() { fail "there's no sandbox: {out.error_text().trim()}" }
+    return "{out.text().trim()} "
+}
+
+// A private agent (PLAN.md, "Private agents"): one of hers runs in a sandbox of
+// its own, which sees only its own folder, beside hers, and acp/, so it reaches
+// none of her folder, and her other agents none of its. Its instructions, her
+// skills and what it writes are in its folder, and a file it links to is read
+// in its sandbox. Closed to the network too, it's still in its own folder, with
+// loom's tools through its egress. Made normal again, it's back in hers.
+// `other` is an agent of hers in her own sandbox.
+fn private_agent(runtime: String, ann: mut Session, data: String, ann_id: String, other: String) ! Error {
+    let home = "{data}/sandboxes/{ann_id}"
+    let made = try ann.cmd("q_30", "agent.create", Obj.new().s("name", String("Kept")).s("acp_agent", String("boxed")).s("instructions", String("Kept apart.")).b("code_mode", false).b("private", true).done())
+    let kept = str_at(at(at(made, "value"), "agent"), "id") ?? String()
+    let mine = "{data}/sandboxes/{ann_id}.private/{kept}"
+    let chat = str_at(at(try ann.cmd("q_31", "conversation.create", Obj.new().s("agent", kept.copy()).done()), "value"), "conversation") ?? String()
+    let steps = "/env HOME\n/mcp list\n/write {mine}/notes.log kept\n/write {home}/shared/leak.md out\n/link {mine}/AGENTS.md\n/link {home}/agents/{other}/AGENTS.md\nIt's in `notes.log`."
+    try ann.send(Obj.new().s("t", String("send")).s("cid", String("m_30")).s("conversation", chat.copy()).s("text", steps).done())
+    let reply = try ann.reply()
+    let said = reply_text(reply.copy())
+    println("      the private agent said: {said}")
+    try check(said.contains("HOME={mine}") and said.contains("remember"), "a private agent's home is its own folder, beside hers, with loom's tools through the gate")
+    let box = "loom-{ann_id}-{kept}"
+    let seen = try mounts(runtime.copy(), box.copy())
+    println("      its sandbox sees: {seen}")
+    try check(seen.contains("{mine} ") and seen.contains("{data}/acp ") and not seen.contains("{home} "), "in a sandbox of its own, which sees its folder and acp/, but not hers")
+    let net = try Command.new(runtime.copy()).args([String("inspect"), String("--format"), String(#"{{.HostConfig.NetworkMode}}"#), box.copy()]).output()
+    try check(net.status.success() and net.text().trim() != "none", "and has her sandbox's network, being open to it")
+    try check(file_blocks(reply.copy()) == 1, "a file it links to is read in its sandbox: its own AGENTS.md, but not her other agent's")
+    try check(fs.exists("{mine}/notes.log") and not fs.exists("{home}/shared/leak.md"), "what it writes is in its folder, and her shared folder's path leads nowhere of hers")
+    try check("{at(reply, "mentions")}".contains(#""path":"notes.log","name":"notes.log""#), "a file its reply names in its folder comes with it")
+    let instructions = try fs.read_text("{mine}/CLAUDE.md") ?? String()
+    let skill = try fs.read_text("{mine}/.claude/skills/tidy/SKILL.md") ?? String()
+    try check(instructions == "Kept apart." and skill.contains("Put things back.") and not fs.exists("{home}/agents/{kept}"), "its instructions and her skills go in its own folder, through its sandbox")
+    let looked = try Command.new(runtime.copy()).args([String("exec"), "loom-{ann_id}", String("test"), String("-e"), mine.copy()]).output()
+    try check(not looked.status.success(), "and her sandbox, where her other agents run, doesn't see its folder")
+    _ = try ann.until("event", "run.finished")
+
+    // Closed to the network as well: its own sandbox has no network, and still sees only its folder.
+    _ = try ann.cmd("q_32", "agent.update", Obj.new().s("agent", kept.copy()).j("network", Json.Array(List<Json>())).done())
+    try ann.send(Obj.new().s("t", String("send")).s("cid", String("m_31")).s("conversation", chat.copy()).s("text", String("/env HOME\n/mcp list\n/net example.org:443")).done())
+    let closed = reply_text(try ann.reply())
+    println("      closed, it said: {closed}")
+    try check(closed.contains("HOME={mine}") and closed.contains("remember") and closed.contains("direct closed, proxy 403"), "closed to the network too, it's in its own folder, with loom's tools through its egress, and nothing else")
+    let closed_net = try Command.new(runtime.copy()).args([String("inspect"), String("--format"), String(#"{{.HostConfig.NetworkMode}}"#), box.copy()]).output()
+    let closed_seen = try mounts(runtime.copy(), box.copy())
+    try check(closed_net.text().trim() == "none" and closed_seen.contains("{mine} ") and not closed_seen.contains("{home} "), "in a sandbox of its own with no network, which sees only its folder")
+    _ = try ann.until("event", "run.finished")
+
+    // Made normal again: its own sandbox goes, and it's back in her folder and her sandbox.
+    _ = try ann.cmd("q_33", "agent.update", Obj.new().s("agent", kept.copy()).j("network", Json.Null).b("private", false).done())
+    let gone = try Command.new(runtime.copy()).args([String("container"), String("inspect"), box]).output()
+    try check(not gone.status.success(), "made normal again, its own sandbox goes")
+    try ann.send(Obj.new().s("t", String("send")).s("cid", String("m_32")).s("conversation", chat).s("text", String("/env HOME")).done())
+    let back = reply_text(try ann.reply())
+    try check(back.contains("HOME={home}") and fs.exists("{home}/agents/{kept}/CLAUDE.md"), "and it runs in her sandbox, in her folder")
+    _ = try ann.until("event", "run.finished")
+}
+
 fn run(runtime: String) ! Error {
     println("\n{runtime}:")
     try build_image(runtime.copy(), "1")
@@ -244,6 +307,8 @@ fn run(runtime: String) ! Error {
     _ = try ann.cmd("q_23", "agent.update", Obj.new().s("agent", closed_agent.copy()).j("network", Json.Null).done())
     let dropped = try Command.new(runtime.copy()).args([String("container"), String("inspect"), "loom-{ann_id}-{closed_agent}"]).output()
     try check(not dropped.status.success(), "opening its network back up takes its own sandbox away")
+
+    try private_agent(runtime.copy(), mut ann, data.copy(), ann_id.copy(), agent.copy())
 
     // The owner's agents can be isolated too, and run in a sandbox of the
     // owner's, on the program's settings, which are the owner's own.

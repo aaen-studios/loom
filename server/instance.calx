@@ -706,7 +706,7 @@ pub struct Instance {
     search_done: Receiver<searcher.Done>
     searches: Map<String, Waiter>    // each search under way, by its key, and who it answers
     next_search: u64
-    disk_used: Map<String, (i64, i64)>    // person -> when their sandbox folder was measured, and its bytes
+    disk_used: Map<String, (i64, i64)>    // a sandbox folder -> when it was measured, and its bytes
     doors: LinkedMap<String, egress.Door>    // "user/agent" -> the egress of an agent closed to the network (server/egress.calx)
     moving: String    // where the instance is moving to, while it is
     move_waiters: List<Waiter>    // instance.move commands waiting on the move
@@ -2788,25 +2788,36 @@ impl Instance {
         return i.sandboxed(user) or bool_at(agent, "isolated") == some(true)
     }
 
-    // How much a person's sandbox folder holds, in bytes: measured in the sandbox at
-    // most once every DISK_LOOK_MS, or 0 when it can't be told.
+    // How much a person's sandbox folders hold, in bytes: their own folder and each
+    // of their private agents' (PLAN.md, "Private agents"), which `p`'s is one of.
+    // `p`'s is measured in its sandbox at most once every DISK_LOOK_MS, and the
+    // others are as they were last measured, or 0 when they can't be told.
     fn sandbox_used(i: mut Instance, p: sandbox.Place) -> i64 {
+        let b = i.boxes.copy() else return 0
         let t = now()
-        if let seen = i.disk_used.find(p.user.copy()) {
-            if t - seen.0 < DISK_LOOK_MS { return seen.1 }
+        let folder = b.seen(p.copy())
+        var fresh = false
+        if let seen = i.disk_used.find(folder.copy()) { fresh = t - seen.0 < DISK_LOOK_MS }
+        if not fresh {
+            if let used = b.used(p.copy()) { i.disk_used.insert(folder, (t, used)) }
         }
-        let measured = if let b = i.boxes { b.used(p.copy()) } else { none }
-        let used = measured else return 0
-        i.disk_used.insert(p.user.copy(), (t, used))
-        return used
+        let home = b.home(p.user.copy())
+        let private = "{home}.private/"
+        var total: i64 = 0
+        for (k, v) in i.disk_used {
+            if k == home or k.starts_with(private.copy()) { total += v.1 }
+        }
+        return total
     }
 
     // The sandbox `agent` runs in: its person's, or its own for one closed to
-    // the network. none for the owner's agents that aren't isolated.
+    // the network or private. none for the owner's agents that aren't isolated.
     fn place(i: Instance, user: String, agent: Json) -> sandbox.Place? {
         if not i.isolated(user.copy(), agent.copy()) { return none }
         let closed = hosts_of(agent.copy()) != none
-        return some(sandbox.Place { user: user.copy(), agent: if closed { str_at(agent, "id") ?? String() } else { String() } })
+        let private = bool_at(agent.copy(), "private") == some(true)
+        if not closed and not private { return some(sandbox.person(user)) }
+        return some(sandbox.Place { user: user.copy(), agent: str_at(agent, "id") ?? String(), closed: closed, private: private })
     }
 
     // The agent `id` of `user`'s, or one with only its id once it's gone.
@@ -2870,10 +2881,15 @@ impl Instance {
 
     // `agent`'s folder, where its program runs and its instructions and skills
     // are: the folder it names, or one in the data folder. An agent in a
-    // sandbox always has its in the person's own folder, whatever it names.
+    // sandbox always has its in the person's own folder, whatever it names, or a
+    // private one beside it, which its sandbox of its own sees alone.
     fn agent_folder(i: Instance, user: String, agent: Json) -> String {
         let id = str_at(agent.copy(), "id") ?? String()
         if i.isolated(user.copy(), agent.copy()) {
+            if bool_at(agent.copy(), "private") == some(true) {
+                if let b = i.boxes { return b.private_folder(user, id) }
+                return "{i.data}/sandboxes/{user}.private/{id}"
+            }
             if let b = i.boxes { return "{b.home(user)}/agents/{id}" }
             return "{i.data}/sandboxes/{user}/agents/{id}"
         }
@@ -2887,7 +2903,8 @@ impl Instance {
         let key = "{user}/{id}"
         if let d = i.doors.find(key.copy()) { return d.port }
         let b = i.boxes.copy() else { fail "this instance has no sandboxes" }
-        let place = sandbox.Place { user: user.copy(), agent: id }
+        let place = i.place(user.copy(), agent.copy()) ?? sandbox.person(user.copy())
+        if not place.closed { fail "the agent isn't closed to the network" }
         try b.ready(place.copy())
         let d = try egress.open(b.runtime.copy(), place.name(), b.gate_host.copy(), b.gate, hosts_of(agent) ?? List<String>())
         let port = d.port
@@ -2931,6 +2948,8 @@ impl Instance {
         i.close_browser("{user}/{id}")
         i.close_doors(user.copy(), some(id.copy()))
         if let old = was {
+            // A write there next readies it again, rather than finding it gone.
+            if old.its_own() and i.ready_now == old.name() { i.ready_now = String() }
             if let b = i.boxes { b.drop_place(old) }
         }
     }
@@ -3128,7 +3147,7 @@ impl Instance {
 
     fn put_file(i: Instance, place: sandbox.Place?, path: String, data: List<u8>) ! Error {
         if let b = try i.box_of(place.copy()) {
-            try b.write(place.copy() ?? sandbox.Place { user: String(), agent: String() }, path, data)
+            try b.write(place.copy() ?? sandbox.person(String()), path, data)
             return
         }
         if let cut = path.find_last("/") { try fs.make_dir_all(path[..cut].copy()) }
@@ -3140,7 +3159,7 @@ impl Instance {
     fn put_files(i: Instance, place: sandbox.Place?, dirs: List<String>, writes: List<(String, List<u8>)>) ! Error {
         if dirs.len() == 0 and writes.len() == 0 { return }
         if let b = try i.box_of(place.copy()) {
-            try b.write_all(place.copy() ?? sandbox.Place { user: String(), agent: String() }, dirs, writes)
+            try b.write_all(place.copy() ?? sandbox.person(String()), dirs, writes)
             return
         }
         for d in dirs {
@@ -3154,7 +3173,7 @@ impl Instance {
 
     fn drop_file(i: Instance, place: sandbox.Place?, path: String) ! Error {
         if let b = try i.box_of(place.copy()) {
-            try b.remove_file(place.copy() ?? sandbox.Place { user: String(), agent: String() }, path)
+            try b.remove_file(place.copy() ?? sandbox.person(String()), path)
             return
         }
         if fs.exists(path.copy()) { try fs.remove_file(path) }
@@ -3162,7 +3181,7 @@ impl Instance {
 
     fn drop_dir(i: Instance, place: sandbox.Place?, path: String) ! Error {
         if let b = try i.box_of(place.copy()) {
-            try b.remove_dir(place.copy() ?? sandbox.Place { user: String(), agent: String() }, path)
+            try b.remove_dir(place.copy() ?? sandbox.person(String()), path)
             return
         }
         try fs.remove_dir(path)
@@ -4995,7 +5014,7 @@ impl Instance {
         if boxed {
             if let b = i.boxes {
                 // The gate, or in a sandbox closed to the network, its egress.
-                let place = i.place(user.copy(), merge(wanted.copy(), Obj.new().s("id", agent.copy()).done())) ?? sandbox.Place { user: user.copy(), agent: String() }
+                let place = i.place(user.copy(), merge(wanted.copy(), Obj.new().s("id", agent.copy()).done())) ?? sandbox.person(user.copy())
                 base = b.tools_url(place)
                 exe = String("loom")
             }
@@ -8995,7 +9014,7 @@ impl Instance {
         if let p = place {
             let b = i.boxes.copy() else { fail "its agent runs in a sandbox, and this instance has none" }
             try b.ready(p.copy())
-            if p.closed() { _ = try i.door(user.copy(), agent.copy()) }
+            if p.closed { _ = try i.door(user.copy(), agent.copy()) }
             let (shell, args) = routines.gate_shell(command, false)
             let (c, a) = b.wrap(p, folder.copy(), names, shell, args)
             return routine_gate.Job { run: run.copy(), program: c, args: a, env: env, dir: folder, ms: ms }
@@ -14154,7 +14173,7 @@ impl Instance {
             }
             try b.ready(p.copy())
             i.ready_now = p.name()
-            if p.closed() { _ = try i.door(user.copy(), agent.copy()) }
+            if p.closed { _ = try i.door(user.copy(), agent.copy()) }
             let (boxed_settings, names) = try i.program_settings(user.copy(), program.copy(), acp_agent.env.copy(), true)
             settings = boxed_settings
             let (c, a) = b.wrap(p, folder.copy(), names, command, args)
