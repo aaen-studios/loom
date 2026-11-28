@@ -17,7 +17,7 @@ import std.env
 import std.fs
 import std.json.{Json}
 import std.process.{Command, exit}
-import shared.obj.{Obj, at, int_at, str_at}
+import shared.obj.{Obj, at, bool_at, int_at, str_at}
 import shared.client.{Session, reply_text}
 import tests.kit.{Instance, calx, check, loom}
 
@@ -387,6 +387,18 @@ fn run(runtime: String) ! Error {
     try check(owner_said.contains("OWNER_KEY=the owner's own") and owner_said.contains("remember"), "on the owner's own settings, with loom's tools")
     let owner_box = try Command.new(runtime.copy()).args([String("container"), String("inspect"), "loom-{owner_id}"]).output()
     try check(owner_box.status.success(), "in the owner's sandbox")
+
+    // Private is a fresh start the computer keeps too (LOO-462): an agent of the
+    // owner's made private is isolated, in a sandbox of its own, and made normal
+    // again, it's taken back out.
+    let plain_made = try owner.cmd("q_6p", "agent.create", Obj.new().s("name", String("Plain")).s("acp_agent", String("boxed")).s("instructions", String("")).b("code_mode", false).done())
+    let plain = str_at(at(at(plain_made, "value"), "agent"), "id") ?? String()
+    let made_private = at(at(try owner.cmd("q_6q", "agent.update", Obj.new().s("agent", plain.copy()).b("private", true).done()), "value"), "agent")
+    try check(bool_at(made_private, "isolated") == some(true), "an agent of the owner's made private is isolated with it")
+    let made_normal = at(at(try owner.cmd("q_6r", "agent.update", Obj.new().s("agent", plain.copy()).b("private", false).done()), "value"), "agent")
+    try check(bool_at(made_normal, "isolated") == some(false), "and made normal again, it isn't")
+    let pickle_made = at(at(try owner.cmd("q_6s", "agent.create", Obj.new().s("name", String("Pickle")).s("acp_agent", String("boxed")).s("instructions", String("")).b("code_mode", false).b("private", true).done()), "value"), "agent")
+    try check(bool_at(pickle_made, "isolated") == some(true), "and one made private is isolated from the start")
 
     // An update: the instance starts again as a newer loom, whose image is another.
     // The sandboxes made from the older one's go, so their loom mcp and loom egress

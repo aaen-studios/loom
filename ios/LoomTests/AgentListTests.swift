@@ -211,20 +211,14 @@ import Testing
         #expect(m.notice == "Scribe is in Daily.")
     }
 
-    @Test func makePrivateOffersASandboxOnlyWhereThereAreSome() {
+    @Test func privateIsOfferedOnlyWhereTheInstanceKeepsItApart() {
         let m = caughtUp()
-        m.take(data("agents", [
-            ["id": "a_1", "name": "Builder", "color": "mint", "acp_agent": "claude"],
-            ["id": "a_2", "name": "Scribe", "color": "mint", "acp_agent": "claude", "isolated": true],
-        ]))
-        // No sandboxes, as on the desktop's own instance on Windows: nothing to offer.
-        #expect(!m.offersIsolating("a_1"))
-        m.take(["t": "result", "id": "app.acp", "ok": true, "value": ["programs": [], "owner": true, "sandboxes": true]])
-        #expect(m.offersIsolating("a_1"))
-        // Isolated already, as every member's agent is.
-        #expect(!m.offersIsolating("a_2"))
-        let f = m.makePrivate("a_1", true, isolate: true)
-        #expect(f["args"] == ["agent": "a_1", "private": true, "isolated": true])
+        // No sandboxes, as on the desktop's own instance on Windows: nothing keeps a
+        // private agent to its own folder, so it can't be made private (LOO-462).
+        m.take(["t": "result", "id": "app.acp", "ok": true, "value": ["programs": [], "owner": true, "sandboxes": false, "private": false]])
+        #expect(!m.canPrivate)
+        m.take(["t": "result", "id": "app.acp", "ok": true, "value": ["programs": [], "owner": true, "sandboxes": true, "private": true]])
+        #expect(m.canPrivate)
         #expect(m.makePrivate("a_1", true)["args"] == ["agent": "a_1", "private": true])
     }
 

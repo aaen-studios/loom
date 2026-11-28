@@ -47,6 +47,12 @@ fn run() ! Error {
     try check(code(to_isolated) == "not_here", "nor can one be isolated later, here")
     let to_network = try owner.cmd("q_7", "agent.update", Obj.new().s("agent", id.copy()).j("network", hosts([])).done())
     try check(code(to_network) == "bad_request", "or given a network of its own")
+    // A private agent is kept to its own folder by the computer, or not made (LOO-462).
+    try check(bool_at(at(listed.copy(), "value"), "private") == some(false), "acp.list says agents can't be made private here")
+    let private = try owner.cmd("q_7p", "agent.create", Obj.new().s("name", String("Pickle")).s("acp_agent", String("fake")).s("instructions", String("")).b("private", true).done())
+    try check(code(private.copy()) == "not_here" and "{private}".contains("can't keep an agent to its own folder"), "a private agent is refused where nothing keeps it to its own folder")
+    let to_private = try owner.cmd("q_7q", "agent.update", Obj.new().s("agent", id.copy()).b("private", true).done())
+    try check(code(to_private) == "not_here", "and an agent isn't made private later, here")
     let everything = try owner.cmd("q_8", "agent.update", Obj.new().s("agent", id.copy()).j("network", Json.Null).s("name", String("Mine still")).done())
     try check(str_at(at(at(everything, "value"), "agent"), "name") == some(String("Mine still")), "a network of null, everything, is what it has already")
 

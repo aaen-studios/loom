@@ -141,7 +141,7 @@ fn open_local(data: String, last: u16, version: String, mcp_exe: String) -> Inst
 }
 
 fn local_config(data: String, port: u16, version: String, mcp_exe: String) -> Config {
-    return Config { data: data.copy(), port: port, host: String("127.0.0.1"), hasher: PasswordHasher(), events: EventLife.standard(), registry: String(installer.REGISTRY), mcp_registry: String(mcpregistry.REGISTRY), minute_ms: 60000, apns: String(), version: version.copy(), lan: true, sandboxes: String(), sandbox_image: String(), release: ServerSource.official(), in_app: true, mcp: mcp_exe.copy(), acta: String() }
+    return Config { data: data.copy(), port: port, host: String("127.0.0.1"), hasher: PasswordHasher(), events: EventLife.standard(), registry: String(installer.REGISTRY), mcp_registry: String(mcpregistry.REGISTRY), minute_ms: 60000, apns: String(), version: version.copy(), lan: true, sandboxes: String(), sandbox_image: String(), release: ServerSource.official(), in_app: true, mcp: mcp_exe.copy(), acta: String(), private_unconfined: false }
 }
 
 /// What the app holds between calls.

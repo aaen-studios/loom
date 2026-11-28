@@ -1695,9 +1695,11 @@ final class Model {
     /// Each agent program's name as people know it ("Claude Agent" for `claude-acp`), by
     /// its name, as `acp.list` gives it.
     var programTitles: [String: String] = [:]
-    /// Whether the instance runs sandboxes, as `acp.list` says, so Make private can offer
-    /// one of its own.
+    /// Whether the instance runs sandboxes, as `acp.list` says.
     var sandboxes = false
+    /// Whether the instance keeps a private agent to its own folder, so an agent can be
+    /// made private there (LOO-462), as `acp.list` says.
+    var canPrivate = false
     private var programsWanted = false
     /// The selected agent's messages, oldest first, with the queued ones last.
     var messages: [Message] = []
@@ -2442,6 +2444,7 @@ final class Model {
             }
             programTitles = titles
             sandboxes = f["value"]["sandboxes"].bool ?? false
+            canPrivate = f["value"]["private"].bool ?? false
             return
         }
         let error = f["error"].isNull ? nil : f["error"]["message"].string
@@ -3377,27 +3380,17 @@ final class Model {
         ["t": "cmd", "id": JSON(id("app.hide_agent")), "name": "agent.hide", "args": ["agent": JSON(agent), "hidden": JSON(hidden)]]
     }
 
-    /// What an agent made private loses, as Make private says before it does.
-    static let privateLoses = "It loses the shared notes, the shared folder and shared tables, messages with your other agents, their chats in its searches, and plugins' tools. They lose it too."
+    /// What an agent made private loses, as Make private says before it does (LOO-462).
+    static let privateLoses = "It starts fresh, in a sandbox of its own: only its own folder and the internet. It loses your profile, skills, devices and connections, the shared notes, folder and tables, and messages with your other agents."
 
-    /// The switch Make private offers where the instance has sandboxes, and what it costs.
-    static let privateIsolate = "Also run it in a sandbox of its own"
-    static let privateIsolateCosts = "It no longer works in its folder, and has only what its sandbox has."
+    /// Why an agent can't be made private on this instance (LOO-462).
+    static let privateNotHere = "This computer can't keep an agent to its own folder yet."
 
-    /// Makes an agent private, or normal again (PLAN.md, "Private agents"), and with
-    /// `isolate`, isolated too, in a sandbox of its own. The instance refuses one in a
-    /// group chat, and says why.
-    func makePrivate(_ agent: String, _ on: Bool, isolate: Bool = false) -> JSON {
-        let args: JSON = isolate
-            ? ["agent": JSON(agent), "private": JSON(on), "isolated": true]
-            : ["agent": JSON(agent), "private": JSON(on)]
-        return ["t": "cmd", "id": JSON(id("app.private")), "name": "agent.update", "args": args]
-    }
-
-    /// Whether Make private offers to isolate the agent `id` as well: on an instance with
-    /// sandboxes, for one that isn't isolated already.
-    func offersIsolating(_ id: String) -> Bool {
-        sandboxes && agent(id).map { !$0.isolated } == true
+    /// Makes an agent private, or normal again (PLAN.md, "Private agents"). Made
+    /// private, the instance runs it in a sandbox of its own (LOO-462). It refuses one
+    /// in a group chat, or where nothing keeps it to its own folder, and says why.
+    func makePrivate(_ agent: String, _ on: Bool) -> JSON {
+        ["t": "cmd", "id": JSON(id("app.private")), "name": "agent.update", "args": ["agent": JSON(agent), "private": JSON(on)]]
     }
 
     /// Makes a folder, with `agent` in it once it's made. Nil for a blank name.

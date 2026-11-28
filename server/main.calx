@@ -149,6 +149,7 @@ struct Args {
     registry: String
     mcp_registry: String
     minute_ms: i64
+    private_unconfined: bool    // for tests only: private agents run with no sandbox
     allow_root: bool
     json: bool
     domain: String
@@ -176,7 +177,7 @@ struct Args {
 }
 
 fn read_args(given: List<String>) -> Args ! Error {
-    var a = Args { words: List<String>(), data: String("loom-data"), port: 8790, host: String("127.0.0.1"), fast_hashes: false, keep_events: none, registry: String(installer.REGISTRY), mcp_registry: String(mcpregistry.REGISTRY), minute_ms: 60000, allow_root: false, json: false, domain: String(), apns: String(), backups: String(), backups_keep: 7, backup_every_ms: 86400000, lan: false, sandboxes: String(), sandbox_image: String(), no_sandboxes: false, url: String(), token: String(), conversation: String(), release: String(), release_key: String(), env: List<String>(), from_user: String(), from_home: String(), carry_provider: false, https_port: 0, no_tailscale: false, import_from: String(), acta: String() }
+    var a = Args { words: List<String>(), data: String("loom-data"), port: 8790, host: String("127.0.0.1"), fast_hashes: false, keep_events: none, registry: String(installer.REGISTRY), mcp_registry: String(mcpregistry.REGISTRY), minute_ms: 60000, private_unconfined: false, allow_root: false, json: false, domain: String(), apns: String(), backups: String(), backups_keep: 7, backup_every_ms: 86400000, lan: false, sandboxes: String(), sandbox_image: String(), no_sandboxes: false, url: String(), token: String(), conversation: String(), release: String(), release_key: String(), env: List<String>(), from_user: String(), from_home: String(), carry_provider: false, https_port: 0, no_tailscale: false, import_from: String(), acta: String() }
     var i: usize = 0
     while i < given.len() {
         let w = given[i].copy()
@@ -325,6 +326,14 @@ fn read_args(given: List<String>) -> Args ! Error {
             i += 3
             continue
         }
+        // For tests only: private agents run with no sandbox, so the walls between
+        // agents are tested where there are none. serve refuses it without
+        // --test-fast-hashes, as --test-release.
+        if w == "--test-private-unconfined" {
+            a.private_unconfined = true
+            i += 1
+            continue
+        }
         // For tests only: hashes that take microseconds instead of 65 ms.
         if w == "--test-fast-hashes" {
             a.fast_hashes = true
@@ -376,12 +385,16 @@ fn serve(a: Args) ! Error {
         eprintln("loom: --test-release is for loom's own tests, which give --test-fast-hashes too: it points the instance at releases loom didn't sign")
         exit(2)
     }
+    if a.private_unconfined and not a.fast_hashes {
+        eprintln("loom: --test-private-unconfined is for loom's own tests, which give --test-fast-hashes too: it lets a private agent run as the person")
+        exit(2)
+    }
     if env.is_elevated() and not a.allow_root {
         eprintln(elevated_refusal())
         exit(2)
     }
     let source = if a.release.len() > 0 { update.Source { manifest: a.release.copy(), key: a.release_key.copy() } } else { update.Source.official() }
-    let config = Config { data: a.data.copy(), port: a.port, host: a.host.copy(), hasher: hasher(a.copy()), events: event_life(a.copy()), registry: a.registry.copy(), mcp_registry: a.mcp_registry.copy(), minute_ms: a.minute_ms, apns: a.apns.copy(), version: String(VERSION), lan: a.lan, sandboxes: a.sandboxes.copy(), sandbox_image: a.sandbox_image.copy(), release: source, in_app: false, mcp: String(), acta: a.acta.copy() }
+    let config = Config { data: a.data.copy(), port: a.port, host: a.host.copy(), hasher: hasher(a.copy()), events: event_life(a.copy()), registry: a.registry.copy(), mcp_registry: a.mcp_registry.copy(), minute_ms: a.minute_ms, apns: a.apns.copy(), version: String(VERSION), lan: a.lan, sandboxes: a.sandboxes.copy(), sandbox_image: a.sandbox_image.copy(), release: source, in_app: false, mcp: String(), acta: a.acta.copy(), private_unconfined: a.private_unconfined }
     var i = try open_waiting(config)
     if a.backups.len() > 0 {
         // Backups inside the instance's folder would go into the next one.
