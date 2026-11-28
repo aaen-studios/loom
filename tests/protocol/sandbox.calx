@@ -196,8 +196,8 @@ fn private_agent(runtime: String, ann: mut Session, data: String, ann_id: String
     try check(fs.exists("{mine}/notes.log") and not fs.exists("{home}/shared/leak.md"), "what it writes is in its folder, and her shared folder's path leads nowhere of hers")
     try check("{at(reply, "mentions")}".contains(#""path":"notes.log","name":"notes.log""#), "a file its reply names in its folder comes with it")
     let instructions = try fs.read_text("{mine}/CLAUDE.md") ?? String()
-    let skill = try fs.read_text("{mine}/.claude/skills/tidy/SKILL.md") ?? String()
-    try check(instructions == "Kept apart." and skill.contains("Put things back.") and not fs.exists("{home}/agents/{kept}"), "its instructions and her skills go in its own folder, through its sandbox")
+    // A fresh start (LOO-462): none of her skills, which are hers, not its.
+    try check(instructions == "Kept apart." and not fs.exists("{mine}/.claude/skills/tidy/SKILL.md") and not fs.exists("{home}/agents/{kept}"), "its instructions go in its own folder, through its sandbox, and none of her skills")
     let looked = try Command.new(runtime.copy()).args([String("exec"), "loom-{ann_id}", String("test"), String("-e"), mine.copy()]).output()
     try check(not looked.status.success(), "and her sandbox, where her other agents run, doesn't see its folder")
     _ = try ann.until("event", "run.finished")
