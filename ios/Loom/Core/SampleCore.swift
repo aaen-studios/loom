@@ -262,7 +262,7 @@ final class SampleCore: CoreLink, @unchecked Sendable {
                 tell(["t": "result", "id": f["id"], "ok": true, "value": ["state": f["args"]["id"] == "rt_7" ? Sample.labelState : [:]]])
             case "routine.test":
                 tell(["t": "result", "id": f["id"], "ok": true, "value": ["status": "quiet", "printed": "{\"labelled\": 3}", "errors": "", "posted": [],
-                                                                          "wrote": ["set since"], "steered": false, "said": "Nothing new."]])
+                                                                          "wrote": ["set since"], "steered": false, "said": "Its script ran."]])
             case "routine.next":
                 // Every two hours from now, as the instance would work it out.
                 let hour = 3_600_000

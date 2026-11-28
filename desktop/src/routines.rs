@@ -1422,8 +1422,12 @@ impl Loom {
                     .text_color(p.ink)
                     .child("Script"),
             )
-            .child(kinds)
-            .child(div().flex_1())
+            .child(kinds);
+        // Under the script, the seconds it may take, and Run test.
+        let foot = div()
+            .flex()
+            .items_center()
+            .gap(px(space::S))
             .child(
                 div()
                     .w(px(56.0))
@@ -1437,6 +1441,7 @@ impl Loom {
                     .text_color(p.ink_3)
                     .child("s"),
             )
+            .child(div().flex_1())
             .child(test);
         let field = if calx {
             Textarea::new(&ui.calx_in).into_any_element()
@@ -1450,7 +1455,8 @@ impl Loom {
             .flex_col()
             .gap(px(space::S))
             .child(head)
-            .child(div().font_family(font::MONO).child(field));
+            .child(div().font_family(font::MONO).child(field))
+            .child(foot);
         if let Some(line) = self.routine_script_result() {
             row = row.child(line);
         }

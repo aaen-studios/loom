@@ -200,6 +200,11 @@ fn scripted(i: Instance) ! Error {
     try check(str_at(after, "version") == some(String("1.21.5")) and not posted_in(app, from, chat.copy(), "Version 9"), "and keeps and posts none of it")
     let write_test = try app.cmd("q_test2", "routine.test", Obj.new().s("agent", String("Hermes")).j("gate", gate(String("loom tool fake add a=1 b=1"))).done())
     try check(str_at(at(write_test, "value"), "status") == some(String("failed")), "a test run only reads")
+    // Script only, as the form has it before it's saved: what the script printed
+    // wakes no one.
+    let alone_test = try app.cmd("q_test3", "routine.test", Obj.new().s("agent", String("Hermes")).b("script_only", true).j("gate", gate(String("echo 3 new mails"))).done())
+    let woke_test = try app.cmd("q_test4", "routine.test", Obj.new().s("agent", String("Hermes")).j("gate", gate(String("echo 3 new mails"))).done())
+    try check(str_at(at(alone_test, "value"), "status") == some(String("quiet")) and str_at(at(woke_test, "value"), "status") == some(String("wake")), "a test run is script only as it's asked")
 
     // --- What the script saved ---
     var saves = Json.Null

@@ -1057,6 +1057,7 @@ struct GateWait {
     posted: List<String>    // what its script posted with loom post, oldest first
     test: Waiter?    // for a test run (routine.test): who hears how it went; it posts and keeps nothing
     wrote: List<String>    // a test run's loom state writes, which aren't kept
+    tried: Json    // a test run's routine, as it was tried: its gate and script_only may not be kept yet
 }
 
 // What a gate's first line chose for its run, as its routine lets it
@@ -9066,7 +9067,7 @@ impl Instance {
             }
             r = merge(r, Obj.new().s("agent", str_at(agent, "id") ?? String()).done())
         }
-        if bool_at(args, "script_only") == some(true) { r = merge(r, Obj.new().b("script_only", true).done()) }
+        if let alone = bool_at(args, "script_only") { r = merge(r, Obj.new().b("script_only", alone).done()) }
         let checks = routines.gate_of(r.copy()) else {
             i.answer_cmd(w, Answer.Refused(String("bad_request"), String("There's no script to test: give gate, a command or a Calx script.")))
             return
@@ -9092,7 +9093,7 @@ impl Instance {
         }
         let token = bytes.hex(random_bytes(24))
         i.grants.insert(token.copy(), Grant { user: user.copy(), agent: agent_id.copy(), conversation: String(), gate: run_id.copy() })
-        i.routine_work.gates.insert(run_id.copy(), GateWait { user: user.copy(), routine: id.copy(), conversation: conversation.copy(), by: by.copy(), came: came.copy(), at: t, seconds: checks.seconds, token: token.copy(), posted: List<String>(), test: test.copy(), wrote: List<String>() })
+        i.routine_work.gates.insert(run_id.copy(), GateWait { user: user.copy(), routine: id.copy(), conversation: conversation.copy(), by: by.copy(), came: came.copy(), at: t, seconds: checks.seconds, token: token.copy(), posted: List<String>(), test: test.copy(), wrote: List<String>(), tried: if test == none { Json.Null } else { r.copy() } })
         i.log(user.copy(), agent_id.copy(), "routine", if testing { "Tested the script of the routine {name}" } else { "Checked the routine {name}'s gate" }, by)
         let job = match i.gate_job(user.copy(), agent_id, run_id.copy(), id, checks, token) {
             ok(j) => j,
@@ -9191,7 +9192,7 @@ impl Instance {
         _ = i.grants.remove(w.token.copy())
         // A test run: whoever asked hears how it went, and nothing is kept.
         if let tester = w.test.copy() {
-            let r = try i.store.routine(w.user.copy(), w.routine.copy()) ?? Json.Null
+            let r = w.tried.copy()
             try i.tested(tester, w, r, d)
             return
         }
@@ -9242,7 +9243,7 @@ impl Instance {
             o = o.s("chosen", choice.words.copy())
         }
         // What it would say in the run's history.
-        let line = if what == "failed" { said.copy() } else if g.posted.len() > 0 { g.posted[0].copy() } else if what == "wake" { String("It would wake its agent.") } else { String("Nothing new.") }
+        let line = if what == "failed" { said.copy() } else if g.posted.len() > 0 { g.posted[0].copy() } else if what == "wake" { String("It would wake its agent.") } else if script_only { String("Its script ran.") } else { String("Nothing new.") }
         o = o.s("said", routines.cut(line, 300))
         i.answer_cmd(w, Answer.Value(o.done()))
     }
