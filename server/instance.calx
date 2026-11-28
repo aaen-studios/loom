@@ -110,6 +110,7 @@ pub struct Config {
     pub release: update.Source    // where its own updates come from: loom's releases, but for tests
     pub in_app: bool    // an instance inside the desktop app, which updates with the app
     pub mcp: String    // the program each session's `loom mcp` runs: the desktop app's own small one (server/mcp_main.calx), or "" for this one
+    pub private_unconfined: bool    // for tests only: private agents run with no sandbox (`--test-private-unconfined`)
     pub acta: String    // a test's fake Acta, whose MCP server counts as Acta's (`--test-acta`), or ""
 }
 
@@ -661,6 +662,7 @@ pub struct Instance {
     sealer: XChaCha20Poly1305    // seals and opens secrets, with secret.key, which only the instance reads
     next_sweep: i64
     minute_ms: i64
+    private_unconfined: bool    // the config's: private agents run with no sandbox, in tests
     next_due: i64    // when to look for routines that are due
     routine_runs: Map<String, RoutineRun>    // run -> the routine it's for
     routine_work: RoutineWork    // routine runs' gates, and their sessions to close
@@ -1358,7 +1360,9 @@ const PROPOSALS_WAITING_MOST: usize = 50
 const TASK_RESTARTED: str = "[loom: The instance restarted while you worked on this task. Carry on from where you were.]"
 const TASK_RESUMED: str = "[loom: Your person paused this task, and has resumed it now. Carry on from where you stopped.]"
 const SECRETS_TOLD: str = "[loom: Never ask your person for a password or a code in the chat. When a page in your browser wants one, fill in one they keep with browser_fill_secret, or ask with browser_ask_secret: they type it on a card in your reply, it goes into the page without you seeing it, and they can keep it for next time.]"
+const SECRETS_TOLD_PRIVATE: str = "[loom: Never ask your person for a password or a code in the chat. When a page in your browser wants one, ask with browser_ask_secret: they type it on a card in your reply, and it goes into the page without you seeing it.]"
 const ATTACH_TOLD: str = "[loom: To give your person a file you made, such as a picture, a PDF, a spreadsheet or a zip, put it in your reply with attach_files: a file in your folder or the shared one, or a screenshot you took with browser_screenshot or use_device, by the name its result gives. A file of those kinds that you made this turn and that your answer names, by its whole path, a file:// link or in `code`, is put there by itself.]"
+const ATTACH_TOLD_PRIVATE: str = "[loom: To give your person a file you made, such as a picture, a PDF, a spreadsheet or a zip, put it in your reply with attach_files: a file in your folder, or a screenshot you took with browser_screenshot, by the name its result gives. A file of those kinds that you made this turn and that your answer names, by its whole path, a file:// link or in `code`, is put there by itself.]"
 const EMOJI_TOLD: str = "In the chat, write an emoji as itself or by its name between colons, as :sob: or :thumbsup:, and it shows as the emoji."
 const TASK_RETRIED: str = "[loom: Your person asked you to try this task again. What happened the last time is above.]"
 // How much of what a webhook was sent goes to the agent.
@@ -2464,6 +2468,13 @@ fn no_sandboxes() -> String {
     return String("This instance runs no sandboxes, so it can't keep an agent isolated or hold it to a network of its own. On Linux, the owner starts it with --sandboxes podman or --sandboxes docker.")
 }
 
+// A private agent runs in a sandbox of its own, which sees only its folder
+// (PLAN.md, "Private agents", LOO-462). Why one can't be made private here, and
+// why one made private before that held doesn't run.
+const PRIVATE_NOT_HERE: str = "This computer can't keep an agent to its own folder yet, so it can't be made private here. A private agent runs in a sandbox of its own: on Linux, the owner starts loom with --sandboxes podman or --sandboxes docker."
+const PRIVATE_CANT_RUN: str = "This agent is private, and this computer can't keep it to its own folder yet, so it doesn't run here. Make it normal to use it."
+const PRIVATE_NOT_ISOLATED: str = "This agent is private, but it isn't kept to its own folder, so it doesn't run. Make it private again to give it a sandbox of its own, or make it normal."
+
 // Why a person's agent can't run on `program`: the owner kept it to others.
 fn not_given(program: String) -> String {
     return "The owner hasn't given you the agent program {program}. Ask them for it, or switch this agent to one you have."
@@ -2647,7 +2658,7 @@ impl Instance {
         let browser_done = Receiver<browser.Back>()
         let browser_to = browser_done.sender()
         let (picture_to, picture_done) = files.start_pictures(waker)
-        var i = Instance { release: config.release.copy(), host: update.host(config.in_app), exe: current_exe(), mcp_exe: config.mcp.copy(), update_to: update_to, update_back: update_back, updating: no_update(), next_update_check: 0, last_busy: now(), restart_stops: List<String>(), restart: false, told_update: Json.Null, told_update_at: 0, picks: LinkedMap<String, Pick>(), route_counts: Map<String, i64>(), handoffs: Map<String, (String, String)>(), browsers: LinkedMap<String, Browser>(), watchers: Map<u32, String>(), followers: List<u32>(), browser_pages: Map<String, String>(), browsers_to_check: List<String>(), browser_done: browser_done, browser_to: browser_to, stopped_browsers: Map<u64, Thread>(), closing_browsers: Map<String, u64>(), next_browser: 0, fills: Map<String, Fill>(), turns_ended: List<(String, String, String)>(), next_browser_sweep: 0, task_stops: Map<String, String>(), resumes: List<(String, String)>(), push_to: push_to, push_gone: push_gone, move_to: move_to, move_done: move_done, lan: config.lan, bridge: none, stop_bridge: none, lan_port: 0, announcer: none, stop_announcer: none, to_close: List<ServerSocket>(), boxes: none, boxes_pulled: Receiver<String>(), stale_boxes: List<String>(), gate: none, stop_gate: none, checkpointer: some(checkpointer), stop_checkpoints: stop_checkpoints, wal_big: wal_big, search_to: search_to, search_done: search_done, searches: Map<String, Waiter>(), next_search: 0, disk_used: Map<String, (i64, i64)>(), doors: LinkedMap<String, egress.Door>(), file_moves: Map<String, FileMove>(), files_moved: Receiver<sandbox.Moved>(), update_waiter: none, moving: String(), move_waiters: List<Waiter>(), moved: moved, version: config.version.copy(), store: store, server: server, waker: waker, data: config.data.copy(), sessions: Map<u32, Session>(), runs: LinkedMap<String, Run>(), procs: LinkedMap<String, Proc>(), approvals: LinkedMap<String, Approval>(), lines: lines, lines_to: to, stopped_to: stopped_to, stopped: stopped, stopping: 0, hash_to: hash_to, hash_done: hash_done, next_job: 0, auths: Map<i64, Auth>(), dummy_hash: dummy, ready_now: String(), open_secrets: Map<String, List<(String, String)>>(), failures: LinkedMap<String, List<i64>>(), link_asks: LinkedMap<String, LinkAsk>(), thumbs: files.start(), picture_to: picture_to, picture_done: picture_done, picture_thumbs: Map<String, String>(), shots: Map<String, List<Shot>>(), next_shot: 0, events: config.events, next_prune: 0, next_proc_sweep: 0, grants: Map<String, Grant>(), calls: Map<String, Request>(), context: Map<String, (i64, i64)>(), registry_at: config.registry.copy(), registry: Json.Null, registry_time: 0, registry_fetching: false, install_to: install_to, install_done: install_done, mcp_test_to: mcp_test_to, mcp_test_done: mcp_test_done, mcp_tests: Map<i64, McpTest>(), link_to: link_to, link_done: link_done, link_pages: Map<String, Json>(), site_icons: Map<String, List<u8>>(), link_waiting: Map<String, List<(String, String)>>(), link_pictures: Map<String, List<u8>>(), link_previews: Map<String, List<(String, Waiter)>>(), acta_at: config.acta.copy(), call_to: call_to, call_done: call_done, calls_out: Map<i64, OutCall>(), acta_boards: Map<String, ActaBoards>(), acta_cards: Map<String, Json>(), card_asks: Map<String, CardAsk>(), acta_single: Map<String, i64>(), acta_waits: Map<i64, ActaWait>(), watch: new_watches(), t3: t3_state(), oauth_to: oauth_to, oauth_done: oauth_done, oauth_jobs: Map<i64, OauthJob>(), sign_ins: Map<String, SignIn>(), renewing: Map<String, i64>(), next_renewal: 0, fetching: List<Waiter>(), installs: Map<i64, Install>(), deno_job: 0, deno_waiters: List<Request>(), tools_body: String(), follows: Map<i64, (String, String)>(), next_follow: 0, code_acts: Map<i64, String>(), leftovers: List<String>(), next_sweep: 0, device_calls: Map<String, DeviceCall>(), setups: Map<String, Setup>(), mcp_adds: LinkedMap<String, McpAdd>(), drafts_due: List<DraftDue>(), connects: LinkedMap<String, Connect>(), spool_asks: Map<String, SpoolAsk>(), signed_waits: Map<String, SignedWait>(), mcp_registry_at: config.mcp_registry.copy(), mcp_registry_to: mcp_registry_to, mcp_registry_done: mcp_registry_done, pool_to: pool_to, pool_done: pool_done, pool_reads: Map<String, PoolRead>(), mcp_registry_kept: Map<String, RegistryAnswer>(), mcp_registry_asks: Map<String, List<RegistryAsk>>(), minute_ms: config.minute_ms, next_due: 0, routine_runs: Map<String, RoutineRun>(), routine_work: RoutineWork { gates: Map<String, GateWait>(), done: Receiver<routine_gate.Done>(), closing: List<(String, String)>(), closed: List<String>(), held: List<HeldPost>() }, routine_marks: Map<String, (String, String)>(), quiet_turns: Map<String, QuietTurn>(), looking_back: Map<String, String>(), pause_turns: Map<String, (String, bool, bool)>(), compacting: List<String>(), spoken: Map<String, bool>(), paused: LinkedMap<String, Paused>(), run_chains: Map<String, List<String>>(), panel_calls: Map<String, Waiter>(), script_calls: Map<String, Request>(), running_flows: LinkedMap<String, flows.Flow>(), flow_steps: Map<String, (String, usize)>(), advancing: List<String>(), flow_results: List<(String, usize, bool, String)>(), flows_due: List<String>(), slow_calls: Map<String, String>(), acting: 0, call_actions: Map<String, i64>(), tool_actions: Map<String, i64>(), emojis: emoji.load(), sealer: try secret_key(config.data.copy()) }
+        var i = Instance { release: config.release.copy(), host: update.host(config.in_app), exe: current_exe(), mcp_exe: config.mcp.copy(), update_to: update_to, update_back: update_back, updating: no_update(), next_update_check: 0, last_busy: now(), restart_stops: List<String>(), restart: false, told_update: Json.Null, told_update_at: 0, picks: LinkedMap<String, Pick>(), route_counts: Map<String, i64>(), handoffs: Map<String, (String, String)>(), browsers: LinkedMap<String, Browser>(), watchers: Map<u32, String>(), followers: List<u32>(), browser_pages: Map<String, String>(), browsers_to_check: List<String>(), browser_done: browser_done, browser_to: browser_to, stopped_browsers: Map<u64, Thread>(), closing_browsers: Map<String, u64>(), next_browser: 0, fills: Map<String, Fill>(), turns_ended: List<(String, String, String)>(), next_browser_sweep: 0, task_stops: Map<String, String>(), resumes: List<(String, String)>(), push_to: push_to, push_gone: push_gone, move_to: move_to, move_done: move_done, lan: config.lan, bridge: none, stop_bridge: none, lan_port: 0, announcer: none, stop_announcer: none, to_close: List<ServerSocket>(), boxes: none, boxes_pulled: Receiver<String>(), stale_boxes: List<String>(), gate: none, stop_gate: none, checkpointer: some(checkpointer), stop_checkpoints: stop_checkpoints, wal_big: wal_big, search_to: search_to, search_done: search_done, searches: Map<String, Waiter>(), next_search: 0, disk_used: Map<String, (i64, i64)>(), doors: LinkedMap<String, egress.Door>(), file_moves: Map<String, FileMove>(), files_moved: Receiver<sandbox.Moved>(), update_waiter: none, moving: String(), move_waiters: List<Waiter>(), moved: moved, version: config.version.copy(), store: store, server: server, waker: waker, data: config.data.copy(), sessions: Map<u32, Session>(), runs: LinkedMap<String, Run>(), procs: LinkedMap<String, Proc>(), approvals: LinkedMap<String, Approval>(), lines: lines, lines_to: to, stopped_to: stopped_to, stopped: stopped, stopping: 0, hash_to: hash_to, hash_done: hash_done, next_job: 0, auths: Map<i64, Auth>(), dummy_hash: dummy, ready_now: String(), open_secrets: Map<String, List<(String, String)>>(), failures: LinkedMap<String, List<i64>>(), link_asks: LinkedMap<String, LinkAsk>(), thumbs: files.start(), picture_to: picture_to, picture_done: picture_done, picture_thumbs: Map<String, String>(), shots: Map<String, List<Shot>>(), next_shot: 0, events: config.events, next_prune: 0, next_proc_sweep: 0, grants: Map<String, Grant>(), calls: Map<String, Request>(), context: Map<String, (i64, i64)>(), registry_at: config.registry.copy(), registry: Json.Null, registry_time: 0, registry_fetching: false, install_to: install_to, install_done: install_done, mcp_test_to: mcp_test_to, mcp_test_done: mcp_test_done, mcp_tests: Map<i64, McpTest>(), link_to: link_to, link_done: link_done, link_pages: Map<String, Json>(), site_icons: Map<String, List<u8>>(), link_waiting: Map<String, List<(String, String)>>(), link_pictures: Map<String, List<u8>>(), link_previews: Map<String, List<(String, Waiter)>>(), acta_at: config.acta.copy(), call_to: call_to, call_done: call_done, calls_out: Map<i64, OutCall>(), acta_boards: Map<String, ActaBoards>(), acta_cards: Map<String, Json>(), card_asks: Map<String, CardAsk>(), acta_single: Map<String, i64>(), acta_waits: Map<i64, ActaWait>(), watch: new_watches(), t3: t3_state(), oauth_to: oauth_to, oauth_done: oauth_done, oauth_jobs: Map<i64, OauthJob>(), sign_ins: Map<String, SignIn>(), renewing: Map<String, i64>(), next_renewal: 0, fetching: List<Waiter>(), installs: Map<i64, Install>(), deno_job: 0, deno_waiters: List<Request>(), tools_body: String(), follows: Map<i64, (String, String)>(), next_follow: 0, code_acts: Map<i64, String>(), leftovers: List<String>(), next_sweep: 0, device_calls: Map<String, DeviceCall>(), setups: Map<String, Setup>(), mcp_adds: LinkedMap<String, McpAdd>(), drafts_due: List<DraftDue>(), connects: LinkedMap<String, Connect>(), spool_asks: Map<String, SpoolAsk>(), signed_waits: Map<String, SignedWait>(), mcp_registry_at: config.mcp_registry.copy(), mcp_registry_to: mcp_registry_to, mcp_registry_done: mcp_registry_done, pool_to: pool_to, pool_done: pool_done, pool_reads: Map<String, PoolRead>(), mcp_registry_kept: Map<String, RegistryAnswer>(), mcp_registry_asks: Map<String, List<RegistryAsk>>(), minute_ms: config.minute_ms, private_unconfined: config.private_unconfined, next_due: 0, routine_runs: Map<String, RoutineRun>(), routine_work: RoutineWork { gates: Map<String, GateWait>(), done: Receiver<routine_gate.Done>(), closing: List<(String, String)>(), closed: List<String>(), held: List<HeldPost>() }, routine_marks: Map<String, (String, String)>(), quiet_turns: Map<String, QuietTurn>(), looking_back: Map<String, String>(), pause_turns: Map<String, (String, bool, bool)>(), compacting: List<String>(), spoken: Map<String, bool>(), paused: LinkedMap<String, Paused>(), run_chains: Map<String, List<String>>(), panel_calls: Map<String, Waiter>(), script_calls: Map<String, Request>(), running_flows: LinkedMap<String, flows.Flow>(), flow_steps: Map<String, (String, usize)>(), advancing: List<String>(), flow_results: List<(String, usize, bool, String)>(), flows_due: List<String>(), slow_calls: Map<String, String>(), acting: 0, call_actions: Map<String, i64>(), tool_actions: Map<String, i64>(), emojis: emoji.load(), sealer: try secret_key(config.data.copy()) }
         if config.sandboxes.len() > 0 and not i.lan { try i.sandboxes_on(config.sandboxes.copy(), config.sandbox_image.copy()) }
         // An action the last run of the instance left started, it never finished.
         try i.store.settle_cut_short()
@@ -5728,6 +5739,10 @@ impl Instance {
     // instance's own folders, so not in a sandbox.
     fn agent_servers(i: Instance, user: String, agent: Json, http: bool, boxed: bool) -> List<Json> {
         var out = List<Json>()
+        // A private agent gets none of its person's MCP servers, which reach their
+        // accounts with their secrets, and none of the plugins' that every agent
+        // gets (PLAN.md, "Private agents", LOO-462): only loom's own tools.
+        if bool_at(agent.copy(), "private") == some(true) { return out }
         if let Json.Array(names) = at(agent, "mcp") {
             for n in names {
                 let name = n.as_str() ?? String()
@@ -5738,9 +5753,7 @@ impl Instance {
                 if let s = i.session_server(user.copy(), server, http) { out.push(s) }
             }
         }
-        // A private agent has only the servers given to it, never the plugins'
-        // that every agent gets (PLAN.md, "Private agents").
-        if not boxed and bool_at(agent, "private") != some(true) { out.extend(i.plugin_servers(user)) }
+        if not boxed { out.extend(i.plugin_servers(user)) }
         return out
     }
 
@@ -14766,6 +14779,11 @@ impl Instance {
         // runs in one of its own, which reaches out only through its egress.
         let place = i.place(user.copy(), agent.copy())
         let boxed = place != none
+        // A private agent runs only where the computer keeps it to its own folder
+        // (PLAN.md, "Private agents", LOO-462). One made private before that held, or
+        // on an instance with no sandboxes, doesn't run as the person.
+        let private = bool_at(agent.copy(), "private") == some(true)
+        if private and not boxed and not i.private_unconfined { fail if i.boxes == none { String(PRIVATE_CANT_RUN) } else { String(PRIVATE_NOT_ISOLATED) } }
         let shared = try i.share_for(user.copy(), program.copy()) != none
         var command = acp_agent.command.copy()
         var args = acp_agent.args.copy()
@@ -14798,8 +14816,10 @@ impl Instance {
         }
         // Without the skills, if they can't be read: the folders loom made for them stay.
         // The group chats' router reads only what it's given, so it has none.
-        var skill_names: List<String>? = none
-        if not id.starts_with("router-") {
+        // A private agent has none of its person's skills either: its folder's
+        // are taken away (LOO-462).
+        var skill_names: List<String>? = if private { some(List<String>()) } else { none }
+        if not id.starts_with("router-") and not private {
             match i.skill_files(user.copy(), folder.copy()) {
                 ok((written, names)) => {
                     writes.extend(written)
@@ -15318,19 +15338,24 @@ impl Instance {
             err(_) => Json.Object(LinkedMap<String, Json>()),
         }
         var told = had.copy()
+        // A private agent is a fresh start (PLAN.md, "Private agents", LOO-462): it's
+        // told nothing of its person's but what they say in its chat, not their
+        // device's name, profile or the instructions they give every agent.
+        let private = i.is_private(user.copy(), agent.copy())
         // Where the person is writing from, when the session hasn't been told
         // yet (PLAN.md, "Your devices"): with the prompt, never in the
-        // instructions.
+        // instructions. A private agent is told only the time.
         if from.len() > 0 and str_at(told.copy(), "from") != some(from.copy()) {
             let utc = Timestamp { unix_ms: now() }.date_time(0).format("%Y-%m-%d %H:%M")
-            prompt.push(Obj.new().s("type", String("text")).s("text", "[loom: This message comes from {from}. It's {utc} UTC.]").done())
+            let said = if private { "[loom: It's {utc} UTC.]" } else { "[loom: This message comes from {from}. It's {utc} UTC.]" }
+            prompt.push(Obj.new().s("type", String("text")).s("text", said).done())
             told = merge(told, Obj.new().s("from", from).done())
         }
         // The folder the person's agents share (PLAN.md, "Sharing and
         // learning"), once a session.
         // A private agent is told it has none, and what it can't reach (PLAN.md,
         // "Private agents"); its sessions start fresh when that changes.
-        if i.is_private(user.copy(), agent.copy()) {
+        if private {
             if str_at(told.copy(), "shared") != some(String("private")) {
                 prompt.push(Obj.new().s("type", String("text")).s("text", String(walls.TOLD)).done())
                 told = merge(told, Obj.new().s("shared", String("private")).done())
@@ -15342,13 +15367,13 @@ impl Instance {
         // That it can put files in its reply, and that the files its answer names are
         // put there (PLAN.md, "Files and images"), once a session.
         if str_at(told.copy(), "attach") == none {
-            prompt.push(Obj.new().s("type", String("text")).s("text", String(ATTACH_TOLD)).done())
+            prompt.push(Obj.new().s("type", String("text")).s("text", String(if private { ATTACH_TOLD_PRIVATE } else { ATTACH_TOLD })).done())
             told = merge(told, Obj.new().s("attach", String("1")).done())
         }
         // That a password or a code is never asked for in the chat (PLAN.md, "The
         // agent's browser"), once a session.
         if str_at(told.copy(), "secrets") == none {
-            prompt.push(Obj.new().s("type", String("text")).s("text", String(SECRETS_TOLD)).done())
+            prompt.push(Obj.new().s("type", String("text")).s("text", String(if private { SECRETS_TOLD_PRIVATE } else { SECRETS_TOLD })).done())
             told = merge(told, Obj.new().s("secrets", String("1")).done())
         }
         // How emoji are written, and the person's own (PLAN.md, "Emoji"), when the
@@ -15361,9 +15386,13 @@ impl Instance {
         }
         // The instructions every agent of the person's follows (PLAN.md,
         // "Agent defaults"), when the session hasn't had them as they are now.
-        let every = match i.store.defaults(user.copy()) {
-            ok(d) => defaults.told(d),
-            _ => String(),
+        let every = if private {
+            String()
+        } else {
+            match i.store.defaults(user.copy()) {
+                ok(d) => defaults.told(d),
+                _ => String(),
+            }
         }
         if every != (str_at(told.copy(), "every") ?? String()) {
             let said = if every.len() > 0 { every.copy() } else { String("[loom: Your person took back the instructions they gave every agent of theirs. Don't follow them any more.]") }
@@ -15372,9 +15401,13 @@ impl Instance {
         }
         // The person's profile (PLAN.md, "Memory"), when the session hasn't
         // had this revision of it.
-        let profile = match i.store.profile(user.copy()) {
-            ok(some(pr)) => pr,
-            _ => Json.Null,
+        let profile = if private {
+            Json.Null
+        } else {
+            match i.store.profile(user.copy()) {
+                ok(some(pr)) => pr,
+                _ => Json.Null,
+            }
         }
         let revision = int_at(profile.copy(), "revision") ?? 0
         if revision > 0 and str_at(told.copy(), "profile") != some("{revision}") {
@@ -19001,7 +19034,11 @@ impl Instance {
             let member = i.sandboxed(user.copy())
             let asked_isolated = bool_at(args.copy(), "isolated")
             if member and asked_isolated == some(false) { return Answer.Refused(String("not_allowed"), String("A member's agents always run in their sandbox.")) }
-            let isolated = member or asked_isolated == some(true)
+            // A private agent always runs in a sandbox of its own (LOO-462).
+            let private = bool_at(args.copy(), "private") ?? false
+            if private and i.boxes == none and not i.private_unconfined { return Answer.Refused(String("not_here"), String(PRIVATE_NOT_HERE)) }
+            if private and asked_isolated == some(false) { return Answer.Refused(String("bad_request"), String("A private agent always runs in a sandbox of its own.")) }
+            let isolated = member or (private and i.boxes != none) or asked_isolated == some(true)
             let (network, network_why) = network_arg(args.copy())
             if network_why.len() > 0 { return Answer.Refused(String("bad_request"), network_why) }
             if network != Json.Null and not isolated { return Answer.Refused(String("bad_request"), String("An agent's network is kept in its sandbox: make it isolated too.")) }
@@ -19017,7 +19054,7 @@ impl Instance {
             let color = str_at(args.copy(), "color") ?? String(COLORS[count % COLORS.len()])
             // What it's for, which the group chats' router reads: given, or from its instructions.
             let for_line = rooms.cut(str_at(args.copy(), "for") ?? rooms.for_line(str_at(args.copy(), "instructions") ?? String()), rooms.FOR_MOST)
-            var agent = Obj.new().s("id", id).s("name", str_at(args.copy(), "name") ?? String("Agent")).s("color", color).s("for", for_line).s("acp_agent", program).s("instructions", str_at(args.copy(), "instructions") ?? String()).maybe("folder", str_at(args.copy(), "folder")).j("mcp", names_of(at(args.copy(), "mcp"))).maybe("permission", permission).maybe("busy", busy).maybe("backup", backup).b("code_mode", bool_at(args.copy(), "code_mode") ?? true).b("isolated", isolated).b("private", bool_at(args.copy(), "private") ?? false).j("network", network).i("revision", 1).i("at", now()).done()
+            var agent = Obj.new().s("id", id).s("name", str_at(args.copy(), "name") ?? String("Agent")).s("color", color).s("for", for_line).s("acp_agent", program).s("instructions", str_at(args.copy(), "instructions") ?? String()).maybe("folder", str_at(args.copy(), "folder")).j("mcp", names_of(at(args.copy(), "mcp"))).maybe("permission", permission).maybe("busy", busy).maybe("backup", backup).b("code_mode", bool_at(args.copy(), "code_mode") ?? true).b("isolated", isolated).b("private", private).j("network", network).i("revision", 1).i("at", now()).done()
             if network == Json.Null { agent = without(agent, "network") }
             agent = with_shape(agent, new_shape, drawing)
             // What its program offers, as the person's other agents on it learned it.
@@ -19121,6 +19158,24 @@ impl Instance {
                 if member and not on { return Answer.Refused(String("not_allowed"), String("A member's agents always run in their sandbox.")) }
                 isolated = on
             }
+            // Private is a fresh start, kept by the computer too (LOO-462): a private
+            // agent always runs in a sandbox of its own, which sees only its folder.
+            // Made private, it's isolated, and made normal again, it's taken back out
+            // when that's what put it in.
+            let will_private = bool_at(args.copy(), "private") ?? was_private
+            if let on = bool_at(args.copy(), "private") {
+                if on {
+                    if i.boxes == none and not i.private_unconfined { return Answer.Refused(String("not_here"), String(PRIVATE_NOT_HERE)) }
+                    if not isolated and i.boxes != none {
+                        isolated = true
+                        o.m.insert(String("isolated_for_private"), Json.Bool(true))
+                    }
+                } else if bool_at(old.copy(), "isolated_for_private") == some(true) {
+                    _ = o.m.remove(String("isolated_for_private"))
+                    if bool_at(args.copy(), "isolated") == none and not member { isolated = false }
+                }
+            }
+            if will_private and bool_at(args.copy(), "isolated") == some(false) { return Answer.Refused(String("bad_request"), String("A private agent always runs in a sandbox of its own: make it normal first.")) }
             var network = at(old.copy(), "network")
             if defaults.has(args.copy(), "network") {
                 let (given, why) = network_arg(args.copy())
@@ -19959,7 +20014,7 @@ impl Instance {
                 programs.push(program)
             }
             // Whether they're the owner, who gives programs and their settings to people.
-            return Answer.Value(Obj.new().j("programs", Json.Array(programs)).b("owner", not i.sandboxed(user)).b("sandboxes", i.boxes != none).done())
+            return Answer.Value(Obj.new().j("programs", Json.Array(programs)).b("owner", not i.sandboxed(user)).b("sandboxes", i.boxes != none).b("private", i.boxes != none or i.private_unconfined).done())
         }
         if name == "acp.pool" {
             // Links an agent program to the usage pool it draws from, or unlinks it

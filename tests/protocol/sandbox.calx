@@ -17,7 +17,7 @@ import std.env
 import std.fs
 import std.json.{Json}
 import std.process.{Command, exit}
-import shared.obj.{Obj, at, int_at, str_at}
+import shared.obj.{Obj, at, bool_at, int_at, str_at}
 import shared.client.{Session, reply_text}
 import tests.kit.{Instance, calx, check, loom}
 
@@ -196,8 +196,8 @@ fn private_agent(runtime: String, ann: mut Session, data: String, ann_id: String
     try check(fs.exists("{mine}/notes.log") and not fs.exists("{home}/shared/leak.md"), "what it writes is in its folder, and her shared folder's path leads nowhere of hers")
     try check("{at(reply, "mentions")}".contains(#""path":"notes.log","name":"notes.log""#), "a file its reply names in its folder comes with it")
     let instructions = try fs.read_text("{mine}/CLAUDE.md") ?? String()
-    let skill = try fs.read_text("{mine}/.claude/skills/tidy/SKILL.md") ?? String()
-    try check(instructions == "Kept apart." and skill.contains("Put things back.") and not fs.exists("{home}/agents/{kept}"), "its instructions and her skills go in its own folder, through its sandbox")
+    // A fresh start (LOO-462): none of her skills, which are hers, not its.
+    try check(instructions == "Kept apart." and not fs.exists("{mine}/.claude/skills/tidy/SKILL.md") and not fs.exists("{home}/agents/{kept}"), "its instructions go in its own folder, through its sandbox, and none of her skills")
     let looked = try Command.new(runtime.copy()).args([String("exec"), "loom-{ann_id}", String("test"), String("-e"), mine.copy()]).output()
     try check(not looked.status.success(), "and her sandbox, where her other agents run, doesn't see its folder")
     _ = try ann.until("event", "run.finished")
@@ -387,6 +387,18 @@ fn run(runtime: String) ! Error {
     try check(owner_said.contains("OWNER_KEY=the owner's own") and owner_said.contains("remember"), "on the owner's own settings, with loom's tools")
     let owner_box = try Command.new(runtime.copy()).args([String("container"), String("inspect"), "loom-{owner_id}"]).output()
     try check(owner_box.status.success(), "in the owner's sandbox")
+
+    // Private is a fresh start the computer keeps too (LOO-462): an agent of the
+    // owner's made private is isolated, in a sandbox of its own, and made normal
+    // again, it's taken back out.
+    let plain_made = try owner.cmd("q_6p", "agent.create", Obj.new().s("name", String("Plain")).s("acp_agent", String("boxed")).s("instructions", String("")).b("code_mode", false).done())
+    let plain = str_at(at(at(plain_made, "value"), "agent"), "id") ?? String()
+    let made_private = at(at(try owner.cmd("q_6q", "agent.update", Obj.new().s("agent", plain.copy()).b("private", true).done()), "value"), "agent")
+    try check(bool_at(made_private, "isolated") == some(true), "an agent of the owner's made private is isolated with it")
+    let made_normal = at(at(try owner.cmd("q_6r", "agent.update", Obj.new().s("agent", plain.copy()).b("private", false).done()), "value"), "agent")
+    try check(bool_at(made_normal, "isolated") == some(false), "and made normal again, it isn't")
+    let pickle_made = at(at(try owner.cmd("q_6s", "agent.create", Obj.new().s("name", String("Pickle")).s("acp_agent", String("boxed")).s("instructions", String("")).b("code_mode", false).b("private", true).done()), "value"), "agent")
+    try check(bool_at(pickle_made, "isolated") == some(true), "and one made private is isolated from the start")
 
     // An update: the instance starts again as a newer loom, whose image is another.
     // The sandboxes made from the older one's go, so their loom mcp and loom egress

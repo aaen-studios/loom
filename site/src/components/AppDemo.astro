@@ -183,6 +183,7 @@ const DRAFT_BODY = "Hi Ana,\nThanks for paying the October invoice so quickly. I
 									{a.private && <svg class="i lock" viewBox="0 0 24 24" aria-label="Private"><rect width="18" height="11" x="3" y="11" rx="2" ry="2"></rect><path d="M7 11V7a5 5 0 0 1 10 0v4"></path></svg>}
 									<span class="agent-preview" />
 								</span>
+								{a.private && <span class="rail-lock" aria-hidden="true"><svg class="i" viewBox="0 0 24 24"><rect width="18" height="11" x="3" y="11" rx="2" ry="2"></rect><path d="M7 11V7a5 5 0 0 1 10 0v4"></path></svg></span>}
 							</div>
 						)
 					),
@@ -201,6 +202,7 @@ const DRAFT_BODY = "Hi Ana,\nThanks for paying the October invoice so quickly. I
 							{a.private && <svg class="i lock" viewBox="0 0 24 24" aria-label="Private"><rect width="18" height="11" x="3" y="11" rx="2" ry="2"></rect><path d="M7 11V7a5 5 0 0 1 10 0v4"></path></svg>}
 							<span class="agent-preview" />
 						</span>
+						{a.private && <span class="rail-lock" aria-hidden="true"><svg class="i" viewBox="0 0 24 24"><rect width="18" height="11" x="3" y="11" rx="2" ry="2"></rect><path d="M7 11V7a5 5 0 0 1 10 0v4"></path></svg></span>}
 					</div>
 				))
 			}
@@ -1027,6 +1029,33 @@ const DRAFT_BODY = "Hi Ana,\nThanks for paying the October invoice so quickly. I
 		width: 12px;
 		height: 12px;
 		color: var(--ink-3);
+	}
+	/* On the rail the name and its lock are hidden, so a private agent's thread has a small
+	   lock badge on its corner (app.rs, rail_lock). */
+	.rail-lock {
+		display: none;
+	}
+	.app.railed .agent {
+		position: relative;
+	}
+	.app.railed .rail-lock {
+		position: absolute;
+		right: 1px;
+		bottom: 1px;
+		width: 15px;
+		height: 15px;
+		border-radius: 50%;
+		background: var(--side);
+		color: var(--ink-2);
+		display: grid;
+		place-items: center;
+	}
+	.app.railed .agent.on .rail-lock {
+		background: var(--active);
+	}
+	.rail-lock svg {
+		width: 10px;
+		height: 10px;
 	}
 	.agent-preview {
 		min-width: 0;

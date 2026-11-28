@@ -223,6 +223,8 @@ struct ChatView: View {
                                     .frame(width: 18, height: 10)
                             }
                             Text(agent?.name ?? "").font(Fonts.ui(Tokens.PhoneSize.body, .semibold)).foregroundStyle(P.ink)
+                            // Private, as wherever it's listed (LOO-462).
+                            if agent?.isPrivate == true { LockMark() }
                         }
                     }
                     ConnLine(conn: model.conn)

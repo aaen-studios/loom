@@ -688,7 +688,6 @@ pub struct Loom {
     /// Whether the edit page asks the same, under its Private switch.
     private_armed: bool,
     /// Whether either asks to run it in a sandbox of its own as well, where it offers to.
-    private_isolate: bool,
     listing_hosts: bool,
     /// One of the person's own hosts to add, by what ssh is given, on the Hosts page.
     ssh_host_in: Entity<InputState>,
@@ -1893,7 +1892,7 @@ ACTA_KEY=secret:ACTA_KEY",
             menu_threads: false,
             menu_private: false,
             private_armed: false,
-            private_isolate: false,
+
             listing_hosts: false,
             ssh_host_in,
             skill_name_in,
@@ -8107,7 +8106,12 @@ ACTA_KEY=secret:ACTA_KEY",
                         self.model.finished_at(&a.id),
                     ))
                     .when(waiting, |d| d.child(rail_dot(p).bg(p.warn)))
-                    .when(unread && !waiting, |d| d.child(rail_dot(p)));
+                    .when(unread && !waiting, |d| d.child(rail_dot(p)))
+                    // Private, as the lock after its name says in the open sidebar
+                    // (LOO-462): a small badge on the corner, on the tile's own colour.
+                    .when(a.private, |d| {
+                        d.child(rail_lock(p, if selected { p.active } else { p.side }))
+                    });
                 tile = match part {
                     model::SidePart::Pinned => {
                         let t = tile.on_drag(SideDrag::of(&a, p).tile().rail(), SideDrag::ghost);
@@ -8783,6 +8787,8 @@ ACTA_KEY=secret:ACTA_KEY",
                         .text_color(p.ink)
                         .child(agent.name.clone()),
                 )
+                // Private, as everywhere it's listed (LOO-462).
+                .when(agent.private, |d| d.child(self.lock_mark()))
                 .when(fit.chevrons, |d| {
                     d.child(
                         Icon::new(IconName::ChevronDown)
@@ -9950,53 +9956,16 @@ ACTA_KEY=secret:ACTA_KEY",
 
     /// What Make private asks before it does, in the agent menu and under the edit page's
     /// switch: what the agent loses, then Cancel and Make private (PLAN.md, "Private
-    /// agents"). With `offer`, on an instance with sandboxes for an agent that isn't
-    /// isolated, one switch between, off at first, to run it in a sandbox of its own too,
-    /// with what that costs under it.
+    /// agents"). It runs in a sandbox of its own from then on (LOO-462).
     fn private_confirm(
         &self,
         id: &'static str,
         name: &str,
-        offer: bool,
         cx: &mut Context<Self>,
         cancel: fn(&mut Loom),
         yes: fn(&mut Loom),
     ) -> Div {
         let p = self.p;
-        let isolate = div()
-            .flex()
-            .items_start()
-            .gap(px(space::S))
-            .child(
-                self.switch(
-                    SharedString::from(format!("{id}-isolate")),
-                    self.private_isolate,
-                )
-                .on_click(cx.listener(|this, _, _, cx| {
-                    this.private_isolate = !this.private_isolate;
-                    cx.notify();
-                })),
-            )
-            .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .flex()
-                    .flex_col()
-                    .gap(px(2.0))
-                    .child(
-                        div()
-                            .text_size(px(size::SMALL))
-                            .text_color(p.ink)
-                            .child(PRIVATE_ISOLATE),
-                    )
-                    .child(
-                        div()
-                            .text_size(px(size::CAPTION))
-                            .text_color(p.ink_3)
-                            .child(PRIVATE_ISOLATE_COSTS),
-                    ),
-            );
         div()
             .max_w(px(280.0))
             .flex()
@@ -10017,7 +9986,6 @@ ACTA_KEY=secret:ACTA_KEY",
                     .text_color(p.ink_3)
                     .child(PRIVATE_LOSES),
             )
-            .when(offer, |d| d.child(isolate))
             .child(
                 div()
                     .flex()
@@ -11265,16 +11233,10 @@ ACTA_KEY=secret:ACTA_KEY",
                 .and_then(|id| self.model.agent(id))
                 .map(|a| a.name.clone())
                 .unwrap_or_default();
-            let offer = self
-                .model
-                .selected
-                .as_ref()
-                .is_some_and(|id| self.model.offers_isolating(id));
             return Some(panel.when(under_header, |d| d.left(px(space::S))).child(
                 self.private_confirm(
                     "menu-private",
                     &name,
-                    offer,
                     cx,
                     |this| {
                         this.menu_private = false;
@@ -11282,13 +11244,10 @@ ACTA_KEY=secret:ACTA_KEY",
                     },
                     |this| {
                         if let Some(agent) = this.model.selected.clone() {
-                            let isolate =
-                                this.private_isolate && this.model.offers_isolating(&agent);
-                            let f = this.model.make_private(&agent, true, isolate);
+                            let f = this.model.set_private(&agent, true);
                             this.send(f);
                         }
                         this.menu_private = false;
-                        this.private_isolate = false;
                         this.menu = None;
                     },
                 ),
@@ -11391,7 +11350,13 @@ ACTA_KEY=secret:ACTA_KEY",
                         },
                         false,
                     )
+                    .when(!private && !self.model.can_private, |d| {
+                        d.opacity(0.5).tooltip(tip_text(PRIVATE_NOT_HERE.into()))
+                    })
                     .on_click(cx.listener(move |this, _, _, cx| {
+                        if !private && !this.model.can_private {
+                            return;
+                        }
                         // Normal again shares nothing of its own, so it needs no asking.
                         if private {
                             if let Some(agent) = this.model.selected.clone() {
@@ -11401,7 +11366,6 @@ ACTA_KEY=secret:ACTA_KEY",
                             this.menu = None;
                         } else {
                             this.menu_private = true;
-                            this.private_isolate = false;
                         }
                         cx.notify();
                     })),
@@ -13897,33 +13861,34 @@ ACTA_KEY=secret:ACTA_KEY",
                     if on {
                         let f = this.model.set_private(&agent, false);
                         this.send(f);
-                    } else {
+                    } else if this.model.can_private {
                         this.private_armed = !this.private_armed;
-                        this.private_isolate = false;
                     }
                 }),
             )
+            // Where nothing keeps it to its own folder, it can't be made private, and
+            // the switch says why (LOO-462). One private already can be made normal.
+            .when(!private && !self.model.can_private, |d| {
+                d.opacity(0.5).child(
+                    div()
+                        .px(px(space::S))
+                        .text_size(px(size::CAPTION))
+                        .text_color(self.p.ink_3)
+                        .child(PRIVATE_NOT_HERE),
+                )
+            })
             .when(self.private_armed && !private, |d| {
-                let offer = self
-                    .model
-                    .editing
-                    .as_ref()
-                    .is_some_and(|id| self.model.offers_isolating(id));
                 d.child(div().px(px(space::S)).child(self.private_confirm(
                     "edit-private",
                     &editing_name,
-                    offer,
                     cx,
                     |this| this.private_armed = false,
                     |this| {
                         this.private_armed = false;
                         if let Some(agent) = this.model.editing.clone() {
-                            let isolate =
-                                this.private_isolate && this.model.offers_isolating(&agent);
-                            let f = this.model.make_private(&agent, true, isolate);
+                            let f = this.model.set_private(&agent, true);
                             this.send(f);
                         }
-                        this.private_isolate = false;
                     },
                 )))
             });
@@ -26617,6 +26582,23 @@ fn rail_dot(p: Palette) -> Div {
         .bg(p.ink)
 }
 
+/// A private agent's lock on its tile in the collapsed sidebar: a small round badge on
+/// the bottom right corner, on `bg`, the tile's own colour.
+fn rail_lock(p: Palette, bg: Hsla) -> Div {
+    div()
+        .absolute()
+        .bottom(px(1.0))
+        .right(px(1.0))
+        .size(px(15.0))
+        .rounded_full()
+        .bg(bg)
+        .flex()
+        .items_center()
+        .justify_center()
+        .text_color(p.ink_2)
+        .child(Icon::new(Ico::Lock).xsmall())
+}
+
 /// The day of `ms`, as the activity page heads its entries: "Today", "Yesterday", or a date.
 /// The day `ms` falls on in the person's time zone, as a number of days.
 fn day_number(ms: i64) -> i64 {
@@ -28132,15 +28114,13 @@ impl Making {
     }
 }
 
-/// What an agent made private loses, as Make private says before it does.
-const PRIVATE_LOSES: &str = "It loses the shared notes, the shared folder and shared tables, \
-     messages with your other agents, their chats in its searches, and plugins' tools. They \
-     lose it too.";
+/// What an agent made private loses, as Make private says before it does (LOO-462).
+const PRIVATE_LOSES: &str = "It starts fresh, in a sandbox of its own: only its own folder \
+     and the internet. It loses your profile, skills, devices and connections, the shared \
+     notes, folder and tables, and messages with your other agents.";
 
-/// The switch Make private offers where the instance has sandboxes, and what it costs.
-const PRIVATE_ISOLATE: &str = "Also run it in a sandbox of its own";
-const PRIVATE_ISOLATE_COSTS: &str =
-    "It no longer works in its folder, and has only what its sandbox has.";
+/// Why an agent can't be made private on this computer (LOO-462).
+const PRIVATE_NOT_HERE: &str = "This computer can't keep an agent to its own folder yet.";
 
 /// What a new chat offers to ask, under the composer.
 const SUGGESTIONS: [&str; 3] = [

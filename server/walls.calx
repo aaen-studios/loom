@@ -8,10 +8,12 @@ import std.json.{Json}
 import shared.obj.{Obj, str_at}
 
 // What a private agent's sessions are told once, in place of the shared folder.
-pub const TOLD: str = "[loom: You're private: you have only your own notes, chats, files and tools. Your person's other agents, their shared notes, shared folder and shared tables are out of your reach, and they can't reach you. Keep what you learn with remember, which stays yours.]"
+pub const TOLD: str = "[loom: You're private, a fresh start: you have only your own notes, chats, files and tools, and your folder, where you run. Your person's computer outside it, their profile, skills, devices, connections, other agents, shared notes, shared folder and shared tables are out of your reach, and their agents can't reach you. You have the internet, so you can clone a repository or install what you need into your folder. Keep what you learn with remember, which stays yours.]"
 
 // Why a private agent was refused, and why another agent was refused one.
 pub const MINE: str = "You're private: you reach only your own chats, notes, tables and files, never your person's other agents'. Your person can change that, in the app."
+pub const FRESH: str = "You're private, a fresh start: your person's profile, skills and the instructions they give every agent are out of your reach. You know what they tell you in your chat."
+pub const DEVICES: str = "You're private, so your person's devices are out of your reach."
 pub const THEIRS: str = "That agent is private: no other agent reaches it, its chats, its notes or its tables."
 
 // Whether `by` and `other` are walled apart: they aren't the same agent, and
@@ -27,6 +29,9 @@ pub fn apart(by: String, other: String, private: List<String>) -> bool {
 pub fn never(name: String) -> String? {
     if name == "skill.put" or name == "skill.delete" { return some(String("You're private, so you don't write skills, which every agent of your person's reads. Propose one with propose_skill, and your person keeps it if they want.")) }
     if name == "profile.put" { return some(String("You're private, so you don't write your person's profile, which every agent of theirs starts with. Keep it with remember.")) }
+    if name == "profile.get" or name == "defaults.get" or name == "skill.list" or name == "skill.get" { return some(String(FRESH)) }
+    if name.starts_with("device.") or name == "token.make_to_file" { return some(String(DEVICES)) }
+    if name.starts_with("mcp.") or name.starts_with("secret.") { return some(String("You're private, so your person's connections, MCP servers and secrets are out of your reach.")) }
     if name == "plugin.put" { return some(String("You're private, so you don't write plugins, whose tools every agent of your person's gets.")) }
     if name.starts_with("room.") { return some(String("You're private, so you aren't in group chats, where agents read each other.")) }
     return none
@@ -39,6 +44,9 @@ pub fn never_tool(name: String) -> String? {
     if name == "save_skill" or name == "fix_skill" { return never(String("skill.put")) }
     if name == "update_profile" { return never(String("profile.put")) }
     if name == "save_plugin" { return never(String("plugin.put")) }
+    if name == "use_device" or name == "list_devices" { return some(String(DEVICES)) }
+    if name == "list_skills" or name == "read_skill" { return some(String(FRESH)) }
+    if name == "browser_fill_secret" { return some(String("You're private, so the secrets your person keeps are out of your reach. Ask for one with browser_ask_secret: they type it on a card, and it goes into the page without you seeing it.")) }
     return none
 }
 
@@ -85,6 +93,21 @@ fn lists_lose_what_is_walled_off() {
 @test
 fn a_private_agent_writes_nothing_every_agent_reads() {
     assert(never(String("skill.put")) != none and never(String("profile.put")) != none and never(String("room.create")) != none and never(String("plugin.put")) != none)
-    assert(never(String("memory.put")) == none and never(String("skill.list")) == none)
+    assert(never(String("memory.put")) == none and never(String("conversation.create")) == none)
     assert(never_tool(String("message_agent")) != none and never_tool(String("update_profile")) != none and never_tool(String("recall")) == none)
+}
+
+@test
+fn a_private_agent_is_a_fresh_start() {
+    // Nothing of its person's: their profile, skills, defaults, devices, connections and secrets.
+    let names: List<str> = ["profile.get", "defaults.get", "skill.list", "skill.get", "device.list", "device.call", "token.make_to_file", "mcp.list", "mcp.test", "secret.list"]
+    for n in names {
+        assert(never(String(n)) != none)
+    }
+    let tools: List<str> = ["use_device", "list_devices", "list_skills", "read_skill", "browser_fill_secret"]
+    for t in tools {
+        assert(never_tool(String(t)) != none)
+    }
+    assert(never_tool(String("browser_ask_secret")) == none and never_tool(String("remember")) == none)
+    assert(TOLD.contains("internet") and TOLD.contains("out of your reach"))
 }

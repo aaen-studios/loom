@@ -6701,6 +6701,9 @@ pub struct Model {
     pub programs_owner: bool,
     /// Whether the instance runs sandboxes, which an isolated agent needs, as acp.list said.
     pub sandboxes: bool,
+    /// Whether this computer keeps a private agent to its own folder, so an agent can be
+    /// made private here (LOO-462), as acp.list said.
+    pub can_private: bool,
     /// The ACP Registry's agents, once it's been read.
     pub registry: Vec<Listed>,
     /// Which registry agent each program on the instance is, by the program's name.
@@ -9672,6 +9675,10 @@ impl Model {
                 .pointer("/value/sandboxes")
                 .and_then(Value::as_bool)
                 .unwrap_or(false);
+            self.can_private = f
+                .pointer("/value/private")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
         } else if id.starts_with("app.place") || id.starts_with("app.private") {
             // Where it runs was refused, as on an instance without sandboxes, or
             // while it answers, or making it private, while it's in a group chat:
@@ -11032,36 +11039,18 @@ impl Model {
     }
 
     /// Makes `agent` private, or normal again (PLAN.md, "Private agents"). The
-    /// instance refuses one in a group chat, and the list goes back to what it has.
+    /// instance refuses one in a group chat, or where nothing keeps it to its own
+    /// folder, and the list goes back to what it has. Made private, the instance runs
+    /// it in a sandbox of its own (LOO-462), whose answer says so.
     pub fn set_private(&mut self, agent: &str, on: bool) -> Value {
-        self.make_private(agent, on, false)
-    }
-
-    /// Makes an agent private, or normal again, and with `isolate`, isolated too, in a
-    /// sandbox of its own (PLAN.md, "Private agents"), which Make private offers.
-    pub fn make_private(&mut self, agent: &str, on: bool, isolate: bool) -> Value {
         if let Some(a) = Rc::make_mut(&mut self.agents)
             .iter_mut()
             .find(|a| a.id == agent)
         {
             a.private = on;
-            if isolate {
-                a.isolated = true;
-            }
         }
         let id = self.id("app.private");
-        let args = if isolate {
-            json!({"agent": agent, "private": on, "isolated": true})
-        } else {
-            json!({"agent": agent, "private": on})
-        };
-        json!({"t": "cmd", "id": id, "name": "agent.update", "args": args})
-    }
-
-    /// Whether Make private offers to isolate `agent` as well: on an instance with
-    /// sandboxes, for one that isn't isolated already.
-    pub fn offers_isolating(&self, agent: &str) -> bool {
-        self.sandboxes && self.agent(agent).is_some_and(|a| !a.isolated)
+        json!({"t": "cmd", "id": id, "name": "agent.update", "args": {"agent": agent, "private": on}})
     }
 
     pub fn start_fresh(&mut self) -> Option<Value> {
@@ -17948,25 +17937,14 @@ mod tests {
     }
 
     #[test]
-    fn make_private_offers_a_sandbox_only_where_there_are_some() {
+    fn private_is_offered_only_where_the_computer_keeps_it_apart() {
         let mut m = Model::new();
-        m.take(&json!({"t": "core.data", "what": "agents", "items": [
-            {"id": "a_1", "name": "One"},
-            {"id": "a_2", "name": "Two", "isolated": true},
-        ]}));
-        // No sandboxes, as on the desktop's own instance on Windows: nothing to offer.
-        assert!(!m.offers_isolating("a_1"));
-        m.sandboxes = true;
-        assert!(m.offers_isolating("a_1"));
-        // Isolated already, as every member's agent is.
-        assert!(!m.offers_isolating("a_2"));
-        let f = m.make_private("a_1", true, true);
-        assert_eq!(
-            f["args"],
-            json!({"agent": "a_1", "private": true, "isolated": true})
-        );
-        assert!(m.agents[0].private && m.agents[0].isolated);
-        assert!(!m.offers_isolating("a_1"));
+        // No sandboxes, as on the desktop's own instance on Windows: nothing keeps a
+        // private agent to its own folder, so it can't be made private.
+        m.result(&json!({"t": "result", "id": "app.acp_1", "ok": true, "value": {"programs": [], "owner": true, "sandboxes": false, "private": false}}));
+        assert!(!m.can_private);
+        m.result(&json!({"t": "result", "id": "app.acp_2", "ok": true, "value": {"programs": [], "owner": true, "sandboxes": true, "private": true}}));
+        assert!(m.sandboxes && m.can_private);
     }
 
     #[test]

@@ -52,7 +52,13 @@ fn run(i: Instance) ! Error {
     let tooled = Obj.new().s("plugin.toml", String(TOOLED)).s("tools.calx", String("fn main() \{\}")).done()
     _ = try app.cmd("q_0", "plugin.put", Obj.new().s("id", String("weather")).j("files", tooled).done())
 
+    // What's the person's: a profile, instructions for every agent, and an MCP server.
+    _ = try app.cmd("q_0p", "profile.put", Obj.new().s("text", String("Ann the tester, in Oslo.")).done())
+    _ = try app.cmd("q_0d", "defaults.put", Obj.new().s("instructions", String("Always sign off with a heron.")).done())
+    _ = try app.cmd("q_0m", "mcp.put", Obj.new().s("name", String("echo")).s("command", String("echo-server")).done())
+
     let (casper, chat_c) = try agent(mut app, "q_1", "q_1c", "Casper", false)
+    _ = try app.cmd("q_1m", "agent.update", Obj.new().s("agent", casper.copy()).j("mcp", Json.Array([Json.Str(String("echo"))])).done())
     let (rosa, chat_r) = try agent(mut app, "q_2", "q_2c", "Rosa", true)
     let got = try app.cmd("q_3", "agent.update", Obj.new().s("agent", rosa.copy()).s("name", String("Rosa")).done())
     try check(bool_at(at(at(got, "value"), "agent"), "private") == some(true), "an agent is made private, and its agent says so")
@@ -123,6 +129,22 @@ fn run(i: Instance) ! Error {
     let profile = try call(mut app, chat_r.copy(), "m_28", "update_profile", Obj.new().s("text", String("Likes herons")).done())
     let skill = try call(mut app, chat_r.copy(), "m_29", "save_skill", Obj.new().s("name", String("herons")).s("description", String("Herons.")).s("body", String("Look up.")).done())
     try check(profile.contains("private") and skill.contains("private"), "it writes nothing every agent reads: the profile and skills")
+    // --- A fresh start (LOO-462): nothing of the person's ---
+    let (fresh, chat_f) = try agent(mut app, "q_f1", "q_f1c", "Fresh", true)
+    _ = try app.cmd("q_f1m", "agent.update", Obj.new().s("agent", fresh.copy()).j("mcp", Json.Array([Json.Str(String("echo"))])).done())
+    let told = try say(mut app, chat_f.copy(), "m_f1", String("/context"))
+    try check(not told.contains("About the person") and not told.contains("Ann the tester") and not told.contains("Always sign off") and told.contains("fresh start"), "a private agent isn't told its person's profile, nor the instructions they give every agent")
+    try check(not told.contains("This message comes from"), "nor the name of the device they write from")
+    let fresh_profile = try call(mut app, chat_f.copy(), "m_f2", "run_command", Obj.new().s("name", String("profile.get")).j("args", Obj.new().done()).done())
+    let fresh_skills = try call(mut app, chat_f.copy(), "m_f3", "list_skills", Obj.new().done())
+    let fresh_devices = try call(mut app, chat_f.copy(), "m_f4", "list_devices", Obj.new().done())
+    let fresh_mcp = try call(mut app, chat_f.copy(), "m_f5", "run_command", Obj.new().s("name", String("mcp.list")).j("args", Obj.new().done()).done())
+    try check(fresh_profile.contains("fresh start") and fresh_skills.contains("fresh start") and fresh_devices.contains("devices are out of your reach") and fresh_mcp.contains("out of your reach"), "nor reads them, its person's skills, devices or connections")
+    let fresh_servers = try say(mut app, chat_f.copy(), "m_f6", String("/servers"))
+    try check(not fresh_servers.contains("echo"), "and it gets none of its person's MCP servers, even one given to it")
+    let normal_servers = try say(mut app, chat_c.copy(), "m_f7", String("/servers"))
+    try check(normal_servers.contains("echo"), "which a normal agent given one gets")
+
     let made = try call(mut app, chat_r.copy(), "m_30", "create_agent", Obj.new().s("name", String("Rosa Jr")).s("acp_agent", String("fake")).done())
     try check(made.contains(#""private":true"#), "an agent it makes is private too")
 
@@ -145,7 +167,9 @@ fn run(i: Instance) ! Error {
 }
 
 fn main() ! Error {
-    let inst = try Instance.start()
+    // Private agents run in a sandbox of their own, which a test has no runtime for:
+    // here they run unconfined, and only loom's walls are tested (sandbox.calx tests theirs).
+    let inst = try Instance.start_with([String("--test-private-unconfined")])
     let failure: String? = match run(inst.copy()) {
         ok => none,
         err(e) => some("{e}"),
