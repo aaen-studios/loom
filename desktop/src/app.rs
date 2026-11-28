@@ -62,6 +62,8 @@ mod list_page;
 mod live_ui;
 #[path = "mic_ui.rs"]
 mod mic_ui;
+#[path = "model_fallback_view.rs"]
+mod model_fallback_view;
 #[path = "picked_ui.rs"]
 mod picked_ui;
 #[path = "routine_off_view.rs"]
@@ -8905,10 +8907,11 @@ ACTA_KEY=secret:ACTA_KEY",
         } else {
             (0.0, 0.0)
         };
-        let brain = agent.picked().map_or((0.0, 0.0, 0.0), |picked| {
+        let (whole, model_only) = self.model.brain_words(agent);
+        let brain = whole.map_or((0.0, 0.0, 0.0), |picked| {
             let icon = chip + BRAIN_ICON;
             let with = |text: &str| icon + BRAIN_GAP + words(text) + BRAIN_GAP + CHEVRON;
-            let model = agent.picked_model().map_or(icon, |m| with(&m));
+            let model = model_only.map_or(icon, |m| with(&m));
             (with(&picked), model, icon)
         });
         let permission_words = words(model::mode_name(agent.mode()));
@@ -10347,13 +10350,25 @@ ACTA_KEY=secret:ACTA_KEY",
         cx: &mut Context<Self>,
     ) -> Option<Stateful<Div>> {
         let p = self.p;
-        let picked = agent.picked()?;
+        let (whole, model_only) = self.model.brain_words(agent);
+        let picked = whole?;
         let words = match shows {
             model::header::Brain::Whole => Some(picked.clone()),
-            model::header::Brain::Model => agent.picked_model(),
+            model::header::Brain::Model => model_only,
             model::header::Brain::Icon => None,
         };
+        // A chat on a fallback model shows that model, in the warn colour, never the
+        // agent's pick (model/model_fallback.rs).
+        let fallback = self.model.model_now().is_some();
         let listed = self.model.program_listed(&agent.program).cloned();
+        let icon = if fallback {
+            Icon::new(Ico::ArrowRightLeft)
+                .size(px(BRAIN_ICON))
+                .text_color(p.warn)
+                .into_any_element()
+        } else {
+            self.brain_icon(listed.as_ref(), BRAIN_ICON)
+        };
         let open = self.menu == Some(Menu::Model);
         let menu = open.then(|| self.brain_menu(agent, cx));
         Some(
@@ -10368,7 +10383,7 @@ ACTA_KEY=secret:ACTA_KEY",
                 .py(px(space::XS))
                 .rounded(px(radius::ROW))
                 .text_size(px(size::CAPTION))
-                .text_color(p.ink_2)
+                .text_color(if fallback { p.warn } else { p.ink_2 })
                 .cursor_pointer()
                 .soft_hover(transparent_black(), p.hover, None)
                 .when(open, |d| d.bg(p.hover))
@@ -10376,7 +10391,7 @@ ACTA_KEY=secret:ACTA_KEY",
                 .flex()
                 .items_center()
                 .gap(px(BRAIN_GAP))
-                .child(self.brain_icon(listed.as_ref(), BRAIN_ICON))
+                .child(icon)
                 .when_some(words, |d, words| {
                     d.child(words).child(
                         Icon::new(IconName::ChevronDown)
@@ -23713,6 +23728,7 @@ fn shown_card(p: Palette, card: &model::Card, tint: Hsla, scale: f32) -> Div {
         | CardBody::McpAdd { .. }
         | CardBody::SecretAsk { .. }
         | CardBody::RoutineOff { .. }
+        | CardBody::ModelFallback { .. }
         | CardBody::Draft(_)
         | CardBody::SpoolConnect { .. }
         | CardBody::VoiceSetup(_)
@@ -29868,6 +29884,14 @@ fn chat_row(i: &RowInputs, this: WeakEntity<Loom>) -> Stateful<Div> {
         _ => None,
     } {
         return routine_off_view::row(p, m, card, column, time_line, show.text_scale, this);
+    }
+    // A chat its program moved to another model: its card, to switch back or start a
+    // new chat (model_fallback_view.rs).
+    if let Some((m, card)) = match &row {
+        Row::Message(m) => model::model_fallback::card_of(m).map(|c| (m, c)),
+        _ => None,
+    } {
+        return model_fallback_view::row(p, m, card, column, time_line, show.text_scale, this);
     }
     // A line from loom across the chat: where the context was compacted, or where a
     // fresh session started.

@@ -168,7 +168,11 @@ pub fn respond_error(id: Json, code: i64, message: String) -> String {
 // What loom tells an agent about itself when it starts one.
 pub fn initialize_params() -> Json {
     let files = Obj.new().b("readTextFile", false).b("writeTextFile", false).done()
-    let caps = Obj.new().j("fs", files).b("terminal", false).done()
+    // It takes `notice` session updates, so what a program says of the session
+    // itself, as that it went to another model, isn't in the agent's words
+    // (PLAN.md, "A model fallback").
+    let session = Obj.new().j("notices", Obj.new().done()).done()
+    let caps = Obj.new().j("fs", files).b("terminal", false).j("session", session).done()
     let info = Obj.new().s("name", String("loom")).s("version", String("0.2.0-dev")).done()
     return Obj.new().i("protocolVersion", 1).j("clientCapabilities", caps).j("clientInfo", info).done()
 }

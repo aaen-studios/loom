@@ -331,6 +331,9 @@ struct Card: Equatable, Sendable {
     var routine = ""
     var why = ""
     var failures = 0
+    /// For `model_fallback` (ModelFallback.swift): the model the chat was on, by name. Its
+    /// `state` is `fallback`, `back`, `moved` or `picked`, with `said` once it's done.
+    var fromName = ""
     /// For `draft` (Drafts.swift): the email or message an agent drafted, for the person
     /// to send, edit or reject; `message`, `sending` and `error` are its answer's.
     var draft: Draft?
@@ -384,7 +387,7 @@ struct Card: Equatable, Sendable {
 
     init?(_ c: JSON) {
         type = c["type"].text
-        guard ["choices", "form", "checklist", "table", "progress", "facts", "sign_in", "mcp_add", "secret_ask", "routine_off", "draft", "spool_connect", "voice_setup"].contains(type) else { return nil }
+        guard ["choices", "form", "checklist", "table", "progress", "facts", "sign_in", "mcp_add", "secret_ask", "routine_off", "model_fallback", "draft", "spool_connect", "voice_setup"].contains(type) else { return nil }
         draft = type == "draft" ? Draft(c) : nil
         voice = type == "voice_setup" ? VoiceCard(c) : nil
         entry = c["entry"].text
@@ -394,6 +397,7 @@ struct Card: Equatable, Sendable {
         keys = type == "spool_connect" ? c["secrets"].array.map { SpoolKey(name: $0["name"].text, label: $0["label"].text, placeholder: $0["placeholder"].text) } : []
         routine = c["routine"].text
         why = c["why"].text
+        fromName = c["from_name"].text
         failures = c["failures"].int ?? 0
         if type == "form" {
             formFields = c["fields"].array.map {
@@ -1815,6 +1819,12 @@ final class Model {
     /// (RoutineOff.swift).
     var routineOnSending: Set<String> = []
     var routineOnErrors: [String: String] = [:]
+    /// Switch back and New chat, on the cards of chats on a fallback model: the ones on
+    /// their way, by chat, and what the instance said to ones it refused
+    /// (ModelFallback.swift).
+    var modelBackSending: Set<String> = []
+    var fallbackChatSending: Set<String> = []
+    var fallbackErrors: [String: String] = [:]
     /// The answers on draft cards on their way, by `message/card`, and what the instance
     /// said to ones it refused (Drafts.swift).
     var draftSending: Set<String> = []
@@ -2527,6 +2537,9 @@ final class Model {
             takeDraftAnswer(id, error: error)
         case let id where id.hasPrefix(spoolAnswer):
             spoolAnswered(id, error: error)
+        case let id where id.hasPrefix(modelBackAnswer) || id.hasPrefix(fallbackChatAnswer):
+            // Switch back or New chat, on a fallback card (ModelFallback.swift).
+            _ = takeFallbackAnswer(id, error: error)
         case let id where id.hasPrefix(routineOnAnswer):
             // The card's own message.updated says it's on; a refusal shows on the card,
             // which still has Turn on.
@@ -2625,7 +2638,7 @@ final class Model {
             // desktop's; a watch's lines show here too, as quiet rows, the line a T3 thread
             // started from loom lands in shows as its card, and so does a routine's that
             // turned off on its own.
-            messages = items.filter { !routinePrompt($0) && ($0["role"].text != "loom" || isWatchLine($0) || !threadsOf($0).isEmpty || isRoutineOffLine($0)) }.map(messageOf)
+            messages = items.filter { !routinePrompt($0) && ($0["role"].text != "loom" || isWatchLine($0) || !threadsOf($0).isEmpty || isRoutineOffLine($0) || isFallbackLine($0)) }.map(messageOf)
             reaching = false
             placeQueued()
             // The tool calls these messages name.

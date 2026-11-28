@@ -1,0 +1,164 @@
+module tests.protocol.model_fallback
+
+// A model fallback (PLAN.md, "A model fallback"): the agent program answers on
+// another model after its own model's safeguards flag a request, and carries the
+// session on there. The reply says so in loom's words, at that point; a card
+// under it switches back or starts a new chat; the chat keeps `model_now`; and
+// switching back sets the session to the model it was on. The fake agent's
+// /fallback plays what Claude's adapter does: a `notice`, then a
+// config_option_update whose model is the fallback, which it lists as its own.
+//
+//     calx tests/protocol/model_fallback.calx
+import std.json.{Json}
+import std.process.{exit}
+import shared.obj.{Obj, at, str_at}
+import shared.client.{Session, reply_text}
+import tests.kit.{Instance, check}
+
+// The agent's next reply in `conversation`.
+fn reply_in(app: mut Session, conversation: String) -> Json ! Error {
+    loop {
+        let created = try app.until("event", "message.created")
+        let m = at(created, "message")
+        if str_at(m.copy(), "role") == some(String("agent")) and str_at(m.copy(), "conversation") == some(conversation.copy()) { return m }
+    }
+}
+
+fn say(app: mut Session, conversation: String, cid: str, text: str) -> Json ! Error {
+    try app.send(Obj.new().s("t", String("send")).s("cid", String(cid)).s("conversation", conversation.copy()).s("text", String(text)).done())
+    let reply = try reply_in(mut app, conversation)
+    // Loom's card goes under the reply before its run.finished.
+    _ = try app.until("event", "run.finished")
+    return reply
+}
+
+// Each of a message's blocks, as (kind, text).
+fn blocks_of(m: Json) -> List<(String, String)> {
+    var out = List<(String, String)>()
+    if let Json.Array(blocks) = at(m, "blocks") {
+        for b in blocks { out.push((str_at(b.copy(), "kind") ?? String(), str_at(b, "text") ?? String())) }
+    }
+    return out
+}
+
+// The card of the newest loom message in `conversation` whose card is `type`.
+fn card_in(app: Session, conversation: String, kind: str) -> Json {
+    var found = Json.Null
+    for f in app.frames {
+        let k = str_at(f.copy(), "kind") ?? String()
+        if k != "message.created" and k != "message.updated" { continue }
+        let m = at(f, "message")
+        if str_at(m.copy(), "conversation") != some(conversation.copy()) or str_at(m.copy(), "role") != some(String("loom")) { continue }
+        if let Json.Array(blocks) = at(m, "blocks") {
+            for b in blocks {
+                let card = at(b, "card")
+                if str_at(card.copy(), "type") == some(String(kind)) { found = card }
+            }
+        }
+    }
+    return found
+}
+
+// What the last conversation.updated with `model_now` said of `conversation`:
+// its model_now, or null once it said there was none.
+fn model_now(app: Session, conversation: String) -> Json {
+    var now = Json.Null
+    for f in app.frames {
+        if str_at(f.copy(), "kind") != some(String("conversation.updated")) { continue }
+        let c = at(f, "conversation")
+        if str_at(c.copy(), "id") != some(conversation.copy()) { continue }
+        if let Json.Object(m) = c {
+            if let v = m.find(String("model_now")) { now = v.copy() }
+        }
+    }
+    return now
+}
+
+fn chat(app: mut Session, id: str, agent: String) -> String ! Error {
+    let c = try app.cmd(id, "conversation.create", Obj.new().s("agent", agent).done())
+    return str_at(at(c, "value"), "conversation") ?? String()
+}
+
+fn run(i: Instance) ! Error {
+    var app = try Session.connect(i.base.copy(), i.token.copy(), 0)
+    let made = try app.cmd("q_1", "agent.create", Obj.new().s("name", String("Main")).s("acp_agent", String("fake")).s("instructions", String("You are a test.")).done())
+    let agent = str_at(at(at(made, "value"), "agent"), "id") ?? String()
+    let main_chat = try chat(mut app, "q_2", agent.copy())
+    _ = try say(mut app, main_chat.copy(), "m_1", "Hello.")
+
+    // --- The program goes to another model: loom's notice, where it happened ---
+    let fell = try say(mut app, main_chat.copy(), "m_2", "Before.\n/fallback claude-sonnet-5-5\nAfter.")
+    let blocks = blocks_of(fell.copy())
+    let expected = "Model fake-1's safeguards flagged this request, so Sonnet 5.5 answers from here."
+    try check(blocks.len() == 3 and blocks[0].0 == "text" and blocks[1] == (String("notice"), String(expected)) and blocks[2].0 == "text", "the reply says, where it happened, that another model answers")
+    try check(not reply_text(fell.copy()).contains("declined"), "and the program's own words aren't in it")
+    let now = model_now(app, main_chat.copy())
+    try check(str_at(now.copy(), "value") == some(String("claude-sonnet-5-5")) and str_at(now.copy(), "name") == some(String("Sonnet 5.5")) and at(now.copy(), "fallback") == Json.Bool(true) and str_at(now.copy(), "from") == some(String("fake-1")), "conversation.updated says the chat's model_now")
+    let card = card_in(app, main_chat.copy(), "model_fallback")
+    try check(str_at(card.copy(), "title") == some(String("This chat is on Sonnet 5.5 now.")) and str_at(card.copy(), "state") == some(String("fallback")) and str_at(card.copy(), "from_name") == some(String("Model fake-1")), "a card under the reply says the chat is on it now")
+    let listed = try app.cmd("q_4", "activity.list", Obj.new().done())
+    try check("{listed}".contains("The request looked like it could be misused."), "the program's own words go in the activity log")
+
+    // --- It stays there ---
+    let next = try say(mut app, main_chat.copy(), "m_3", "/config\n/tokens 40")
+    try check(reply_text(next) == "model=claude-sonnet-5-5 effort=medium", "the chat stays on the other model")
+
+    // --- Switch back ---
+    let back = try app.cmd("q_5", "conversation.model_back", Obj.new().s("conversation", main_chat.copy()).done())
+    try check(at(at(at(back, "value"), "conversation"), "model_now") == Json.Null, "conversation.model_back takes the chat off it")
+    try check(model_now(app, main_chat.copy()) == Json.Null, "and conversation.updated says so")
+    let done = card_in(app, main_chat.copy(), "model_fallback")
+    try check(str_at(done.copy(), "state") == some(String("back")) and str_at(done, "said") == some(String("Back on Model fake-1.")), "the card says it's back, with no buttons")
+    let again = try say(mut app, main_chat.copy(), "m_4", "/config")
+    try check(reply_text(again) == "model=fake-1 effort=medium", "the session was set back to the model it was on")
+
+    // --- A new chat in its place ---
+    _ = try say(mut app, main_chat.copy(), "m_5", "/fallback claude-sonnet-5-5")
+    let fresh = try app.cmd("q_6", "conversation.create", Obj.new().s("agent", agent.copy()).s("from", main_chat.copy()).done())
+    let new_chat = str_at(at(fresh, "value"), "conversation") ?? String()
+    let moved = card_in(app, main_chat.copy(), "model_fallback")
+    try check(str_at(moved.copy(), "state") == some(String("moved")) and str_at(moved, "said") == some(String("Moved to a new chat.")), "a new chat in its place: the card says so")
+    let fresh_config = try say(mut app, new_chat, "m_6", "/config")
+    try check(reply_text(fresh_config) == "model=fake-1 effort=medium", "and the new chat starts on the agent's own model")
+
+    // --- A model picked in the header takes the chat off it ---
+    let other_chat = try chat(mut app, "q_7", agent.copy())
+    _ = try say(mut app, other_chat.copy(), "m_7", "/fallback claude-sonnet-5-5")
+    _ = try app.cmd("q_8", "agent.update", Obj.new().s("agent", agent.copy()).j("config", Obj.new().s("model", String("fake-2")).done()).done())
+    let picked = card_in(app, other_chat.copy(), "model_fallback")
+    try check(str_at(picked.copy(), "state") == some(String("picked")) and str_at(picked, "said") == some(String("On Model fake-2 now.")) and model_now(app, other_chat.copy()) == Json.Null, "picking a model takes the chat off the fallback, and the card says so")
+    let on_pick = try say(mut app, other_chat.copy(), "m_8", "/config")
+    try check(reply_text(on_pick) == "model=fake-2 effort=medium", "and its next turn is on the pick")
+
+    // --- The program's words, for an older adapter ---
+    let worded_chat = try chat(mut app, "q_9", agent.copy())
+    let worded = try say(mut app, worded_chat.copy(), "m_9", "Hi.\n/fallbackwords claude-opus-4-1-20250805")
+    let w = blocks_of(worded.copy())
+    try check(w.len() == 2 and w[1].0 == "notice" and w[1].1 == "Model fake-2's safeguards flagged this request, so Opus 4.1 answers from here." and not reply_text(worded).contains("Model fallback"), "a blockquote in its words becomes loom's notice, out of the reply's words")
+
+    // --- Once, for that answer alone ---
+    let once_chat = try chat(mut app, "q_10", agent.copy())
+    let once = try say(mut app, once_chat.copy(), "m_10", "/fallbackonce claude-sonnet-5-5\nDone.")
+    let o = blocks_of(once)
+    try check(o.len() == 2 and o[0].0 == "notice" and o[0].1.contains("answered it.") and model_now(app, once_chat.copy()) == Json.Null, "a fallback for one answer says so, and the chat stays on its model")
+
+    // --- Usage by model ---
+    let summary = try app.cmd("q_11", "agent.summary", Obj.new().s("agent", agent).done())
+    let models = at(at(summary, "value"), "models_month")
+    try check("{models}".contains(#""model":"claude-sonnet-5-5","tokens":40"#), "agent.summary counts this month's tokens by the model each turn ended on")
+    app.close()
+}
+
+fn main() ! Error {
+    let inst = try Instance.start()
+    let failure: String? = match run(inst.copy()) {
+        ok => none,
+        err(e) => some("{e}"),
+    }
+    inst.stop()
+    if let f = failure {
+        eprintln("\n{f}")
+        exit(1)
+    }
+    println("\nmodel_fallback: all good")
+}

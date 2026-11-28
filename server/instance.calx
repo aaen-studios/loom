@@ -77,6 +77,7 @@ import server.rules
 import server.rooms
 import shared.reply as replies
 import server.brains
+import server.fallback as fallbacks
 import server.egress
 import server.sandbox
 import server.stage
@@ -510,6 +511,7 @@ enum Pending {
     RouteWarm    // a router session started ahead of its next pick
     RouteWarmConfig(String)    // that session set to the router's model
     Close(String, String, String?)    // a run's session of its own closed as its turn ended: the run, and how it ended, with its error
+    ModelBack(String)    // a chat's session set back to the model it had before a fallback, by its session
 }
 
 struct Proc {
@@ -541,6 +543,8 @@ struct Proc {
     routes: List<String>    // the router's picks waiting for it to start, by their runs
     compactions: Map<String, String>    // a compaction its program reports, by its call -> the line in the chat that says so
     lowered: Map<String, String>    // ACP session -> the effort it had before a turn of plain talk in live mode lowered it, set again on its next turn that isn't one
+    meant: Map<String, String>    // ACP session -> the model loom set it to, or found it on, so one its program moved it to is seen (PLAN.md, "A model fallback")
+    fell: Map<String, String>    // ACP session -> what its program said of a fallback, until the model it moved to is known
 }
 
 impl Proc {
@@ -549,6 +553,8 @@ impl Proc {
     fn forget(self: mut Proc, session: String) {
         _ = self.turned.remove(session.copy())
         _ = self.lowered.remove(session.copy())
+        _ = self.meant.remove(session.copy())
+        _ = self.fell.remove(session.copy())
         _ = self.configs.remove(session)
     }
 
@@ -748,6 +754,7 @@ pub struct Instance {
     picks: LinkedMap<String, Pick>    // messages in group chats waiting for the router, by the run each starts
     route_counts: Map<String, i64>    // a router session -> the picks it has made
     handoffs: Map<String, (String, String)>    // a run whose agent called hand_off -> the member it goes to next, and why
+    fallback_cards: Map<String, (String, String, Json)>    // a run whose session went to another model -> its chat, its agent and the model it's on, for the card under its reply
 }
 
 // An agent's browser (server/browser.calx), on its thread.
@@ -2658,7 +2665,7 @@ impl Instance {
         let browser_done = Receiver<browser.Back>()
         let browser_to = browser_done.sender()
         let (picture_to, picture_done) = files.start_pictures(waker)
-        var i = Instance { release: config.release.copy(), host: update.host(config.in_app), exe: current_exe(), mcp_exe: config.mcp.copy(), update_to: update_to, update_back: update_back, updating: no_update(), next_update_check: 0, last_busy: now(), restart_stops: List<String>(), restart: false, told_update: Json.Null, told_update_at: 0, picks: LinkedMap<String, Pick>(), route_counts: Map<String, i64>(), handoffs: Map<String, (String, String)>(), browsers: LinkedMap<String, Browser>(), watchers: Map<u32, String>(), followers: List<u32>(), browser_pages: Map<String, String>(), browsers_to_check: List<String>(), browser_done: browser_done, browser_to: browser_to, stopped_browsers: Map<u64, Thread>(), closing_browsers: Map<String, u64>(), next_browser: 0, fills: Map<String, Fill>(), turns_ended: List<(String, String, String)>(), next_browser_sweep: 0, task_stops: Map<String, String>(), resumes: List<(String, String)>(), push_to: push_to, push_gone: push_gone, move_to: move_to, move_done: move_done, lan: config.lan, bridge: none, stop_bridge: none, lan_port: 0, announcer: none, stop_announcer: none, to_close: List<ServerSocket>(), boxes: none, boxes_pulled: Receiver<String>(), stale_boxes: List<String>(), gate: none, stop_gate: none, checkpointer: some(checkpointer), stop_checkpoints: stop_checkpoints, wal_big: wal_big, search_to: search_to, search_done: search_done, searches: Map<String, Waiter>(), next_search: 0, disk_used: Map<String, (i64, i64)>(), doors: LinkedMap<String, egress.Door>(), file_moves: Map<String, FileMove>(), files_moved: Receiver<sandbox.Moved>(), update_waiter: none, moving: String(), move_waiters: List<Waiter>(), moved: moved, version: config.version.copy(), store: store, server: server, waker: waker, data: config.data.copy(), sessions: Map<u32, Session>(), runs: LinkedMap<String, Run>(), procs: LinkedMap<String, Proc>(), approvals: LinkedMap<String, Approval>(), lines: lines, lines_to: to, stopped_to: stopped_to, stopped: stopped, stopping: 0, hash_to: hash_to, hash_done: hash_done, next_job: 0, auths: Map<i64, Auth>(), dummy_hash: dummy, ready_now: String(), open_secrets: Map<String, List<(String, String)>>(), failures: LinkedMap<String, List<i64>>(), link_asks: LinkedMap<String, LinkAsk>(), thumbs: files.start(), picture_to: picture_to, picture_done: picture_done, picture_thumbs: Map<String, String>(), shots: Map<String, List<Shot>>(), next_shot: 0, events: config.events, next_prune: 0, next_proc_sweep: 0, grants: Map<String, Grant>(), calls: Map<String, Request>(), context: Map<String, (i64, i64)>(), registry_at: config.registry.copy(), registry: Json.Null, registry_time: 0, registry_fetching: false, install_to: install_to, install_done: install_done, mcp_test_to: mcp_test_to, mcp_test_done: mcp_test_done, mcp_tests: Map<i64, McpTest>(), link_to: link_to, link_done: link_done, link_pages: Map<String, Json>(), site_icons: Map<String, List<u8>>(), link_waiting: Map<String, List<(String, String)>>(), link_pictures: Map<String, List<u8>>(), link_previews: Map<String, List<(String, Waiter)>>(), acta_at: config.acta.copy(), call_to: call_to, call_done: call_done, calls_out: Map<i64, OutCall>(), acta_boards: Map<String, ActaBoards>(), acta_cards: Map<String, Json>(), card_asks: Map<String, CardAsk>(), acta_single: Map<String, i64>(), acta_waits: Map<i64, ActaWait>(), watch: new_watches(), t3: t3_state(), oauth_to: oauth_to, oauth_done: oauth_done, oauth_jobs: Map<i64, OauthJob>(), sign_ins: Map<String, SignIn>(), renewing: Map<String, i64>(), next_renewal: 0, fetching: List<Waiter>(), installs: Map<i64, Install>(), deno_job: 0, deno_waiters: List<Request>(), tools_body: String(), follows: Map<i64, (String, String)>(), next_follow: 0, code_acts: Map<i64, String>(), leftovers: List<String>(), next_sweep: 0, device_calls: Map<String, DeviceCall>(), setups: Map<String, Setup>(), mcp_adds: LinkedMap<String, McpAdd>(), drafts_due: List<DraftDue>(), connects: LinkedMap<String, Connect>(), spool_asks: Map<String, SpoolAsk>(), signed_waits: Map<String, SignedWait>(), mcp_registry_at: config.mcp_registry.copy(), mcp_registry_to: mcp_registry_to, mcp_registry_done: mcp_registry_done, pool_to: pool_to, pool_done: pool_done, pool_reads: Map<String, PoolRead>(), mcp_registry_kept: Map<String, RegistryAnswer>(), mcp_registry_asks: Map<String, List<RegistryAsk>>(), minute_ms: config.minute_ms, private_unconfined: config.private_unconfined, next_due: 0, routine_runs: Map<String, RoutineRun>(), routine_work: RoutineWork { gates: Map<String, GateWait>(), done: Receiver<routine_gate.Done>(), closing: List<(String, String)>(), closed: List<String>(), held: List<HeldPost>() }, routine_marks: Map<String, (String, String)>(), quiet_turns: Map<String, QuietTurn>(), looking_back: Map<String, String>(), pause_turns: Map<String, (String, bool, bool)>(), compacting: List<String>(), spoken: Map<String, bool>(), paused: LinkedMap<String, Paused>(), run_chains: Map<String, List<String>>(), panel_calls: Map<String, Waiter>(), script_calls: Map<String, Request>(), running_flows: LinkedMap<String, flows.Flow>(), flow_steps: Map<String, (String, usize)>(), advancing: List<String>(), flow_results: List<(String, usize, bool, String)>(), flows_due: List<String>(), slow_calls: Map<String, String>(), acting: 0, call_actions: Map<String, i64>(), tool_actions: Map<String, i64>(), emojis: emoji.load(), sealer: try secret_key(config.data.copy()) }
+        var i = Instance { release: config.release.copy(), host: update.host(config.in_app), exe: current_exe(), mcp_exe: config.mcp.copy(), update_to: update_to, update_back: update_back, updating: no_update(), next_update_check: 0, last_busy: now(), restart_stops: List<String>(), restart: false, told_update: Json.Null, told_update_at: 0, picks: LinkedMap<String, Pick>(), route_counts: Map<String, i64>(), handoffs: Map<String, (String, String)>(), fallback_cards: Map<String, (String, String, Json)>(), browsers: LinkedMap<String, Browser>(), watchers: Map<u32, String>(), followers: List<u32>(), browser_pages: Map<String, String>(), browsers_to_check: List<String>(), browser_done: browser_done, browser_to: browser_to, stopped_browsers: Map<u64, Thread>(), closing_browsers: Map<String, u64>(), next_browser: 0, fills: Map<String, Fill>(), turns_ended: List<(String, String, String)>(), next_browser_sweep: 0, task_stops: Map<String, String>(), resumes: List<(String, String)>(), push_to: push_to, push_gone: push_gone, move_to: move_to, move_done: move_done, lan: config.lan, bridge: none, stop_bridge: none, lan_port: 0, announcer: none, stop_announcer: none, to_close: List<ServerSocket>(), boxes: none, boxes_pulled: Receiver<String>(), stale_boxes: List<String>(), gate: none, stop_gate: none, checkpointer: some(checkpointer), stop_checkpoints: stop_checkpoints, wal_big: wal_big, search_to: search_to, search_done: search_done, searches: Map<String, Waiter>(), next_search: 0, disk_used: Map<String, (i64, i64)>(), doors: LinkedMap<String, egress.Door>(), file_moves: Map<String, FileMove>(), files_moved: Receiver<sandbox.Moved>(), update_waiter: none, moving: String(), move_waiters: List<Waiter>(), moved: moved, version: config.version.copy(), store: store, server: server, waker: waker, data: config.data.copy(), sessions: Map<u32, Session>(), runs: LinkedMap<String, Run>(), procs: LinkedMap<String, Proc>(), approvals: LinkedMap<String, Approval>(), lines: lines, lines_to: to, stopped_to: stopped_to, stopped: stopped, stopping: 0, hash_to: hash_to, hash_done: hash_done, next_job: 0, auths: Map<i64, Auth>(), dummy_hash: dummy, ready_now: String(), open_secrets: Map<String, List<(String, String)>>(), failures: LinkedMap<String, List<i64>>(), link_asks: LinkedMap<String, LinkAsk>(), thumbs: files.start(), picture_to: picture_to, picture_done: picture_done, picture_thumbs: Map<String, String>(), shots: Map<String, List<Shot>>(), next_shot: 0, events: config.events, next_prune: 0, next_proc_sweep: 0, grants: Map<String, Grant>(), calls: Map<String, Request>(), context: Map<String, (i64, i64)>(), registry_at: config.registry.copy(), registry: Json.Null, registry_time: 0, registry_fetching: false, install_to: install_to, install_done: install_done, mcp_test_to: mcp_test_to, mcp_test_done: mcp_test_done, mcp_tests: Map<i64, McpTest>(), link_to: link_to, link_done: link_done, link_pages: Map<String, Json>(), site_icons: Map<String, List<u8>>(), link_waiting: Map<String, List<(String, String)>>(), link_pictures: Map<String, List<u8>>(), link_previews: Map<String, List<(String, Waiter)>>(), acta_at: config.acta.copy(), call_to: call_to, call_done: call_done, calls_out: Map<i64, OutCall>(), acta_boards: Map<String, ActaBoards>(), acta_cards: Map<String, Json>(), card_asks: Map<String, CardAsk>(), acta_single: Map<String, i64>(), acta_waits: Map<i64, ActaWait>(), watch: new_watches(), t3: t3_state(), oauth_to: oauth_to, oauth_done: oauth_done, oauth_jobs: Map<i64, OauthJob>(), sign_ins: Map<String, SignIn>(), renewing: Map<String, i64>(), next_renewal: 0, fetching: List<Waiter>(), installs: Map<i64, Install>(), deno_job: 0, deno_waiters: List<Request>(), tools_body: String(), follows: Map<i64, (String, String)>(), next_follow: 0, code_acts: Map<i64, String>(), leftovers: List<String>(), next_sweep: 0, device_calls: Map<String, DeviceCall>(), setups: Map<String, Setup>(), mcp_adds: LinkedMap<String, McpAdd>(), drafts_due: List<DraftDue>(), connects: LinkedMap<String, Connect>(), spool_asks: Map<String, SpoolAsk>(), signed_waits: Map<String, SignedWait>(), mcp_registry_at: config.mcp_registry.copy(), mcp_registry_to: mcp_registry_to, mcp_registry_done: mcp_registry_done, pool_to: pool_to, pool_done: pool_done, pool_reads: Map<String, PoolRead>(), mcp_registry_kept: Map<String, RegistryAnswer>(), mcp_registry_asks: Map<String, List<RegistryAsk>>(), minute_ms: config.minute_ms, private_unconfined: config.private_unconfined, next_due: 0, routine_runs: Map<String, RoutineRun>(), routine_work: RoutineWork { gates: Map<String, GateWait>(), done: Receiver<routine_gate.Done>(), closing: List<(String, String)>(), closed: List<String>(), held: List<HeldPost>() }, routine_marks: Map<String, (String, String)>(), quiet_turns: Map<String, QuietTurn>(), looking_back: Map<String, String>(), pause_turns: Map<String, (String, bool, bool)>(), compacting: List<String>(), spoken: Map<String, bool>(), paused: LinkedMap<String, Paused>(), run_chains: Map<String, List<String>>(), panel_calls: Map<String, Waiter>(), script_calls: Map<String, Request>(), running_flows: LinkedMap<String, flows.Flow>(), flow_steps: Map<String, (String, usize)>(), advancing: List<String>(), flow_results: List<(String, usize, bool, String)>(), flows_due: List<String>(), slow_calls: Map<String, String>(), acting: 0, call_actions: Map<String, i64>(), tool_actions: Map<String, i64>(), emojis: emoji.load(), sealer: try secret_key(config.data.copy()) }
         if config.sandboxes.len() > 0 and not i.lan { try i.sandboxes_on(config.sandboxes.copy(), config.sandbox_image.copy()) }
         // An action the last run of the instance left started, it never finished.
         try i.store.settle_cut_short()
@@ -3302,13 +3309,20 @@ impl Instance {
         let total = int_at(usage, "totalTokens") ?? (input + output)
         var chat = String()
         var persons = false
+        var session = String()
         if let r = mut i.runs.find(run.copy()) {
             r.usage = Obj.new().i("input", input).i("output", output).i("total", total).done()
             chat = r.conversation.copy()
             persons = r.starter == "person"
+            session = r.session.copy()
         }
         persons = persons and not i.looking_back.contains(run.copy())
-        if let err(e) = i.store.add_usage(p.user.copy(), p.program.copy(), run, input, output, total, p.shared) { eprintln("loom: usage: {e}") }
+        // Counted by the model its session was on as it ended (PLAN.md, "A model fallback").
+        var model = String()
+        if let c = p.configs.find(session) {
+            if let id = acp.option_in(c.copy(), "model") { model = acp.current(c.copy(), id) ?? String() }
+        }
+        if let err(e) = i.store.add_usage_on(p.user.copy(), p.program.copy(), run, input, output, total, p.shared, model) { eprintln("loom: usage: {e}") }
         // A chat's tokens go to the apps with its context (PLAN.md, "One endless
         // chat"): its person's last turn's, and the last 24 hours', quiet turns too.
         if chat.len() == 0 { return }
@@ -14831,7 +14845,7 @@ impl Instance {
         try i.put_files(place.copy(), [folder.copy()], writes)
         if let names = skill_names { i.drop_old_skills(place.copy(), folder.copy(), names.copy()) }
         let to = try acp.start(key.copy(), command, args, settings, folder, i.lines_to.copy(), i.waker, i.stopped_to.copy())
-        var p = Proc { agent: id.copy(), user: user.copy(), to: to, ready: false, images: false, program: program.copy(), resume: false, load: false, closes: false, mcp_http: false, boxed: boxed, shared: shared, next_id: 1, pending: Map<i64, Pending>(), sessions: Map<String, String>(), configs: Map<String, Json>(), waiting: List<String>(), warm_next: List<String>(), warming: List<String>(), held: List<String>(), key: key.copy(), stopped: false, used: now(), compacts: false, turned: Map<String, i64>(), routes: List<String>(), compactions: Map<String, String>(), lowered: Map<String, String>() }
+        var p = Proc { agent: id.copy(), user: user.copy(), to: to, ready: false, images: false, program: program.copy(), resume: false, load: false, closes: false, mcp_http: false, boxed: boxed, shared: shared, next_id: 1, pending: Map<i64, Pending>(), sessions: Map<String, String>(), configs: Map<String, Json>(), waiting: List<String>(), warm_next: List<String>(), warming: List<String>(), held: List<String>(), key: key.copy(), stopped: false, used: now(), compacts: false, turned: Map<String, i64>(), routes: List<String>(), compactions: Map<String, String>(), lowered: Map<String, String>(), meant: Map<String, String>(), fell: Map<String, String>() }
         p.pending.insert(1, Pending.Init)
         p.to.send(Out.Send(acp.request(1, "initialize", acp.initialize_params())))
         i.procs.insert(key, p)
@@ -15746,6 +15760,15 @@ impl Instance {
                 if let e = error { eprintln("loom: agent {p.agent} didn't close a run's session: {str_at(e, "message") ?? String()}") }
                 try i.finish(run, status, run_error)
             },
+            Pending.ModelBack(sid) => {
+                match error {
+                    some(e) => eprintln("loom: agent {p.agent} couldn't switch session {sid} back to its model: {str_at(e, "message") ?? String()}"),
+                    none => {
+                        let config = at(result, "configOptions")
+                        if let Json.Array(_) = config { p.configs.insert(sid, config.copy()) }
+                    },
+                }
+            },
         }
     }
 
@@ -15873,6 +15896,31 @@ impl Instance {
                 }
             }
         }
+        // A chat its program moved to another model stays there until its person
+        // moves it (PLAN.md, "A model fallback"), and one they switched back while
+        // it had no session goes back now.
+        if wanted != Json.Null {
+            if let model = acp.option_in(config.copy(), "model") {
+                let chat = i.fallback_chat(run.copy())
+                if chat.len() > 0 {
+                    let back = match i.store.model_back(p.user.copy(), chat.copy()) {
+                        ok(b) => b,
+                        err(_) => String(),
+                    }
+                    let on: String? = match i.store.model_now(p.user.copy(), chat) {
+                        ok(some(n)) => str_at(n, "value"),
+                        _ => none,
+                    }
+                    var pick = Obj.new()
+                    if back.len() > 0 {
+                        pick.m.insert(model, Json.Str(back))
+                    } else if let v = on {
+                        pick.m.insert(model, Json.Str(v))
+                    }
+                    wanted = merge(wanted, pick.done())
+                }
+            }
+        }
         // A turn of plain talk in live mode runs at low effort (server/spoken.calx),
         // and the session goes back to the effort it had on its next turn that
         // isn't one. The agent's pick is never changed.
@@ -15897,12 +15945,15 @@ impl Instance {
                 }
             }
         }
-        let todo = acp.config_todo(config, wanted)
+        let todo = acp.config_todo(config.copy(), wanted)
         if todo.len() == 0 {
+            if let err(e) = i.model_set(mut p, run.copy(), sid.copy(), config) { eprintln("loom: keeping a session's model: {e}") }
             i.prompt(mut p, run, sid)
             return
         }
         let (option, value) = todo[0].copy()
+        // What it's set to is what loom meant, so the program's own word of it isn't a fallback.
+        if acp.option_in(config, "model") == some(option.copy()) { p.meant.insert(sid.copy(), value.copy()) }
         p.next_id += 1
         p.pending.insert(p.next_id, Pending.Config(run.copy(), sid.copy(), option.copy(), value.copy()))
         p.to.send(Out.Send(acp.request(p.next_id, "session/set_config_option", Obj.new().s("sessionId", sid).s("configId", option).s("value", value).done())))
@@ -15958,7 +16009,173 @@ impl Instance {
             }
         } else if (kind == "tool_call" or kind == "tool_call_update") and compaction(u.copy()) and not p.picking_up(session.copy()) {
             if let err(e) = i.compacted(mut p, session, u) { eprintln("loom: saying a session was compacted: {e}") }
+        } else if p.picking_up(session.copy()) {
+            // What session/load plays back happened before.
+            return
+        } else if kind == "notice" and fallbacks.is_notice(u.copy()) {
+            // Its program answered on another model (PLAN.md, "A model fallback").
+            if let err(e) = i.fallback_said(mut p, session, fallbacks.notice_text(u)) { eprintln("loom: saying a session went to another model: {e}") }
+        } else if kind == "agent_message_chunk" {
+            // The same, for a client without notices: a line in the reply's words,
+            // which update_run leaves out of them.
+            let piece = str_at(at(u, "content"), "text") ?? String()
+            if fallbacks.in_words(piece.copy()) {
+                if let err(e) = i.fallback_said(mut p, session, piece) { eprintln("loom: saying a session went to another model: {e}") }
+            }
+        } else if kind == "config_option_update" {
+            if let err(e) = i.options_now(mut p, session, at(u, "configOptions")) { eprintln("loom: keeping a session's options: {e}") }
         }
+    }
+
+    // The chat whose model a run's session is: its own conversation, but not a
+    // run's session of its own or a group chat member's seat, or "".
+    fn fallback_chat(i: Instance, run: String) -> String {
+        let r = i.runs.find(run) else return String()
+        if own_seat_of(r.seat.copy()) { return String() }
+        let (_, member) = seat_parts(r.seat.copy())
+        if member.len() > 0 { return String() }
+        return r.conversation.copy()
+    }
+
+    // The same, for a session of `p`'s, with no run needed.
+    fn session_fallback_chat(i: Instance, p: Proc, session: String) -> String {
+        let seat = i.session_chat(p, session) else return String()
+        if own_seat_of(seat.copy()) { return String() }
+        let (conversation, member) = seat_parts(seat)
+        if member.len() > 0 { return String() }
+        return conversation
+    }
+
+    // A session's model once loom has set it, before its prompt: what loom
+    // meant it to be. A chat switched back with no session is set back now, and
+    // one on a fallback whose session is on another model (a fresh session,
+    // which starts on its program's own) is on its own again.
+    fn model_set(i: Instance, p: mut Proc, run: String, sid: String, config: Json) ! Error {
+        let model = acp.option_in(config.copy(), "model") else return
+        let current = acp.current(config.copy(), model) ?? String()
+        if current.len() == 0 { return }
+        p.meant.insert(sid.copy(), current.copy())
+        let chat = i.fallback_chat(run)
+        if chat.len() == 0 { return }
+        if try i.store.model_back(p.user.copy(), chat.copy()) != "" { try i.store.put_model_back(p.user.copy(), chat.copy(), String()) }
+        let on = try i.store.model_now(p.user.copy(), chat.copy()) else return
+        if str_at(on, "value") == some(current.copy()) { return }
+        try i.model_own(p.user.copy(), chat, "back", fallbacks.name_in(config, current, String()))
+    }
+
+    // What a session's program said of a fallback, in a notice or its words: kept
+    // until the model it moved to is known, and when it says, acted on now. One
+    // that only answered once on the other model says so in the reply.
+    fn fallback_said(i: mut Instance, p: mut Proc, session: String, words: String) ! Error {
+        p.fell.insert(session.copy(), words.copy())
+        let said = fallbacks.read(words)
+        if said.len() == 0 { return }
+        let s = said[0].copy()
+        let config = if let c = p.configs.find(session.copy()) { c.copy() } else { Json.Null }
+        if not s.stays {
+            let line = fallbacks.once_line(fallbacks.name_in(config.copy(), s.from.copy(), s.from.copy()), fallbacks.name_in(config, s.to.copy(), s.to.copy()))
+            if let run = i.run_for_session(session.copy()) { i.notice(run, line.copy()) }
+            i.log(p.user.copy(), p.agent.copy(), "session", line, p.agent.copy())
+            _ = p.fell.remove(session)
+            return
+        }
+        let from = if let m = p.meant.find(session.copy()) { m.copy() } else { s.from.copy() }
+        try i.fell_back(mut p, session, s.to.copy(), s.to.copy(), from, s.from.copy())
+    }
+
+    // A session's configOptions, as its program says they are now: kept, and a
+    // model other than the one loom meant is a fallback.
+    fn options_now(i: mut Instance, p: mut Proc, session: String, config: Json) ! Error {
+        let listed = if let Json.Array(_) = config.copy() { true } else { false }
+        if not listed { return }
+        p.configs.insert(session.copy(), config.copy())
+        let model = acp.option_in(config.copy(), "model") else return
+        let current = acp.current(config, model) ?? String()
+        let meant = if let m = p.meant.find(session.copy()) { m.copy() } else { return }
+        if current.len() == 0 or current == meant { return }
+        let words = if let w = p.fell.find(session.copy()) { w.copy() } else { String() }
+        let said = fallbacks.read(words)
+        let (from_id, to_id) = if said.len() > 0 { (said[0].from.copy(), said[0].to.copy()) } else { (String(), String()) }
+        try i.fell_back(mut p, session, current, to_id, meant, from_id)
+    }
+
+    // A session its program moved from model `from` to `to` (each its value in
+    // the session's options, and the id the program named it by, where it did):
+    // a line in the reply at this point, the chat on it from now on (`model_now`),
+    // and once the reply is in, loom's card under it, to switch back or start a
+    // new chat. A chat on a fallback already only takes the newest model's name.
+    fn fell_back(i: mut Instance, p: mut Proc, session: String, to: String, to_id: String, from: String, from_id: String) ! Error {
+        let config = if let c = p.configs.find(session.copy()) { c.copy() } else { Json.Null }
+        let to_name = fallbacks.name_in(config.copy(), to.copy(), to_id)
+        p.meant.insert(session.copy(), to.copy())
+        let words = p.fell.remove(session.copy()) ?? String()
+        let chat = i.session_fallback_chat(p, session.copy())
+        if chat.len() > 0 {
+            if let was = try i.store.model_now(p.user.copy(), chat.copy()) {
+                if str_at(was.copy(), "value") == some(to.copy()) { return }
+                let on = merge(was, Obj.new().s("value", to).s("name", to_name).done())
+                try i.store.put_model_now(p.user.copy(), chat.copy(), on.copy())
+                try i.event(p.user.copy(), "conversation.updated", Obj.new().j("conversation", Obj.new().s("id", chat).j("model_now", on).done()).done())
+                return
+            }
+        }
+        let from_name = fallbacks.name_in(config, from.copy(), from_id)
+        let line = fallbacks.line(from_name.copy(), to_name.copy())
+        let run = i.run_for_session(session)
+        if let r = run.copy() { i.notice(r, line.copy()) }
+        // The program's own words go in the activity log, not the chat.
+        let logged = if words.len() > 0 { "{line} {brains.title(p.program.copy())} said: {words.trim()}" } else { line }
+        i.log(p.user.copy(), p.agent.copy(), "session", logged, p.agent.copy())
+        if chat.len() == 0 { return }
+        let on = fallbacks.model_now(to, to_name, from, from_name)
+        try i.store.put_model_now(p.user.copy(), chat.copy(), on.copy())
+        try i.event(p.user.copy(), "conversation.updated", Obj.new().j("conversation", Obj.new().s("id", chat.copy()).j("model_now", on.copy()).done()).done())
+        match run {
+            some(r) => i.fallback_cards.insert(r, (chat, p.agent.copy(), on)),
+            none => try i.fallback_card(p.user.copy(), chat, p.agent.copy(), on),
+        }
+    }
+
+    // Loom's card that a chat is on another model now: a `loom` message with one
+    // `model_fallback` card, under the reply it happened in.
+    fn fallback_card(i: Instance, user: String, conversation: String, agent: String, on: Json) ! Error {
+        let id = try i.store.new_id("msg")
+        let block = Obj.new().s("kind", String("card")).j("card", fallbacks.card(id.copy(), agent, on)).done()
+        let message = Obj.new().s("id", id.copy()).s("conversation", conversation.copy()).s("role", String("loom")).i("at", now()).j("blocks", Json.Array([block])).done()
+        try i.store.put_message(user.copy(), message.copy())
+        try i.store.put_fallback_card(user.copy(), conversation.copy(), id)
+        try i.event(user, "message.created", Obj.new().s("conversation", conversation).j("message", message).done())
+    }
+
+    // A chat on a fallback is on its own model again, or another took over:
+    // `state` `back` (on `name` again), `picked` (its person picked `name`) or
+    // `moved` (a new chat). Its `model_now` goes for `back` and `picked`, and
+    // its card says what happened, with no buttons.
+    fn model_own(i: Instance, user: String, conversation: String, state: str, name: String) ! Error {
+        if state != "moved" {
+            try i.store.put_model_now(user.copy(), conversation.copy(), Json.Null)
+            try i.event(user.copy(), "conversation.updated", Obj.new().j("conversation", Obj.new().s("id", conversation.copy()).j("model_now", Json.Null).done()).done())
+        }
+        let id = try i.store.fallback_card(user.copy(), conversation.copy())
+        if id.len() == 0 { return }
+        let kept = try i.store.message(user.copy(), id) else return
+        var blocks = List<Json>()
+        var changed = false
+        if let Json.Array(bs) = at(kept.copy(), "blocks") {
+            for b in bs {
+                let card = at(b.copy(), "card")
+                if str_at(card.copy(), "type") == some(String("model_fallback")) and str_at(card.copy(), "state") == some(String("fallback")) {
+                    blocks.push(merge(b.copy(), Obj.new().j("card", fallbacks.card_done(card, state, name.copy())).done()))
+                    changed = true
+                } else {
+                    blocks.push(b.copy())
+                }
+            }
+        }
+        if not changed { return }
+        let message = merge(kept, Obj.new().j("blocks", Json.Array(blocks)).done())
+        try i.store.put_message(user.copy(), message.copy())
+        try i.event(user, "message.updated", Obj.new().s("conversation", conversation).j("message", message).done())
     }
 
     // What an ACP session of `p`'s is kept under: its chat, or in a group chat
@@ -16152,6 +16369,9 @@ impl Instance {
             let content = at(u, "content")
             if (str_at(content, "type") ?? String()) == "text" {
                 let piece = str_at(content, "text") ?? String()
+                // Its program's line that it went to another model is loom's notice
+                // instead (note_session), never the reply's words.
+                if kind == "agent_message_chunk" and fallbacks.in_words(piece.copy()) { return }
                 let block_kind = if kind == "agent_message_chunk" { String("text") } else { String("thought") }
                 // A subagent's words go inside the call that started it, never in the reply.
                 let parent = parent_call(r.tools, u.copy())
@@ -17310,6 +17530,9 @@ impl Instance {
             if woke_alone { try i.store.post_untold(r.user.copy(), r.conversation.copy(), r.message.copy(), String(), r.prompt.copy()) }
             for (named, path, key) in pictures { i.picture_to.send(files.Picture { user: r.user.copy(), message: r.message.copy(), named: named.copy(), path: path.copy(), key: key.copy() }) }
         }
+        // Its session went to another model: loom's card goes under the reply (PLAN.md,
+        // "A model fallback").
+        if let (chat, agent, on) = i.fallback_cards.remove(run_id.copy()) { try i.fallback_card(r.user.copy(), chat, agent, on) }
         // A run an update stopped to restart keeps its reply so far, and the restart
         // does the rest, as for any run a restart cuts short: the run is failed, saying
         // so, its task carries on, its flow's step goes again and its queue goes on.
@@ -18873,9 +19096,45 @@ impl Instance {
             let c = try i.store.conversation(user.copy(), id.copy()) ?? made
             try i.event(user.copy(), "conversation.created", Obj.new().j("conversation", c).done())
             if let was = before {
-                try i.event(user, "conversation.updated", Obj.new().j("conversation", Obj.new().s("id", was).b("main", false).done()).done())
+                try i.event(user.copy(), "conversation.updated", Obj.new().j("conversation", Obj.new().s("id", was).b("main", false).done()).done())
+            }
+            // A new chat in place of one on a fallback (PLAN.md, "A model fallback"):
+            // that one's card says so.
+            if let from = str_at(args.copy(), "from") {
+                if try i.store.model_now(user.copy(), from.copy()) != none { try i.model_own(user, from, "moved", String()) }
             }
             return Answer.Value(Obj.new().s("conversation", id).done())
+        }
+        // A chat its program moved to another model goes back to the one it was
+        // on (PLAN.md, "A model fallback"): its live session now, or with none,
+        // its next session.
+        if name == "conversation.model_back" {
+            let id = str_at(args.copy(), "conversation") ?? String()
+            let c = try i.store.conversation(user.copy(), id.copy()) else return Answer.Refused(String("not_found"), "There's no conversation {id}.")
+            let on = try i.store.model_now(user.copy(), id.copy()) else return Answer.Value(Obj.new().j("conversation", c).done())
+            let from = str_at(on.copy(), "from") ?? String()
+            let from_name = str_at(on, "from_name") ?? from.copy()
+            var live = List<String>()
+            for (key, p) in i.procs {
+                if p.user == user and p.sessions.contains(id.copy()) { live.push(key.copy()) }
+            }
+            for key in live {
+                var p = i.procs.remove(key.copy()) else continue
+                let session = if let sid = p.sessions.find(id.copy()) { sid.copy() } else { String() }
+                if session.len() > 0 {
+                    let config = if let k = p.configs.find(session.copy()) { k.copy() } else { Json.Null }
+                    let option = acp.option_in(config, "model") ?? String("model")
+                    p.meant.insert(session.copy(), from.copy())
+                    p.next_id += 1
+                    p.pending.insert(p.next_id, Pending.ModelBack(session.copy()))
+                    p.to.send(Out.Send(acp.request(p.next_id, "session/set_config_option", Obj.new().s("sessionId", session).s("configId", option).s("value", from.copy()).done())))
+                }
+                i.procs.insert(key.copy(), p)
+            }
+            if live.len() == 0 { try i.store.put_model_back(user.copy(), id.copy(), from.copy()) }
+            try i.model_own(user.copy(), id.copy(), "back", from_name.copy())
+            i.log(user.copy(), str_at(c.copy(), "agent") ?? String(), "session", "Switched a chat back to {from_name}", device)
+            return Answer.Value(Obj.new().j("conversation", try i.store.conversation(user, id) ?? c).done())
         }
         // A chat moved to another program by hand (PLAN.md, "A backup brain"):
         // its next turn there starts with loom's summary of it.
@@ -19248,7 +19507,22 @@ impl Instance {
                     return Answer.Value(Json.Null)
                 }
             }
-            return try i.agent_updated(user, device, old, agent, instructions)
+            // A model picked in the header takes its chats off a fallback (PLAN.md,
+            // "A model fallback"): their next turns are set to it.
+            var picked: String? = none
+            if let model = acp.option_in(at(agent.copy(), "options"), "model") {
+                let was = (at(old.copy(), "config").get(model.copy()) ?? Json.Null).as_str() ?? String()
+                let pick = (at(agent.copy(), "config").get(model.copy()) ?? Json.Null).as_str() ?? String()
+                if at(args.copy(), "config") != Json.Null and was != pick {
+                    let value = if pick.len() > 0 { pick } else { fallbacks.start_value(at(agent.copy(), "options")) }
+                    picked = some(fallbacks.name_in(at(agent.copy(), "options"), value, String()))
+                }
+            }
+            let answer = try i.agent_updated(user.copy(), device, old, agent, instructions)
+            if let name_now = picked {
+                for chat in try i.store.fallback_chats(user.copy(), id.copy()) { try i.model_own(user.copy(), chat, "picked", name_now.copy()) }
+            }
+            return answer
         }
         if name == "routine.list" {
             let t = now()
@@ -19762,8 +20036,10 @@ impl Instance {
             if try i.store.agent(user.copy(), id.copy()) == none { return Answer.Refused(String("not_found"), "There's no agent {id}.") }
             let moment = now()
             let counts = try i.store.agent_counts(user.copy(), id.copy(), period_start(String("day"), moment), period_start(String("month"), moment))
+            // What it used this month on each model (PLAN.md, "A model fallback").
+            let models = try i.store.agent_models(user.copy(), id.copy(), period_start(String("month"), moment))
             let (files_in, bytes_in) = i.folder_size(user, id)
-            return Answer.Value(merge(counts, Obj.new().i("files", files_in).i("bytes", bytes_in).done()))
+            return Answer.Value(merge(counts, Obj.new().i("files", files_in).i("bytes", bytes_in).j("models_month", models).done()))
         }
         if name == "agent.revisions" {
             let id = str_at(args, "agent") ?? String()
