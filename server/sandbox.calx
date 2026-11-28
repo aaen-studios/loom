@@ -23,6 +23,12 @@ module server.sandbox
 // egress.calx) passes loom's tools on to the gate and lets out only what the
 // agent's list lets. Its HTTP_PROXY and HTTPS_PROXY name the egress.
 //
+// A private agent has a container of its own too, `loom-<user>-<agent>`, which
+// sees only that agent's own folder, `sandboxes/<user>.private/<agent>`, and
+// `acp/`: none of its person's folder, so neither it nor their other agents
+// reach the other's files (PLAN.md, "Private agents"). Its network is the
+// person's sandbox's, or none but its egress, as any agent's is.
+//
 // Each has at most 2 GB of memory, two CPUs and 512 processes, and its own
 // layer at most DISK, where the system's storage lets loom say so (overlay on
 // XFS with project quotas). The person's folder is outside that layer, so loom
@@ -97,23 +103,40 @@ pub struct Sandboxes {
     pub gate: u16          // and its port
 }
 
-// Which sandbox an agent runs in: its person's, or, for an agent closed to the
-// network, one of its own.
+// Which sandbox an agent runs in: its person's, or one of its own, for an
+// agent closed to the network or a private one (PLAN.md, "Private agents").
 pub struct Place {
     pub user: String
     pub agent: String    // the agent whose own sandbox it is, or "" for the person's
+    pub closed: bool     // with no network but its egress
+    pub private: bool    // seeing only the agent's own folder, not its person's
+}
+
+// `user`'s own sandbox, which their agents share.
+pub fn person(user: String) -> Place {
+    return Place { user: user.copy(), agent: String(), closed: false, private: false }
 }
 
 impl Place {
-    pub fn closed(self) -> bool {
+    // Whether it's an agent's own sandbox rather than its person's.
+    pub fn its_own(self) -> bool {
         return self.agent.len() > 0
     }
 
     // The container's name.
     pub fn name(self) -> String {
-        if self.closed() { return "loom-{self.user}-{self.agent}" }
+        if self.its_own() { return "loom-{self.user}-{self.agent}" }
         return name(self.user.copy())
     }
+}
+
+@test
+fn a_private_or_closed_agent_has_a_sandbox_of_its_own() {
+    assert(person(String("u_2")).name() == "loom-u_2" and not person(String("u_2")).its_own())
+    let private = Place { user: String("u_2"), agent: String("a_1"), closed: false, private: true }
+    assert(private.its_own() and private.name() == "loom-u_2-a_1")
+    let closed = Place { user: String("u_2"), agent: String("a_1"), closed: true, private: false }
+    assert(closed.name() == private.name() and closed != private)
 }
 
 impl Sandboxes {
@@ -125,7 +148,7 @@ impl Sandboxes {
     // Where `place`'s `loom mcp` reaches loom's tools: the gate, or the egress
     // in a sandbox closed to the network.
     pub fn tools_url(self, place: Place) -> String {
-        if place.closed() { return "http://127.0.0.1:{egress.PORT}" }
+        if place.closed { return "http://127.0.0.1:{egress.PORT}" }
         return self.gate_url()
     }
 }
@@ -290,28 +313,44 @@ impl Sandboxes {
         return "{self.root}/{user}"
     }
 
+    // Where `user`'s private agent `agent` has its folder, which its own sandbox
+    // sees: beside its person's folder, not in it, since their other agents see
+    // theirs, and a link one of them put at its path would have its sandbox
+    // mount wherever the link led. No user's id has a dot in it.
+    pub fn private_folder(self, user: String, agent: String) -> String {
+        return "{self.root}/{user}.private/{agent}"
+    }
+
+    // The one folder `place`'s sandbox sees of the person's, besides acp/: its
+    // private agent's own, or else its person's.
+    pub fn seen(self, place: Place) -> String {
+        if place.private and place.its_own() { return self.private_folder(place.user.copy(), place.agent.copy()) }
+        return self.home(place.user.copy())
+    }
+
     // Makes sure `place`'s sandbox is running: the person's, made for this
-    // gate's port, or an agent's own, closed to the network.
+    // gate's port, or an agent's own, closed to the network or private.
     pub fn ready(self, place: Place) ! Error {
         let user = place.user.copy()
-        let home = self.home(user.copy())
+        let home = self.seen(place.copy())
         try fs.make_dir_all(home.copy())
         try fs.make_dir_all(self.acp.copy())
         let box = place.name()
-        let closed = place.closed()
+        let closed = place.closed
         let label = if closed { String(CLOSED) } else { self.gate_url() }
-        let looked = try Command.new(self.runtime.copy()).args([String("inspect"), String("--format"), String(#"{{.State.Running}} {{index .Config.Labels "loom.gate"}}"#), box.copy()]).output()
+        // Made for a gate somewhere else, or seeing another folder (an agent's own
+        // that was made private, or normal again): made again, keeping the folders.
+        let looked = try Command.new(self.runtime.copy()).args([String("inspect"), String("--format"), String(#"{{.State.Running}} {{index .Config.Labels "loom.gate"}} {{index .Config.Labels "loom.sees"}}"#), box.copy()]).output()
         if looked.status.success() {
             let said = looked.text().trim().copy()
-            if said == "true {label}" { return }
-            if said == "false {label}" {
+            if said == "true {label} {home}" { return }
+            if said == "false {label} {home}" {
                 try self.run([String("start"), box])
                 return
             }
-            // Made for a gate somewhere else: made again, keeping the person's folder.
             try self.run([String("rm"), String("-f"), box.copy()])
         }
-        let head: List<String> = [String("run"), String("-d"), String("--name"), box.copy(), String("--label"), "loom.gate={label}", String("--label"), "loom.user={user}", String("--init")]
+        let head: List<String> = [String("run"), String("-d"), String("--name"), box.copy(), String("--label"), "loom.gate={label}", String("--label"), "loom.sees={home}", String("--label"), "loom.user={user}", String("--init")]
         let rest: List<String> = [String("-v"), "{home}:{home}:Z", String("-v"), "{self.acp}:{self.acp}:ro,z", String("-e"), "HOME={home}", String("-w"), home.copy(), String("--entrypoint"), String("sleep"), self.image.copy(), String("infinity")]
         // With every limit first. Where the system doesn't let loom set one (no
         // cgroup controllers delegated to its user, or storage without quotas), the
@@ -348,10 +387,10 @@ impl Sandboxes {
         }
     }
 
-    // How much `place`'s person's folder holds, in bytes, measured in the
+    // How much the folder `place`'s sandbox sees holds, in bytes, measured in the
     // sandbox, or none when it can't be told (the sandbox isn't running).
     pub fn used(self, place: Place) -> i64? {
-        let home = self.home(place.user.copy())
+        let home = self.seen(place.copy())
         let out = match Command.new(self.runtime.copy()).args([String("exec"), place.name(), String("du"), String("-sk"), String("--"), home]).output() {
             ok(o) => o,
             err(_) => return none,
@@ -375,9 +414,9 @@ impl Sandboxes {
     }
 
     // Stops and removes an agent's own sandbox, once its network opens up again
-    // or it's deleted. The person's folder stays.
+    // and it isn't private, or it's deleted. The folders stay.
     pub fn drop_place(self, place: Place) {
-        if not place.closed() { return }
+        if not place.its_own() { return }
         self.drop_box(place.name())
     }
 
@@ -428,7 +467,8 @@ impl Sandboxes {
         }
     }
 
-    // Stops `user`'s sandboxes and removes them, with their folder. In Podman, what
+    // Stops `user`'s sandboxes and removes them, with their folder and their private
+    // agents' (`private_folder`). In Podman, what
     // their agents made there may belong to other ids of the sandbox's, so the
     // folder goes in the sandboxes' user namespace (`podman unshare`). In Docker
     // it's all loom's own user's, which may first need to be let into folders an
@@ -453,7 +493,13 @@ impl Sandboxes {
                 err(e) => eprintln("loom: removing a sandbox: {e}"),
             }
         }
-        let home = self.home(user)
+        self.remove_folder(self.home(user.copy()))
+        self.remove_folder("{self.root}/{user}.private")
+    }
+
+    // Removes the folder `home`, in the data folder's sandboxes/, as `remove` says.
+    fn remove_folder(self, home: String) {
+        let docker = self.runtime == "docker"
         if self.root.len() < 2 or not home.starts_with("{self.root}/") or not fs.exists(home.copy()) { return }
         if docker {
             match Command.new(String("chmod")).args([String("-R"), String("u+rwX"), String("--"), home.copy()]).output() {
@@ -510,4 +556,15 @@ impl Sandboxes {
         let out = try Command.new(self.runtime.copy()).args(args.copy()).output()
         if not out.status.success() { fail "{self.runtime} {args.join(" ")} didn't work: {out.error_text().trim()}" }
     }
+}
+
+@test
+fn a_private_agents_sandbox_sees_only_its_own_folder() {
+    let b = Sandboxes { runtime: String("podman"), image: String(IMAGE), root: String("/srv/loom/sandboxes"), acp: String("/srv/loom/acp"), gate_host: String("127.0.0.1"), gate: 4000 }
+    assert(b.seen(person(String("u_2"))) == "/srv/loom/sandboxes/u_2")
+    assert(b.seen(Place { user: String("u_2"), agent: String("a_1"), closed: true, private: false }) == "/srv/loom/sandboxes/u_2")
+    let private = Place { user: String("u_2"), agent: String("a_1"), closed: false, private: true }
+    assert(b.seen(private.copy()) == "/srv/loom/sandboxes/u_2.private/a_1" and b.tools_url(private) == "http://127.0.0.1:4000")
+    let both = Place { user: String("u_2"), agent: String("a_1"), closed: true, private: true }
+    assert(b.seen(both.copy()) == "/srv/loom/sandboxes/u_2.private/a_1" and b.tools_url(both) == "http://127.0.0.1:{egress.PORT}")
 }
