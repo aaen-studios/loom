@@ -7528,6 +7528,9 @@ impl Instance {
         }
         if name == "agent.delete" and str_at(a.copy(), "agent") == some(g.agent.copy()) { return some(rule_refusal("not-itself", String("An agent can't delete itself. Your person can, in the app."))) }
         if name == "token.make_to_file" { return try i.ask_token_file(req, g, a) }
+        // A tool's name isn't a command: refused before it could ask the person, as it
+        // would fail once they said yes anyway (LOO-451).
+        if let why = commands.not_a_command(name.copy()) { return some(tool_error(why)) }
         match access {
             commands.Access.Never(why) => return some(rule_refusal("never", why)),
             commands.Access.Asks(kind) => {
