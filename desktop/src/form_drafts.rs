@@ -122,7 +122,10 @@ impl Loom {
                         ..ui.event.clone()
                     },
                     gate: text(&ui.gate_in),
+                    calx: area(&ui.calx_in),
+                    use_calx: ui.use_calx,
                     gate_seconds: text(&ui.gate_seconds_in),
+                    script_only: ui.script_only,
                     model: ui.model.clone(),
                     effort: ui.effort.clone(),
                 }))
@@ -178,6 +181,7 @@ impl Loom {
                     cx,
                 );
                 put(&self.routine_ui.gate_in.clone(), &d.gate, window, cx);
+                put_area(&self.routine_ui.calx_in.clone(), &d.calx, window, cx);
                 put(
                     &self.routine_ui.gate_seconds_in.clone(),
                     &d.gate_seconds,
@@ -188,6 +192,8 @@ impl Loom {
                 ui.event = d.event;
                 ui.model = d.model;
                 ui.effort = d.effort;
+                ui.use_calx = d.use_calx;
+                ui.script_only = d.script_only;
                 ui.minutes = d.minutes;
                 ui.adding_time = false;
                 ui.run_open = None;

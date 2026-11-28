@@ -1765,6 +1765,11 @@ final class Model {
     /// command that asked.
     var routineRuns: [RoutineRun] = []
     var routineRunsFor: String?
+    /// What the open routine's script keeps between runs, by key; and the page's last
+    /// test run, and the command that asked, so a late answer to an older one is dropped.
+    var routineState: [RoutineStateEntry] = []
+    var routineTest: RoutineTest?
+    var routineTestAsk = ""
     var scheduleNext: [Int] = []
     var scheduleNextFor: JSON = .null
     var scheduleNextAsk = ""
@@ -2762,6 +2767,7 @@ final class Model {
             out.append(["t": "cmd", "id": JSON(id("app.plus_routines")), "name": "routine.list", "args": [:]])
             // And the open routine's runs, which a run that ended changed.
             if let f = loadRoutineRuns(routineRunsFor) { out.append(f) }
+            if let r = routineRunsFor { out.append(loadRoutineState(r)) }
         }
         // The shown chat's pins, for the count on its header and the Pinned sheet: as many
         // as are loaded, and at least a page. Never a thread's.

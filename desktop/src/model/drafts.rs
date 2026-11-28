@@ -79,8 +79,9 @@ pub fn brain_fields(key: &str, value: &str, tokens: &str) -> Form {
     Form::Fields(vec![key.into(), value.into(), tokens.into()])
 }
 
-/// A routine's form: its name, prompt and agent, its gate's command and seconds as
-/// typed, its model and effort as picked (empty for its agent's own), its schedule as
+/// A routine's form: its name, prompt and agent, its gate's command or Calx script
+/// (`use_calx` says which shows) and seconds as typed, whether it runs its script only,
+/// its model and effort as picked (empty for its agent's own), its schedule as
 /// it's picked and its fields' text (how many hours or minutes apart, and the window it
 /// runs in), its switches, its flow: the steps it edits, each its agent and prompt, or
 /// one an agent made with steps side by side, kept as it is, and the event it runs on,
@@ -88,7 +89,10 @@ pub fn brain_fields(key: &str, value: &str, tokens: &str) -> Form {
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct RoutineDraft {
     pub gate: String,
+    pub calx: String,
+    pub use_calx: bool,
     pub gate_seconds: String,
+    pub script_only: bool,
     pub model: String,
     pub effort: String,
     pub name: String,
@@ -134,7 +138,10 @@ impl RoutineDraft {
             flow_kept: if chain { Vec::new() } else { r.flow.clone() },
             event: r.event.clone().unwrap_or_default(),
             gate: r.gate.clone(),
-            gate_seconds: if r.gate.is_empty() || r.gate_seconds <= 0 {
+            calx: r.calx.clone(),
+            use_calx: !r.calx.is_empty(),
+            script_only: r.script_only,
+            gate_seconds: if (r.gate.is_empty() && r.calx.is_empty()) || r.gate_seconds <= 0 {
                 String::new()
             } else {
                 r.gate_seconds.to_string()
@@ -829,6 +836,20 @@ mod tests {
             ("./changed.sh", "90", "haiku", "low")
         );
         assert_eq!(RoutineDraft::of(&r).gate_seconds, "");
+        // A Calx script opens on Calx, and a routine that runs it alone says so.
+        let scripted = Routine {
+            calx: "fn main() {}".into(),
+            gate_seconds: 30,
+            script_only: true,
+            ..r.clone()
+        };
+        let d = RoutineDraft::of(&scripted);
+        assert!(d.use_calx && d.script_only);
+        assert_eq!(
+            (d.calx.as_str(), d.gate_seconds.as_str()),
+            ("fn main() {}", "30")
+        );
+        assert!(!RoutineDraft::of(&r).use_calx);
     }
 
     #[test]

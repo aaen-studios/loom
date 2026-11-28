@@ -258,6 +258,11 @@ final class SampleCore: CoreLink, @unchecked Sendable {
                 event("routine.deleted", ["routine": id])
             case "routine.runs":
                 tell(["t": "result", "id": f["id"], "ok": true, "value": ["runs": .array(Sample.runs(of: f["args"]["id"].text))]])
+            case "routine.state":
+                tell(["t": "result", "id": f["id"], "ok": true, "value": ["state": f["args"]["id"] == "rt_7" ? Sample.labelState : [:]]])
+            case "routine.test":
+                tell(["t": "result", "id": f["id"], "ok": true, "value": ["status": "quiet", "printed": "{\"labelled\": 3}", "errors": "", "posted": [],
+                                                                          "wrote": ["set since"], "steered": false, "said": "Nothing new."]])
             case "routine.next":
                 // Every two hours from now, as the instance would work it out.
                 let hour = 3_600_000
@@ -856,6 +861,12 @@ enum Sample {
          "event": ["integration": "acta", "server": "acta", "target": ["board": "aaen-studios/loom"], "kind": "moved", "to": "done"],
          "gate": ["command": "./new-cards.sh", "timeout": 60], "model": "opus",
          "last": ["status": "quiet", "at": 1795165200000], "cost": ["run": 1_400_000, "day": 5_400_000, "runs": 27, "quiet": 19]],
+        // A script only: its Calx script labels new mail through the person's Gmail
+        // (`loom tool`), keeping where it got to (`loom state`), and wakes no agent.
+        ["id": "rt_7", "name": "Label new mail", "agent": "a_3", "prompt": "", "schedule": ["every": 15], "when": "every 15 minutes", "on": true,
+         "next": JSON(now() + 10 * 60 * 1000), "script_only": true,
+         "gate": ["calx": JSON(Sample.labelScript), "timeout": 60],
+         "last": ["status": "quiet", "at": 1795165200000], "cost": ["run": 0, "day": 0, "runs": 96, "quiet": 96, "saves": ["said": "100% of runs used no tokens"]]],
         ["id": "rt_4", "name": "Inbox sweep", "agent": "a_3", "prompt": "Sort the inbox and flag what needs me.", "schedule": ["every": 30],
          "when": "every 30 minutes", "on": true, "next": JSON(now() + 20 * 60 * 1000), "upcoming": [JSON(now() + 20 * 60 * 1000), JSON(now() + 50 * 60 * 1000), JSON(now() + 80 * 60 * 1000)],
          "last": ["status": "quiet", "at": 1795165200000], "cost": ["run": 110_000, "day": 5_400_000, "runs": 336, "quiet": 320, "wasted": true]],
@@ -867,6 +878,20 @@ enum Sample {
          "failures": 5, "off_card": "msg_14", "last": ["status": "failed", "error": "XXL's product page didn't load (503)", "at": 1795187129000]],
     ]
 
+    /// Label new mail's script, as an agent wrote it.
+    static let labelScript = """
+        import std.process
+
+        fn main() ! Error {
+            let since = try process.output("loom", ["state", "get", "since"]) ?? String()
+            let found = try process.output("loom", ["tool", "gmail", "search_emails", "query=is:unread after:{since}"]) ?? String()
+            println(found)
+        }
+        """
+
+    /// What Label new mail's script keeps between runs.
+    static let labelState: JSON = ["since": "1795165200", "labelled": "412"]
+
     /// A routine's runs, newest first, as `routine.runs` gives them: posted, quiet with its
     /// gate finding nothing, and one that failed with what to do.
     static func runs(of routine: String) -> [JSON] {
@@ -875,12 +900,12 @@ enum Sample {
         return [
             ["run": "rr_5", "routine": JSON(routine), "at": JSON(t - 40 * min), "started": JSON(t - 40 * min), "ended": JSON(t - 40 * min + 12_000), "status": "done",
              "posted": ["Shipped LOO-383: a routine editor on the iPhone."], "said": "Posted the changelog line."],
-            ["run": "rr_4", "routine": JSON(routine), "at": JSON(t - 160 * min), "ended": JSON(t - 160 * min + 3000), "status": "quiet", "woke": false],
+            ["run": "rr_4", "routine": JSON(routine), "at": JSON(t - 160 * min), "ended": JSON(t - 160 * min + 3000), "status": "quiet", "woke": false, "printed": "{\"wake\": false}"],
             ["run": "rr_3", "routine": JSON(routine), "at": JSON(t - 290 * min), "started": JSON(t - 290 * min), "ended": JSON(t - 289 * min + 2000), "status": "failed",
              "error": "Acta didn't answer in 30 s.", "hint": "Check that Acta is up, then Run now."],
             ["run": "rr_2", "routine": JSON(routine), "at": JSON(t - 1300 * min), "started": JSON(t - 1300 * min), "ended": JSON(t - 1300 * min + 9000), "status": "done",
              "posted": ["Shipped LOO-398: turn a routine back on from its chat."]],
-            ["run": "rr_1", "routine": JSON(routine), "at": JSON(t - 1400 * min), "ended": JSON(t - 1400 * min + 2000), "status": "quiet", "woke": false],
+            ["run": "rr_1", "routine": JSON(routine), "at": JSON(t - 1400 * min), "ended": JSON(t - 1400 * min + 2000), "status": "quiet", "woke": false, "printed": "{\"wake\": false}"],
         ]
     }
 
