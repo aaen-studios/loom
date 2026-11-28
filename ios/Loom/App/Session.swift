@@ -380,6 +380,14 @@ final class Session {
         send(["t": "voice.stop"])
     }
 
+    /// The message sent while dictating (LOO-448): the mic stops, and the dictation ends
+    /// with no more words, here and in the core.
+    func dictationSent() {
+        micWanted = false
+        endMic()
+        send(model.dictationSent())
+    }
+
     private func beginDictation() {
         micWanted = false
         Speaker.stop()

@@ -1055,17 +1055,7 @@ impl Loom {
             window,
             |this: &mut Loom, state, event: &InputEvent, window, cx| {
                 match event {
-                    InputEvent::PressEnter { shift: false, .. } => {
-                        let text = composer_text(state.read(cx));
-                        if let Some(frame) = this.model.send(&text) {
-                            this.core.send(&frame.to_string());
-                            state.update(cx, |s, cx| s.set_value("", window, cx));
-                            // Sending shuts the emoji picker.
-                            if this.emoji_ui.picker.is_some() {
-                                this.close_emoji_picker(cx);
-                            }
-                        }
-                    }
+                    InputEvent::PressEnter { shift: false, .. } => this.send_composer(window, cx),
                     // A / alone in the composer opens the + menu, with its search.
                     InputEvent::Change if state.read(cx).value() == "/" => {
                         state.update(cx, |s, cx| s.set_value("", window, cx));
@@ -2034,6 +2024,28 @@ ACTA_KEY=secret:ACTA_KEY",
 
     fn send(&self, frame: Value) {
         self.core.send(&frame.to_string());
+    }
+
+    /// The composer's message sent, by Enter or the send button: the composer empties,
+    /// and a dictation under way ends with it, its words still to come dropped (LOO-448).
+    pub(super) fn send_composer(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let text = composer_text(self.composer.read(cx));
+        let Some(frame) = self.model.send(&text) else {
+            return;
+        };
+        self.send(frame);
+        if let Some(cancel) = self.model.voice.sent() {
+            self.mic = None;
+            self.heard.clear();
+            self.send(cancel);
+        }
+        self.composer
+            .update(cx, |s, cx| s.set_value("", window, cx));
+        // Sending shuts the emoji picker.
+        if self.emoji_ui.picker.is_some() {
+            self.close_emoji_picker(cx);
+        }
+        cx.notify();
     }
 
     // --- The sidebar, whole or a rail (rail.rs) ---

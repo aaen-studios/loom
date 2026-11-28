@@ -187,6 +187,9 @@ extension SampleCore {
                     tell(["t": "core.dictation", "state": "listening", "engine": JSON(engine), "streams": true, "text": JSON(words)])
                 }
             }
+        case "voice.cancel":
+            voice.listening += 1
+            tell(["t": "core.dictation", "state": "cancelled"])
         case "voice.stop":
             guard voice.listening > 0 else { return }
             voice.listening += 1

@@ -124,17 +124,7 @@ impl Loom {
                     }
                 }
                 Main::Live => this.start_live(cx),
-                Main::Send => {
-                    let text = composer_text(this.composer.read(cx));
-                    if let Some(frame) = this.model.send(&text) {
-                        this.send(frame);
-                        this.composer
-                            .update(cx, |s, cx| s.set_value("", window, cx));
-                        if this.emoji_ui.picker.is_some() {
-                            this.close_emoji_picker(cx);
-                        }
-                    }
-                }
+                Main::Send => this.send_composer(window, cx),
             }))
     }
 

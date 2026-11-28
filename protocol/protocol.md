@@ -1128,7 +1128,7 @@ Arguments marked `?` are optional. "—" means `value` is `{}`.
 
 ## Voice
 
-Dictation, speech and live mode ([PLAN.md](../PLAN.md#voice), [Live mode](../PLAN.md#live-mode)). The settings are the person's, on the instance (`voice.get`, `voice.put`), and each service's key is their secret `voice.SERVICE`, which only their devices open, as the core starts an engine (`voice.start`). Everything else runs in the core ([core/README.md](../core/README.md): `voice.listen`, `voice.audio`, `core.dictation`, whose `kept` says which of its words won't change again, `core.speak`, and for live mode, `live.start` and `core.live`), which talks to the services itself, as [`shared/voice.calx`](../shared/voice.calx) has their wire formats:
+Dictation, speech and live mode ([PLAN.md](../PLAN.md#voice), [Live mode](../PLAN.md#live-mode)). The settings are the person's, on the instance (`voice.get`, `voice.put`), and each service's key is their secret `voice.SERVICE`, which only their devices open, as the core starts an engine (`voice.start`). Everything else runs in the core ([core/README.md](../core/README.md): `voice.listen`, `voice.audio`, `voice.cancel` as a message is sent while dictating, `core.dictation`, whose `kept` says which of its words won't change again, `core.speak`, and for live mode, `live.start` and `core.live`), which talks to the services itself, as [`shared/voice.calx`](../shared/voice.calx) has their wire formats:
 
 | Service | Dictation | Speech |
 |---|---|---|

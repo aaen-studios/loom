@@ -254,6 +254,7 @@ struct Composer: View {
                     case .send:
                         if let frame = model.send(composerText(box.parts())) {
                             session.send(frame)
+                            endDictationSent()
                             box.clear()
                             sent()
                         }
@@ -361,6 +362,16 @@ struct Composer: View {
         dictating = session.model.voice.heard.n + 1
         heard.reset()
         session.startDictation()
+    }
+
+    /// The message sent while dictating (LOO-448): the dictation ends with it, and the
+    /// words still to come go nowhere.
+    private func endDictationSent() {
+        guard dictating != 0 || session.listening else { return }
+        dictating = 0
+        dictated = nil
+        heard.drop()
+        session.dictationSent()
     }
 
     /// The words the core has heard so far, in place of what this dictation put in before.
@@ -1449,6 +1460,7 @@ private struct MentionPicker: View {
     private var words: [String] = []
     private var kept = 0
     private var rising: Set<Int> = []
+    private var labels: [UILabel] = []
     private var ink: UIColor = .label
 
     private static let focus = 0.38
@@ -1459,6 +1471,14 @@ private struct MentionPicker: View {
     func reset() {
         words = []
         kept = 0
+    }
+
+    /// The message sent while dictating (LOO-448): the words still rising go with it.
+    func drop() {
+        for l in labels { l.removeFromSuperview() }
+        labels = []
+        rising = []
+        reset()
     }
 
     /// The words this dictation has put in from `at`, the first of them as many as
@@ -1553,12 +1573,14 @@ private struct MentionPicker: View {
         both.timingFunction = CAMediaTimingFunction(name: .easeOut)
         label.layer.add(both, forKey: "focus")
         v.addSubview(label)
+        labels.append(label)
         UIView.animate(withDuration: HeardWords.focus, delay: 0, options: [.curveEaseOut, .allowUserInteraction]) {
             label.alpha = 1
             label.transform = .identity
         } completion: { [weak self, weak v] _ in
             label.removeFromSuperview()
             guard let self, let v else { return }
+            self.labels.removeAll { $0 === label }
             self.rising.remove(i)
             guard NSMaxRange(range) <= v.textStorage.length,
                   (v.textStorage.string as NSString).substring(with: range) == word
