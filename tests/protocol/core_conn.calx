@@ -87,6 +87,33 @@ impl App {
         }
     }
 
+    // Reads what the core says until the next run ends: the core.notify it told for it,
+    // if any, the agent's reply, and how long after the reply the notification came.
+    fn notified(mut self, ms: u64) -> (Json?, Json, u64) ! Error {
+        let start = unsafe { Instant.now() }
+        var told: Json? = none
+        var reply = Json.Null
+        var replied_at = start
+        var after: u64 = 0
+        loop {
+            let waited = unsafe { Instant.now() }.nanos_since(start) / 1000000
+            if waited >= ms { fail "no run ended in {ms} ms" }
+            let got = unsafe { self.from_core.wait_for((ms - waited) * 1000000) } else { continue }
+            let m = got.text() else { continue }
+            let f = try parse(m)
+            let t = str_at(f.copy(), "t") ?? String()
+            if t == "event" and str_at(f.copy(), "kind") == some(String("message.created")) and str_at(at(f.copy(), "message"), "role") == some(String("agent")) {
+                reply = at(f.copy(), "message")
+                replied_at = unsafe { Instant.now() }
+            }
+            if t == "core.notify" {
+                after = unsafe { Instant.now() }.nanos_since(replied_at) / 1000000
+                told = some(f.copy())
+            }
+            if t == "event" and str_at(f, "kind") == some(String("run.finished")) { return (told, reply, after) }
+        }
+    }
+
     fn stop(mut self) {
         self.tell(String(#"{"t":"core.stop"}"#))
         if let t = self.thread.take() {
@@ -249,10 +276,31 @@ fn run(server: mut Child, data: String) ! Error {
     try check(str_at(try app.until("core.file", "id", "f_2", 1000), "path") == some(down), "and a file it has is answered at once")
 
     // --- Notifications, while no one is looking ---
+    let other_chat = str_at(at(made_conv, "conversation"), "id") ?? String()
     app.send(Obj.new().s("t", String("app.active")).b("active", false).done())
-    app.send(Obj.new().s("t", String("send")).s("agent", other).s("text", String("tell me when you're done")).done())
-    let note = try app.until("core.notify", "kind", String("run.finished"), 20000)
-    try check(str_at(note.copy(), "title") == some(String("Other")) and (str_at(note, "body") ?? String()).len() > 0, "a reply that's done while the app isn't looked at becomes a notification")
+    app.send(Obj.new().s("t", String("app.front")).s("conversation", other_chat.copy()).done())
+    app.send(Obj.new().s("t", String("send")).s("agent", other.copy()).s("text", String("tell me when you're done")).done())
+    let (told, reply, after_ms) = try app.notified(20000)
+    let note = told ?? Json.Null
+    try check(str_at(note.copy(), "title") == some(String("Other")) and str_at(note.copy(), "body") == some(String("tell me when you're done")), "a reply that's done while the app isn't looked at becomes a notification, with its words")
+    try check(after_ms < 1000 and str_at(note.copy(), "tag") == str_at(reply.copy(), "id"), "at once, tagged with the reply")
+    println("      {after_ms} ms after the reply")
+    // Read on another device: it's taken back.
+    app.send(Obj.new().s("t", String("cmd")).s("id", String("q_read")).s("name", String("conversation.read")).j("args", Obj.new().s("conversation", other_chat.copy()).i("at", int_at(reply, "at") ?? 0).done()).done())
+    let taken = try app.until("core.unnotify", "", String(), 5000)
+    try check("{at(taken.copy(), "tags")}".contains("\"{str_at(note, "tag") ?? String()}\"") and str_at(taken, "conversation") == some(other_chat.copy()), "once it's read on any device, it's taken back (core.unnotify)")
+    // Looking at that chat: none.
+    app.send(Obj.new().s("t", String("app.active")).b("active", true).done())
+    app.send(Obj.new().s("t", String("send")).s("agent", other.copy()).s("text", String("in front")).done())
+    let (in_front, _, _) = try app.notified(20000)
+    try check(in_front == none, "a reply in the chat in front of someone using the app isn't one")
+    // Looking at another chat: one.
+    app.send(Obj.new().s("t", String("app.front")).s("conversation", conversation.copy()).done())
+    app.send(Obj.new().s("t", String("send")).s("agent", other.copy()).s("text", String("another chat")).done())
+    let (elsewhere, _, _) = try app.notified(20000)
+    try check(elsewhere != none, "and with another chat in front it is")
+    app.send(Obj.new().s("t", String("app.front")).s("conversation", String()).done())
+    app.send(Obj.new().s("t", String("app.active")).b("active", false).done())
     // A routine's quiet run that posts nothing isn't one: only a post, or a failure, is.
     app.send(Obj.new().s("t", String("cmd")).s("id", String("q_r1")).s("name", String("routine.put")).j("args", Obj.new().s("name", String("Check")).s("agent", other.copy()).s("prompt", String("nothing new")).j("schedule", Obj.new().i("every", 600).done()).done()).done())
     let routine = str_at(at(at(try app.until("result", "id", "q_r1", 5000), "value"), "routine"), "id") ?? String()

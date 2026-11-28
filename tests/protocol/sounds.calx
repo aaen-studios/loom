@@ -137,14 +137,14 @@ fn run(server: Child) ! Error {
     let agent = str_at(at(try app.cmd("q_1", "agent.create", Obj.new().s("name", String("Juniper")).s("acp_agent", String("fake")).s("instructions", String("You are a test.")).done()), "agent"), "id") ?? String()
 
     // --- While the app is looked at ---
-    let (first, _) = try app.reply(agent.copy(), "hello")
-    try check(first == [String("reply")], "a reply while the app is looked at, its chat not in front, sounds as Reply arrived")
+    let (first, first_note) = try app.reply(agent.copy(), "hello")
+    try check(first.len() == 0 and first_note == [String("loom-reply")], "a reply while the app is looked at, its chat not in front, is a notification that sounds as Reply arrived")
     app.send(Obj.new().s("t", String("core.get")).s("id", String("g_1")).s("what", String("conversations")).done())
     let Json.Array(convs) = at(try app.until("core.data", "id", String("g_1"), 5000), "items") else { fail "no conversations" }
     let chat = str_at(convs[0].copy(), "id") ?? String()
     app.send(Obj.new().s("t", String("app.front")).s("conversation", chat.copy()).done())
-    let (in_front, _) = try app.reply(agent.copy(), "again")
-    try check(in_front.len() == 0, "and none while its chat is in front")
+    let (in_front, in_front_note) = try app.reply(agent.copy(), "again")
+    try check(in_front.len() == 0 and in_front_note.len() == 0, "and neither, nor a sound, while its chat is in front")
     app.send(Obj.new().s("t", String("app.front")).s("conversation", String()).done())
 
     // --- Muted ---
@@ -154,12 +154,12 @@ fn run(server: Child) ! Error {
     app.send(Obj.new().s("t", String("core.get")).s("id", String("g_2")).s("what", String("agents")).done())
     let agents = at(try app.until("core.data", "id", String("g_2"), 5000), "items")
     try check("{agents}".contains(#""muted":"#), "and every device hears of it")
-    let (quiet, _) = try app.reply(agent.copy(), "muted now")
-    try check(quiet.len() == 0, "a muted agent's reply makes no sound")
+    let (quiet, quiet_note) = try app.reply(agent.copy(), "muted now")
+    try check(quiet.len() == 0 and quiet_note == [String()], "a muted agent's reply makes no sound, and its notification still shows")
     let unmuted = at(try app.cmd("q_3", "agent.mute", Obj.new().s("agent", agent.copy()).b("muted", false).done()), "agent")
     try check(at(unmuted, "muted") == Json.Null, "agent.mute with false unmutes it")
-    let (again, _) = try app.reply(agent.copy(), "unmuted")
-    try check(again == [String("reply")], "and its replies sound again")
+    let (again, again_note) = try app.reply(agent.copy(), "unmuted")
+    try check(again.len() == 0 and again_note == [String("loom-reply")], "and its replies sound again")
 
     // --- While no one looks ---
     app.send(Obj.new().s("t", String("app.active")).b("active", false).done())

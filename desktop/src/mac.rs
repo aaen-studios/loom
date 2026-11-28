@@ -13,7 +13,7 @@ use objc2::runtime::{Bool, ProtocolObject};
 use objc2::{define_class, msg_send, AnyThread, DefinedClass, MainThreadMarker};
 use objc2_app_kit::{NSApplication, NSScreen, NSSound, NSView, NSWindow};
 use objc2_foundation::{
-    NSActivityOptions, NSBundle, NSData, NSError, NSObject, NSObjectProtocol, NSPoint,
+    NSActivityOptions, NSArray, NSBundle, NSData, NSError, NSObject, NSObjectProtocol, NSPoint,
     NSProcessInfo, NSRect, NSSize, NSString,
 };
 use objc2_user_notifications::{
@@ -400,6 +400,19 @@ pub fn notify(tag: &str, title: &str, body: &str, sound: &Sound) {
         }
     });
     center.addNotificationRequest_withCompletionHandler(&request, Some(&done));
+}
+
+/// Takes back the notifications with these identifiers, from the Notification Centre and
+/// before they show.
+pub fn withdraw(ids: &[String]) {
+    if !bundled() || ids.is_empty() {
+        return;
+    }
+    let named: Vec<Retained<NSString>> = ids.iter().map(|i| NSString::from_str(i)).collect();
+    let list = NSArray::from_retained_slice(&named);
+    let center = UNUserNotificationCenter::currentNotificationCenter();
+    center.removeDeliveredNotificationsWithIdentifiers(&list);
+    center.removePendingNotificationRequestsWithIdentifiers(&list);
 }
 
 /// The `.app` bundle the program at `exe` is in: `…/loom.app` for

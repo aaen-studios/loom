@@ -951,11 +951,14 @@ struct Away {
 impl Away {
     fn start(dir: String, server: Option<&str>) -> Away {
         let (core, events) = Core::start(&core_config(&dir, server));
+        // A server away isn't looked at, so it reads nothing until it's on screen.
+        let mut model = Model::new();
+        model.set_looked_at(false);
         Away {
             dir,
             core,
             events,
-            model: Model::new(),
+            model,
         }
     }
 }
@@ -1608,6 +1611,7 @@ ACTA_KEY=secret:ACTA_KEY",
                                 };
                                 loom.notify(&v, about);
                             }
+                            Some("core.unnotify") => shell::unnotify(&loom.here, &v),
                             Some("core.sound") => settings::play(&v),
                             Some("core.sounds") => loom.took_sounds(&v),
                             Some("core.speak") => voice_ui::play(&v),
@@ -1711,6 +1715,7 @@ ACTA_KEY=secret:ACTA_KEY",
         .detach();
         cx.observe_window_activation(window, |this: &mut Loom, window, cx| {
             this.send(serde_json::json!({"t": "app.active", "active": window.is_window_active()}));
+            this.model.set_looked_at(window.is_window_active());
             // Away from the window, the buttons it knew were down may come up unseen.
             if !window.is_window_active() {
                 this.auto.stop();
@@ -2000,6 +2005,13 @@ ACTA_KEY=secret:ACTA_KEY",
             notice: None,
         };
         loom.model.keep_boards(&loom.prefs.card_boards);
+        // What's open is read only while the window is in front of someone: GPUI takes a
+        // window that opened behind another app, or in the tray, as active until it's
+        // first left, so as it opens it's asked whether it's really in front.
+        let looked_at = window.is_window_active() && crate::shell::in_front(loom.hwnd);
+        loom.model.set_looked_at(looked_at);
+        // The core takes the app as looked at until it's told, so it's told now.
+        loom.send(serde_json::json!({"t": "app.active", "active": looked_at}));
         loom.fetch();
         window.focus(&loom.keys, cx);
         loom
@@ -2634,6 +2646,7 @@ ACTA_KEY=secret:ACTA_KEY",
                         };
                         settings::notify_as(&prefs, &v, about);
                     }
+                    Some("core.unnotify") => shell::unnotify(&a.dir, &v),
                     Some("core.sound") => settings::play(&v),
                     Some("core.speak") => voice_ui::play(&v),
                     _ => {}
@@ -2761,6 +2774,9 @@ ACTA_KEY=secret:ACTA_KEY",
         std::mem::swap(&mut self.events, &mut a.events);
         std::mem::swap(&mut self.model, &mut a.model);
         std::mem::swap(&mut self.here, &mut a.dir);
+        // The one away isn't looked at, so it reads nothing, and the one here is.
+        a.model.set_looked_at(false);
+        self.model.set_looked_at(true);
         self.model.keep_boards(&self.prefs.card_boards);
         keep_last_server(&self.here);
         // The one away notifies whatever the window does; the one here, only while it's
@@ -3108,7 +3124,7 @@ ACTA_KEY=secret:ACTA_KEY",
         if let Some(words) = self.hub_mut().checked.take() {
             // Settings shows it; away from the window, a notification does.
             if !shell::window_shown(self.hwnd) {
-                shell::notify("loom", &words, None, shell::Sound::None);
+                shell::notify("loom", &words, None, shell::Sound::None, "");
             }
             self.update_said = Some(words);
             cx.notify();

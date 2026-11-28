@@ -302,12 +302,12 @@ The app may send frames as soon as it has `welcome`. It doesn't wait for `synced
 ### `hello`
 
 ```json
-{ "t": "hello", "token": "<device token>", "versions": [1, 2], "after": 1041, "device": { "tz": "Europe/Oslo", "active": true } }
+{ "t": "hello", "token": "<device token>", "versions": [1, 2], "after": 1041, "device": { "tz": "Europe/Oslo", "active": true, "front": "c_9" } }
 ```
 
 - `versions`: the protocol versions the app speaks.
 - `after`: the last event `seq` the app has stored. `0` for a device that has nothing yet.
-- `device`: what changed about the device since it logged in, all optional: `tz`, `name`, and `active` (whether someone is using it right now).
+- `device`: what changed about the device since it logged in, all optional: `tz`, `name`, `active` (whether someone is using it right now: its window focused, or the phone's app in front), and `front` (the conversation in front of them there, or `""` for none). A reply that comes into the conversation in front of someone using a device is read at once ([Unread](#unread)).
 
 ### `send`
 
@@ -358,10 +358,10 @@ Answered by [`result`](#result) with the same `id`.
 
 ### `device`
 
-The device's state changed: the same optional fields as `hello`'s `device`. Sent when someone starts or stops using the device, or its time zone changes.
+The device's state changed: the same optional fields as `hello`'s `device`. Sent when someone starts or stops using the device, the conversation in front of them changes, or its time zone changes.
 
 ```json
-{ "t": "device", "active": false }
+{ "t": "device", "active": false, "front": "c_9" }
 ```
 
 A device that offers tools to agents also sends, after `welcome` and whenever the person changes them on it, its `key` (its Ed25519 public key, hex) and its `tools`, each `off`, `ask` or `allow`:
@@ -631,7 +631,8 @@ What the person has read in each conversation is kept on the instance, once for 
 
 - A conversation has `read`, when the newest message the person has read there is from (Unix ms), in the snapshot and in `conversation.created`'s and `conversation.updated`'s `conversation`, once they've read one. Conversations from before the instance kept it count as read up to their newest message.
 - `conversation.read` (`conversation`, `at`) marks it read up to a message from `at`: kept unless it's read further already, and at most now. It answers `read`, as kept now, and when that changed, `conversation.updated` with `read` goes to every device. `bad_request` without an `at`, and `not_found` for a conversation that isn't there. An agent can't run it.
-- The core keeps, beside each conversation it lists, `replied`: when the newest agent's message in it that it has is from. A reply is unread while `replied` is newer than `read`. The desktop marks what's open read: a chat as it opens, each of the agent's conversations but the threads beside it (another agent's, or one it made) and group chats, and a message as it comes while it's open.
+- A reply, or a routine's post, that comes into a conversation in front of someone using one of the person's devices (the `device` frame's `active` and `front`) is read at once, up to it: the instance sends `conversation.updated` with `read` right after its `message.created`, before its `run.finished` or its `notify`, so no device notifies for it, and a routine's post there isn't pushed.
+- The core keeps, beside each conversation it lists, `replied`: when the newest agent's message in it that it has is from. A reply is unread while `replied` is newer than `read`. The desktop marks what's open read: a chat as it opens, each of the agent's conversations but the threads beside it (another agent's, or one it made) and group chats, and a message as it comes while it's open. It does so only while its window is focused and its server on screen, and the iPhone only while its app is in front, so what comes while no one looks stays unread, and the person's other devices notify for it.
 
 ## Tasks
 
@@ -921,7 +922,7 @@ An approval nobody answers stays open while the run does. Cancelling the run ans
 | `defaults.updated` | `defaults` (the whole defaults, as `defaults.get` gives them), `by` (the device that changed them; a yes to an agent's `defaults.put` is done as the device that gave it) | The person's agent defaults changed. Every agent that follows a field follows the new one from its next prompt ([Agent defaults](#agent-defaults)) |
 | `voice.updated` | `voice` (as `voice.get` gives it), `by` (the device or agent that changed it) | The person's voice settings, or which services they have a key for, changed. Each core starts its next dictation and speech from them ([Voice](#voice)) |
 | `rules.updated` | `rules` (all of the person's, as `rule.list` gives them), `by` (the device that changed them, or the one that said yes to an agent's) | A rule was added, changed or removed. Each agent works under the rules as they are from its next action ([Rules on what's touched](#rules-on-whats-touched)) |
-| `notify` | `agent`, `title`, `body`, `about`?, and for a routine's, `conversation` | An agent sent its person a notification with its `notify` tool, or a routine's agent posted with `routine_post` while it notifies (its name as `title`, the start of the post as `body`), or its run failed, or it turned off on its own (five failures in a row, or its agent's `pause_routine`, titled `AGENT paused ROUTINE`, with the agent's reason), with `conversation` where its `routine_off` card is, or loom itself told the owner of an update it made, with no `agent` ([Updating the instance](#updating-the-instance)). `about` says what it's about, for its sound ([PLAN.md](../PLAN.md#sounds)): `routine.posted` for a routine's post, `routine.failed` for its failure or its turning off, and `waiting` for an agent waiting on the person in its browser; it's left out for the rest. The apps show it, even while someone's looking |
+| `notify` | `agent`, `title`, `body`, `about`?, and for a routine's, `conversation` | An agent sent its person a notification with its `notify` tool, or a routine's agent posted with `routine_post` while it notifies (its name as `title`, the start of the post as `body`), or its run failed, or it turned off on its own (five failures in a row, or its agent's `pause_routine`, titled `AGENT paused ROUTINE`, with the agent's reason), with `conversation` where its `routine_off` card is, or loom itself told the owner of an update it made, with no `agent` ([Updating the instance](#updating-the-instance)). `about` says what it's about, for its sound ([PLAN.md](../PLAN.md#sounds)): `routine.posted` for a routine's post, `routine.failed` for its failure or its turning off, and `waiting` for an agent waiting on the person in its browser; it's left out for the rest. The apps show it, even while someone's looking, but a routine's post in the chat in front of them, or read already ([PLAN.md](../PLAN.md#notifications-and-push)) |
 | `agent.deleted` | `agent` (the id) | Deleted |
 | `group.updated` | `group` (the whole folder: `id`, `name`, `collapsed`, `at`), `by` (the device that changed it) | A sidebar folder was made, renamed, or opened or shut ([PLAN.md](../PLAN.md#the-sidebar)) |
 | `group.deleted` | `group` (the id), `by` | Deleted. Its agents and group chats came out of it first, each with `agent.updated` or `conversation.updated` |
@@ -1274,7 +1275,7 @@ A phone that registered with `push.register` gets push through APNs while it isn
 
 | Pushed for | When | `aps.alert` | `aps.category` | `loom` |
 |---|---|---|---|---|
-| `notify` | To each phone that isn't connected, even while the person is on another device | `title`, the agent's name as `subtitle`, `body` | — | `kind: "notify"`, `agent`, `conversation` (for a routine's) |
+| `notify` | To each phone that isn't connected, even while the person is on another device, but a routine's post in a chat someone is looking at there ([Unread](#unread)) | `title`, the agent's name as `subtitle`, `body` | — | `kind: "notify"`, `agent`, `conversation` (for a routine's) |
 | `approval.needed` | The same | "<agent> asks first" as `title`, the tool call's title as `body` | `approval`, which has Allow and Deny | `kind: "approval"`, `run`, `call`, `conversation`, `can_always` |
 | An agent's finished reply (`message.created`) | When the person is on none of their devices, for a run they started (not a routine's, nor another agent's) that ended `done` or `failed` | The agent's name as `title`, the start of the reply as `body` | — | `kind: "reply"`, `agent`, `conversation`, `message` |
 

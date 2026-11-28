@@ -1932,13 +1932,18 @@ final class Model {
     /// instance keeps (`read`), and what it marked read since.
     private var conversationRead: [String: Int] = [:]
 
+    /// The app isn't in front of the person (in the background, or the phone locked):
+    /// nothing is marked read meanwhile, so their other devices still notify, until they
+    /// come back to it.
+    var unseen = false
+
     /// Marks what's open read (protocol.md, "Unread"), as the desktop does, so its dots
     /// clear: a group chat or a thread as it shows, or else each of the selected agent's
     /// conversations but the threads beside its chat and group chats, each up to its
     /// newest message, as they open and as messages come while they're open. Nothing while
     /// the chat is left for the agents list. The frames to send, once each.
     func readFrames() -> [JSON] {
-        guard synced, !away else { return [] }
+        guard synced, !away, !unseen else { return [] }
         let open: [Conversation]
         if let c = room ?? thread {
             open = conversations.filter { $0.id == c }

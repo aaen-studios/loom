@@ -30,6 +30,7 @@ import shared.protocol
 import shared.pushrelay
 import shared.shape
 import shared.sounds
+import shared.notices
 import shared.stop.{Stop}
 import server.acp
 import server.acp.{Line, Out}
@@ -170,6 +171,8 @@ struct Session {
     hosts: Json    // the person's hosts it reaches with ssh: [{name, target, via, tools}], checked
     version: i32    // the protocol version it speaks, from hello
     shown: (i64, i64)    // the size it shows the browser it watches at, in pixels, as browser.watch says, or 0 × 0
+    active: bool    // someone is using it now, as its `device` frame last said
+    front: String    // the conversation in front of them there, or ""
 }
 
 // A call to one of the person's devices, until its result comes.
@@ -3369,7 +3372,7 @@ impl Instance {
                     if req.path == "/ws" and req.method == "GET" {
                         // upgrade answers the request itself.
                         match i.server.upgrade(req.copy()) {
-                            ok(s) => i.sessions.insert(s.id(), Session { socket: s, user: String(), device: String(), live: false, key: String(), tools: Json.Null, hosts: Json.Null, version: protocol.OLDEST, shown: (0, 0) }),
+                            ok(s) => i.sessions.insert(s.id(), Session { socket: s, user: String(), device: String(), live: false, key: String(), tools: Json.Null, hosts: Json.Null, version: protocol.OLDEST, shown: (0, 0), active: false, front: String() }),
                             err(e) => eprintln("loom: /ws from {req.client}: {e}"),
                         }
                         continue
@@ -4716,6 +4719,25 @@ impl Instance {
         return false
     }
 
+    // Whether someone is looking at `conversation` on one of `user`'s devices now: one
+    // in use, with that chat in front, as its `device` frame said (shared/notices.calx).
+    fn looked_at(i: Instance, user: String, conversation: String) -> bool {
+        for (_, s) in i.sessions {
+            if s.live and s.user == user and notices.looking_at(s.active, s.front.copy(), conversation.copy()) { return true }
+        }
+        return false
+    }
+
+    // A message from `upto` that came into `conversation` while someone looks at it is
+    // read at once (PLAN.md, "Unread"), and every device hears so before the run that
+    // made it ends, so none of them notifies for what the person has seen.
+    fn read_if_looked_at(i: Instance, user: String, conversation: String, upto: i64) ! Error {
+        if not i.looked_at(user.copy(), conversation.copy()) { return }
+        let had = int_at(try i.store.conversation(user.copy(), conversation.copy()) ?? Json.Null, "read") ?? 0
+        let read = try i.store.mark_read(user.copy(), conversation.copy(), upto) else return
+        if read != had { try i.event(user, "conversation.updated", Obj.new().j("conversation", Obj.new().s("id", conversation).i("read", read).done()).done()) }
+    }
+
     // The agent's name, for a notification's title.
     fn agent_name(i: Instance, user: String, agent: String) -> String {
         if let ok(some(a)) = i.store.agent(user, agent.copy()) {
@@ -4732,6 +4754,8 @@ impl Instance {
         if kind == "notify" {
             let agent = str_at(fields.copy(), "agent") ?? String()
             let conversation = str_at(fields.copy(), "conversation") ?? String()
+            // A routine's post in a chat someone is looking at was read as it came.
+            if str_at(fields.copy(), "about") == some(String("routine.posted")) and i.looked_at(user.copy(), conversation.copy()) { return }
             let body = push.payload(str_at(fields.copy(), "title") ?? String(), i.agent_name(user.copy(), agent.copy()), str_at(fields.copy(), "body") ?? String(), conversation.copy(), String(), Obj.new().s("kind", String("notify")).s("agent", agent.copy()).maybe("conversation", if conversation.len() > 0 { some(conversation) } else { none }).done())
             let cue = sounds.cue_of(String("notify"), str_at(fields, "about") ?? String(), String(), false) ?? String("reply")
             i.send_push(user, body, String(), cue, agent)
@@ -9042,8 +9066,11 @@ impl Instance {
         let message_id = try i.store.new_id("msg")
         let blocks = Json.Array([Obj.new().s("kind", String("text")).s("text", h.text.copy()).done()])
         let message = Obj.new().s("id", message_id.copy()).s("conversation", h.conversation.copy()).s("role", String("agent")).s("agent", h.agent.copy()).s("routine", h.routine.copy()).s("routine_name", h.name.copy()).i("at", now()).s("status", String("done")).j("blocks", blocks).done()
+        let posted = int_at(message.copy(), "at") ?? now()
         try i.store.put_message(h.user.copy(), message.copy())
         try i.event(h.user.copy(), "message.created", Obj.new().s("conversation", h.conversation.copy()).j("message", message).done())
+        // In front of someone now: read, before its notify.
+        try i.read_if_looked_at(h.user.copy(), h.conversation.copy(), posted)
         try i.store.post_untold(h.user.copy(), h.conversation.copy(), message_id, h.routine.copy(), String())
         if h.notify {
             i.log(h.user.copy(), h.agent.copy(), "notify", "Notified you: {h.name}", h.agent.copy())
@@ -12695,6 +12722,8 @@ impl Instance {
             if let session = mut i.sessions.find(s.id()) {
                 if let key = str_at(f.copy(), "key") { session.key = key }
                 if let Json.Object(_) = at(f.copy(), "tools") { session.tools = at(f.copy(), "tools") }
+                if let a = bool_at(f.copy(), "active") { session.active = a }
+                if let front = str_at(f.copy(), "front") { session.front = front }
                 if let Json.Array(_) = at(f.copy(), "hosts") { session.hosts = hosts_given(at(f, "hosts")) }
             }
         } else if t == "device.result" {
@@ -12730,6 +12759,9 @@ impl Instance {
             return
         }
         if let tz = str_at(at(f.copy(), "device"), "tz") { try i.store.update_device_tz(device.id.copy(), tz) }
+        // Whether someone is using it, and the chat in front of them there (shared/notices.calx).
+        let in_use = bool_at(at(f.copy(), "device"), "active") ?? false
+        let in_front = str_at(at(f.copy(), "device"), "front") ?? String()
         let user = device.user.copy()
         // The group chats' members as the agents are now, before catching up.
         try i.keep_rooms(user.copy())
@@ -12792,7 +12824,7 @@ impl Instance {
         // And the sidebar's folders as they are, so a cache that never kept them, as one
         // from before them, has them all.
         _ = i.server.send_text(s, "{Obj.new().s("t", String("synced")).i("seq", last).j("runs", Json.Array(going)).j("groups", Json.Array(try i.store.groups(user.copy()))).j("emoji", Json.Array(try i.store.emoji(user.copy()))).done()}")
-        i.sessions.insert(s.id(), Session { socket: s, user: user.copy(), device: device.id, live: true, key: String(), tools: Json.Null, hosts: Json.Null, version: version, shown: (0, 0) })
+        i.sessions.insert(s.id(), Session { socket: s, user: user.copy(), device: device.id, live: true, key: String(), tools: Json.Null, hosts: Json.Null, version: version, shown: (0, 0), active: in_use, front: in_front })
         // A person who opens an app is likely to write soon (LOO-223).
         i.prestart(user.copy())
         // The owner's first device after an update the instance made by itself hears of
@@ -16599,8 +16631,11 @@ impl Instance {
             // And each T3 thread it names or its tool calls started (PLAN.md, "T3 threads").
             let carded = i.with_cards(r.user.copy(), linked)
             let message = i.with_threads(r.user.copy(), carded, r.id.copy())
+            let replied = int_at(message.copy(), "at") ?? now()
             try i.store.put_message(r.user.copy(), message.copy())
             try i.event(r.user.copy(), "message.created", Obj.new().s("conversation", r.conversation.copy()).j("message", message).done())
+            // In front of someone now: read, before run.finished.
+            try i.read_if_looked_at(r.user.copy(), r.conversation.copy(), replied)
             // A watch's wake in a session of its own, which the chat's own session
             // hears of with its next turn.
             if woke_alone { try i.store.post_untold(r.user.copy(), r.conversation.copy(), r.message.copy(), String(), r.prompt.copy()) }

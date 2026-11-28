@@ -79,9 +79,50 @@ fn run(i: Instance) -> (String, i64) ! Error {
             break
         }
     }
+
+    // A reply in a chat that's in front of someone, on a device in use, is read as it
+    // comes, and every device hears so before its run ends, so none notifies for it.
+    try app.send(Obj.new().s("t", String("device")).b("active", true).s("front", chat.copy()).done())
+    try app.send(Obj.new().s("t", String("send")).s("cid", String("m_3")).s("conversation", chat.copy()).s("text", String("seen")).done())
+    let seen = try reply_saying(mut phone, "seen")
+    let seen_at = int_at(seen.copy(), "at") ?? 0
+    try check(try read_before_it_ended(mut phone, seen, seen_at), "a reply in the chat in front of someone is read before its run ends, and every device hears so")
+    // In use with another chat in front, or not in use, it waits to be read.
+    try app.send(Obj.new().s("t", String("device")).b("active", true).s("front", String("c_other")).done())
+    try app.send(Obj.new().s("t", String("send")).s("cid", String("m_4")).s("conversation", chat.copy()).s("text", String("elsewhere")).done())
+    let elsewhere = try reply_saying(mut phone, "elsewhere")
+    let elsewhere_at = int_at(elsewhere.copy(), "at") ?? 0
+    try check(not try read_before_it_ended(mut phone, elsewhere, elsewhere_at), "one that comes while another chat is in front isn't")
+    try app.send(Obj.new().s("t", String("device")).b("active", false).s("front", chat.copy()).done())
+    try app.send(Obj.new().s("t", String("send")).s("cid", String("m_5")).s("conversation", chat.copy()).s("text", String("away")).done())
+    let away = try reply_saying(mut phone, "away")
+    let away_at = int_at(away.copy(), "at") ?? 0
+    try check(not try read_before_it_ended(mut phone, away, away_at), "nor one that comes while no one is using the device")
     phone.close()
     app.close()
-    return (chat, replied)
+    return (chat, seen_at)
+}
+
+// The agent's reply that says `text`, on `s`.
+fn reply_saying(s: mut Session, text: str) -> Json ! Error {
+    loop {
+        let m = try s.reply()
+        if reply_text(m.copy()) == text { return m }
+    }
+}
+
+// Whether `s` heard its conversation read up to `upto` before the run that made
+// `reply` ended, reading on until it did end.
+fn read_before_it_ended(s: mut Session, reply: Json, upto: i64) -> bool ! Error {
+    let its_run = str_at(reply.copy(), "run") ?? String()
+    let conversation = str_at(reply, "conversation") ?? String()
+    var read = false
+    loop {
+        let e = try s.until("event", "")
+        let kind = str_at(e.copy(), "kind") ?? String()
+        if kind == "conversation.updated" and str_at(at(e.copy(), "conversation"), "id") == some(conversation.copy()) and int_at(at(e.copy(), "conversation"), "read") == some(upto) { read = true }
+        if kind == "run.finished" and str_at(e, "run") == some(its_run.copy()) { return read }
+    }
 }
 
 // After a restart, it's still there.

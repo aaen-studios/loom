@@ -1,0 +1,170 @@
+module shared.notices
+
+// Notifications (PLAN.md, "Notifications and push"): whether a live event is worth
+// one on a device, and which of those it showed are read once the person reads a
+// conversation, on any device, so they're withdrawn. The core asks it for each live
+// event, and the instance whether one of the person's devices is looking at a chat,
+// whose reply is then read at once, before any other device would notify for it.
+
+/// Whether someone is looking at `conversation` on a device: it's in use (`active`,
+/// its window focused, or the phone's app in front) with that conversation in front.
+pub fn looking_at(active: bool, front: String, conversation: String) -> bool {
+    return active and conversation.len() > 0 and front == conversation
+}
+
+/// Whether a message from `at` (Unix ms) is read once its conversation is read up to
+/// `read`.
+pub fn is_read(at: i64, read: i64) -> bool {
+    return at > 0 and read >= at
+}
+
+/// A live event that may be worth a notification, as the core reads it.
+pub struct Notice {
+    pub kind: String    // run.finished, approval.needed or notify
+    pub about: String    // a notify's `about`: routine.posted, routine.failed, waiting, or ""
+    pub conversation: String    // what it's about, or "" for none
+    pub quiet: bool    // a run the apps don't draw: a routine's quiet run, or an agent looking back over its chat
+    pub kept: bool    // for run.finished: its reply is kept, and the cache has it
+    pub status: String    // run.finished's
+    pub at: i64    // when the message it's about is from (Unix ms), or 0 for none
+    pub read: i64    // how far the person has read its conversation, on any device
+}
+
+/// Whether `n` is a notification on a device where the person is `active` with
+/// `front` in front. An agent's own notify, a routine's failure and loom's own news
+/// always are. A message in a chat (a reply, or a routine's post) and a question
+/// waiting are, unless the person is looking at that chat or has read it already.
+/// A quiet run, or one whose reply wasn't kept, never is, nor one that was stopped.
+pub fn shows(n: Notice, active: bool, front: String) -> bool {
+    let looking = looking_at(active, front, n.conversation.copy())
+    if n.kind == "notify" {
+        if n.about != "routine.posted" { return true }
+        return not looking and not is_read(n.at, n.read)
+    }
+    if n.kind == "approval.needed" { return not looking }
+    if n.kind != "run.finished" { return false }
+    if n.quiet or not n.kept or n.status == "cancelled" { return false }
+    return not looking and not is_read(n.at, n.read)
+}
+
+/// A notification a device showed, until it's read: its tag, the conversation it's
+/// about, and when the message it's about is from (0 for a question waiting, which
+/// goes once it's answered).
+pub struct Shown {
+    pub tag: String
+    pub conversation: String
+    pub at: i64
+}
+
+/// The most a device keeps track of: the oldest go first.
+pub const MOST: usize = 200
+
+/// What `conversation` read up to `read` withdraws of `shown`: the tags read now, and
+/// the ones still waiting.
+pub fn withdrawn(shown: List<Shown>, conversation: String, read: i64) -> (List<String>, List<Shown>) {
+    var gone = List<String>()
+    var kept = List<Shown>()
+    for s in shown {
+        if s.conversation == conversation and is_read(s.at, read) {
+            gone.push(s.tag.copy())
+        } else {
+            kept.push(s.copy())
+        }
+    }
+    return (gone, kept)
+}
+
+/// The same for a tag answered or gone, as a question once it's answered.
+pub fn without(shown: List<Shown>, tag: String) -> (List<String>, List<Shown>) {
+    var gone = List<String>()
+    var kept = List<Shown>()
+    for s in shown {
+        if s.tag == tag {
+            gone.push(s.tag.copy())
+        } else {
+            kept.push(s.copy())
+        }
+    }
+    return (gone, kept)
+}
+
+fn reply(conversation: str, at: i64, read: i64) -> Notice {
+    return Notice { kind: String("run.finished"), about: String(), conversation: String(conversation), quiet: false, kept: true, status: String("done"), at: at, read: read }
+}
+
+@test
+fn a_reply_shows_unless_its_chat_is_in_front_of_someone() {
+    // Away from the window, minimised or in the tray: it shows.
+    assert(shows(reply("c_1", 100, 0), false, String("c_1")))
+    // Looking at another chat: it shows.
+    assert(shows(reply("c_1", 100, 0), true, String("c_2")))
+    assert(shows(reply("c_1", 100, 0), true, String()))
+    // Looking at that chat: it doesn't.
+    assert(not shows(reply("c_1", 100, 0), true, String("c_1")))
+}
+
+@test
+fn a_reply_read_on_any_device_never_shows() {
+    assert(not shows(reply("c_1", 100, 100), false, String()))
+    assert(not shows(reply("c_1", 100, 250), false, String()))
+    assert(shows(reply("c_1", 100, 99), false, String()))
+}
+
+@test
+fn a_quiet_run_a_stopped_one_and_one_with_no_reply_never_show() {
+    var quiet = reply("c_1", 100, 0)
+    quiet.quiet = true
+    assert(not shows(quiet, false, String()))
+    var lost = reply("c_1", 100, 0)
+    lost.kept = false
+    assert(not shows(lost, false, String()))
+    var stopped = reply("c_1", 100, 0)
+    stopped.status = String("cancelled")
+    assert(not shows(stopped, false, String()))
+    var failed = reply("c_1", 100, 0)
+    failed.status = String("failed")
+    assert(shows(failed, false, String()))
+}
+
+@test
+fn an_agents_own_notify_always_shows_and_a_routines_post_as_a_message() {
+    let mine = Notice { kind: String("notify"), about: String(), conversation: String(), quiet: false, kept: false, status: String(), at: 0, read: 0 }
+    assert(shows(mine.copy(), true, String("c_1")))
+    var failed = mine.copy()
+    failed.about = String("routine.failed")
+    failed.conversation = String("c_1")
+    assert(shows(failed, true, String("c_1")))
+    var posted = mine.copy()
+    posted.about = String("routine.posted")
+    posted.conversation = String("c_1")
+    posted.at = 100
+    assert(shows(posted.copy(), false, String("c_1")))
+    assert(not shows(posted.copy(), true, String("c_1")))
+    posted.read = 100
+    assert(not shows(posted, false, String()))
+}
+
+@test
+fn a_question_shows_unless_its_chat_is_in_front_of_someone() {
+    let asking = Notice { kind: String("approval.needed"), about: String(), conversation: String("c_1"), quiet: false, kept: false, status: String(), at: 0, read: 0 }
+    assert(shows(asking.copy(), false, String("c_1")))
+    assert(shows(asking.copy(), true, String("c_2")))
+    assert(not shows(asking, true, String("c_1")))
+}
+
+@test
+fn reading_a_chat_withdraws_what_it_read() {
+    var shown = List<Shown>()
+    shown.push(Shown { tag: String("m_1"), conversation: String("c_1"), at: 100 })
+    shown.push(Shown { tag: String("m_2"), conversation: String("c_1"), at: 200 })
+    shown.push(Shown { tag: String("m_3"), conversation: String("c_2"), at: 100 })
+    shown.push(Shown { tag: String("tc_1"), conversation: String("c_1"), at: 0 })
+    let (gone, kept) = withdrawn(shown, String("c_1"), 150)
+    assert(gone.len() == 1 and gone[0] == "m_1")
+    assert(kept.len() == 3)
+    let (more, left) = withdrawn(kept, String("c_1"), 200)
+    assert(more.len() == 1 and more[0] == "m_2")
+    // A question goes once it's answered, whatever is read.
+    let (answered, rest) = without(left, String("tc_1"))
+    assert(answered.len() == 1 and rest.len() == 1 and rest[0].tag == "m_3")
+}
