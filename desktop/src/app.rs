@@ -27048,6 +27048,25 @@ mod when_tests {
     }
 
     #[test]
+    fn a_replys_time_never_sits_on_its_thread() {
+        use super::{space, time_clear, REPLY_HANG, REPLY_THREAD_W};
+        // Left of the column's edge, at 0: a reply's thread spans from its hang to the
+        // gap after it, and its time ends clear of it (LOO-450).
+        let thread = (-REPLY_HANG, -REPLY_HANG + REPLY_THREAD_W);
+        let time_ends = -time_clear(false);
+        assert!(time_ends <= thread.0, "the time ends left of the thread");
+        assert_eq!(
+            time_clear(true),
+            space::M,
+            "a person's message has no thread"
+        );
+        // It needs that much more room before it goes in the corner.
+        let gutter = 40.0 + space::M;
+        assert_eq!(when_at(gutter, 40.0, true, None, 500.0), WhenAt::Outside);
+        assert_eq!(when_at(gutter, 40.0, false, None, 500.0), WhenAt::Corner);
+    }
+
+    #[test]
     fn a_messages_time_says_the_day_when_it_isnt_today() {
         let at = |y, mo, d, h, mi| {
             chrono::Local
@@ -28797,17 +28816,27 @@ fn row_room(width: f32, column: f32) -> (f32, f32) {
 }
 
 /// Where a message's time goes: outside, left of it, while the room there (`gutter`)
-/// takes the time `time` wide; otherwise for the person's message left of its bubble,
-/// `bubble` wide, while the row's `content` has room for it there, and else in the
-/// corner.
+/// takes the time `time` wide, clear of a reply's thread (`time_clear`); otherwise for
+/// the person's message left of its bubble, `bubble` wide, while the row's `content` has
+/// room for it there, and else in the corner.
 fn when_at(gutter: f32, time: f32, person: bool, bubble: Option<f32>, content: f32) -> WhenAt {
-    let need = time + space::M;
-    if gutter >= need {
+    if gutter >= time + time_clear(person) {
         WhenAt::Outside
-    } else if person && bubble.is_some_and(|b| content - b >= need) {
+    } else if person && bubble.is_some_and(|b| content - b >= time + space::M) {
         WhenAt::BesideBubble
     } else {
         WhenAt::Corner
+    }
+}
+
+/// How far left of the column a message's time ends, when it's outside: a gap, and for
+/// an agent's reply its thread too, which hangs there (`REPLY_HANG`), so nothing is ever
+/// drawn over the time (LOO-450).
+fn time_clear(person: bool) -> f32 {
+    if person {
+        space::M
+    } else {
+        REPLY_HANG + space::M
     }
 }
 
@@ -29590,6 +29619,7 @@ fn chat_row(i: &RowInputs, this: WeakEntity<Loom>) -> Stateful<Div> {
             .child(when)
     });
     let top = if joined.above { 0.0 } else { space::XS } + 4.0;
+    let person_row = matches!(row, Row::Message(m) if m.role == "person");
     let (beside, when) = match when_at {
         WhenAt::BesideBubble => (
             time.map(|t| t.top(px(4.0)).right(relative(1.0)).pr(px(space::M))),
@@ -29601,7 +29631,7 @@ fn chat_row(i: &RowInputs, this: WeakEntity<Loom>) -> Stateful<Div> {
                 t.top(px(top))
                     .right(relative(1.0))
                     .mr(px(-HOVER_REACH))
-                    .pr(px(space::M))
+                    .pr(px(time_clear(person_row)))
             }),
         ),
         WhenAt::Corner => (
@@ -29613,7 +29643,7 @@ fn chat_row(i: &RowInputs, this: WeakEntity<Loom>) -> Stateful<Div> {
                     .py(px(2.0))
                     .rounded(px(radius::ROW))
                     .bg(p.bg);
-                if matches!(row, Row::Message(m) if m.role == "person") {
+                if person_row {
                     t.left(px(HOVER_REACH - space::XS))
                 } else {
                     t.right(px(HOVER_REACH - space::XS))
