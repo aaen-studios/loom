@@ -1020,6 +1020,182 @@ fn tools_request(link: Link, c: mut Code, id: Json, method: String, params: Json
 }
 
 // Serves MCP on standard input and output until input ends.
+// --- What a routine's script calls (PLAN.md, "Routines") ---
+//
+//     loom tool SERVER                      the tools SERVER offers this routine's agent
+//     loom tool SERVER TOOL [JSON | KEY=VALUE ...]
+//                                           calls TOOL as the person, under the agent's rules
+//     loom state get KEY | set KEY VALUE | delete KEY | list
+//     loom post [--notify] TEXT ...         posts TEXT in the chat the routine posts in
+//
+// They reach the instance with the grant a routine's gate is given while it
+// runs, LOOM_URL and LOOM_MCP_TOKEN, and nowhere else.
+
+// Whether `cmd` is one of the commands a routine's script calls.
+pub fn is_gate_command(cmd: String) -> bool {
+    return cmd == "tool" or cmd == "state" or cmd == "post"
+}
+
+fn gate_link() -> Link? {
+    let base = env.variable(String("LOOM_URL")) else return none
+    let token = env.variable(String("LOOM_MCP_TOKEN")) else return none
+    return some(Link { base: base, token: token })
+}
+
+// What KEY=VALUE arguments give a tool: each value as JSON when it reads as
+// JSON, or else as text. One argument that's an object is the arguments whole.
+pub fn tool_args(words: List<String>) -> Json ! Error {
+    if words.len() == 1 and words[0].trim().starts_with("\{") {
+        let j = try parse(words[0].copy())
+        if not is_object(j.copy()) { fail "the arguments are a JSON object" }
+        return j
+    }
+    var o = Obj.new()
+    for w in words {
+        let eq = w.find("=") else { fail "give the arguments as one JSON object, or as KEY=VALUE, not {w}" }
+        let key = w[..eq].copy()
+        let text = w[eq + 1..].copy()
+        let value = match parse(text.copy()) {
+            ok(v) => v,
+            err(_) => Json.Str(text),
+        }
+        o.m.insert(key, value)
+    }
+    return o.done()
+}
+
+// How a tool's value prints: text as it is, anything else as JSON.
+fn printed(value: Json) -> String {
+    if let Json.Str(s) = value { return s.copy() }
+    return "{value}"
+}
+
+// Runs `loom tool`, `loom state` or `loom post` (`words`, the command first),
+// printing what it gives, and gives the exit status.
+pub fn gate_command(words: List<String>) -> u8 {
+    let link = gate_link() else {
+        eprintln("loom {words[0]}: this runs in a routine's script, which loom gives LOOM_URL and LOOM_MCP_TOKEN.")
+        return 2
+    }
+    let cmd = words[0].copy()
+    let rest = words[1..].copy()
+    match gate_run(link, cmd.copy(), rest) {
+        ok(out) => {
+            if out.len() > 0 { println(out) }
+            return 0
+        },
+        err(e) => {
+            eprintln("loom {cmd}: {e}")
+            return 1
+        },
+    }
+}
+
+fn gate_run(link: Link, cmd: String, words: List<String>) -> String ! Error {
+    if cmd == "state" { return try state_run(link, words) }
+    if cmd == "post" {
+        var notify = false
+        var words_said = List<String>()
+        for w in words {
+            if w == "--notify" { notify = true } else { words_said.push(w.copy()) }
+        }
+        let text = words_said.join(" ")
+        if text.trim().len() == 0 { fail "say what to post: loom post [--notify] TEXT" }
+        let answer = try gate_send(link, "/api/mcp/post", Obj.new().s("text", text).b("notify", notify).done())
+        _ = answer
+        return String()
+    }
+    if words.len() == 0 { fail "name the server: loom tool SERVER [TOOL [ARGUMENTS]]" }
+    return try tool_run(link, words)
+}
+
+// A POST to the instance that answers JSON or an error with its message.
+fn gate_send(link: Link, path: str, body: Json) -> Json ! Error {
+    var req = post("{link.base}{path}", link.headers(), "{body}".to_bytes(), CALL_WAIT, MAX_ANSWER)
+    let r = try req.wait()
+    let text = String.from_utf8(r.body) ?? String()
+    let j = match parse(text.copy()) {
+        ok(v) => v,
+        err(_) => Json.Null,
+    }
+    if r.status != 200 { fail str_at(at(j, "error"), "message") ?? "the instance answered {r.status}: {text}" }
+    return j
+}
+
+fn state_run(link: Link, words: List<String>) -> String ! Error {
+    let op = if words.len() > 0 { words[0].copy() } else { String() }
+    if op == "list" and words.len() == 1 { return "{at(try gate_send(link, "/api/mcp/state", Obj.new().s("op", op).done()), "state")}" }
+    if op == "get" and words.len() == 2 {
+        let v = at(try gate_send(link, "/api/mcp/state", Obj.new().s("op", op).s("key", words[1].copy()).done()), "value")
+        return v.as_str() ?? String()
+    }
+    if op == "delete" and words.len() == 2 {
+        _ = try gate_send(link, "/api/mcp/state", Obj.new().s("op", op).s("key", words[1].copy()).done())
+        return String()
+    }
+    if op == "set" and words.len() >= 3 {
+        _ = try gate_send(link, "/api/mcp/state", Obj.new().s("op", op).s("key", words[1].copy()).s("value", words[2..].join(" ")).done())
+        return String()
+    }
+    fail "loom state get KEY, set KEY VALUE, delete KEY or list"
+}
+
+fn tool_run(link: Link, words: List<String>) -> String ! Error {
+    let name = words[0].copy()
+    let given = try link.fetch("/api/mcp/servers", 30000)
+    var spec = Json.Null
+    var names = List<String>()
+    if let Json.Array(specs) = at(given.copy(), "servers") {
+        for s in specs {
+            let n = str_at(s.copy(), "name") ?? String()
+            if n == name { spec = s.copy() }
+            names.push(n)
+        }
+    }
+    if spec == Json.Null {
+        let has = if names.len() == 0 { String("none") } else { names.join(", ") }
+        fail "this routine's agent has no MCP server {name}. It has: {has}"
+    }
+    var c = Code { on: true, deno: String(), loaded: true, tools: List<Tool>(), servers: Map<String, Server>(), trouble: List<String>(), said_trouble: List<String>(), signing: List<String>(), added: false, runs: 0, folder: String(), warm: none, spare: none, spare_at: none, done: none, known_icons: at(given, "icons"), own_at: none, own_names: String() }
+    c.take_in(link, [spec])
+    if c.signing.contains(name.copy()) {
+        c.stop()
+        fail "{name} needs your person to sign in: they do it in loom, on the MCP servers page"
+    }
+    if c.trouble.len() > 0 and not c.servers.contains(name.copy()) {
+        let why = c.trouble.join("; ")
+        c.stop()
+        fail "{why}"
+    }
+    if words.len() == 1 {
+        var lines = List<String>()
+        for t in c.tools {
+            let what = t.description.split("\n")[0].trim().copy()
+            lines.push("{t.name}{if t.read_only { "  (only reads)" } else { "" }}  {what}")
+        }
+        c.stop()
+        return lines.join("\n")
+    }
+    let tool = words[1].copy()
+    let args = match tool_args(words[2..].copy()) {
+        ok(a) => a,
+        err(e) => {
+            c.stop()
+            fail "{e}"
+        },
+    }
+    let path = "{codemode.space_of(name.copy())}.{codemode.ident(tool.copy())}"
+    let out = match c.call(link, path, args) {
+        ok(v) => printed(v),
+        err(e) => {
+            c.stop()
+            fail "{e}"
+        },
+    }
+    c.stop()
+    return out
+}
+
 pub fn serve() ! Error {
     let base = env.variable(String("LOOM_URL")) else { fail "LOOM_URL isn't set: loom mcp is started by loom's instance" }
     let token = env.variable(String("LOOM_MCP_TOKEN")) else { fail "LOOM_MCP_TOKEN isn't set: loom mcp is started by loom's instance" }
@@ -1034,6 +1210,19 @@ pub fn serve() ! Error {
         }
     }
     c.stop()
+}
+
+@test
+fn a_scripts_tool_arguments() {
+    assert("{tool_args([String("query=is:unread"), String("max=10"), String("labels=[\"a\"]")])!}" == #"{"query":"is:unread","max":10,"labels":["a"]}"#)
+    assert("{tool_args([String(#"{"text":"hi"}"#)])!}" == #"{"text":"hi"}"#)
+    assert("{tool_args(List<String>())!}" == "\{\}")
+    let bad = match tool_args([String("nothing")]) {
+        ok(_) => false,
+        err(_) => true,
+    }
+    assert(bad)
+    assert(is_gate_command(String("tool")) and is_gate_command(String("post")) and not is_gate_command(String("serve")))
 }
 
 @test

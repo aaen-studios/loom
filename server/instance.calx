@@ -1053,6 +1053,26 @@ struct GateWait {
     came: String
     at: i64    // when it was due
     seconds: i64    // the gate's timeout
+    token: String    // its grant to loom tool, loom state and loom post, while it runs
+    posted: List<String>    // what its script posted with loom post, oldest first
+    test: Waiter?    // for a test run (routine.test): who hears how it went; it posts and keeps nothing
+    wrote: List<String>    // a test run's loom state writes, which aren't kept
+}
+
+// What a gate's first line chose for its run, as its routine lets it
+// (Instance.gate_choice): another agent's id, a model and an effort, each ""
+// for the routine's own; what it asked for that the routine doesn't let it
+// choose; and all of it in words, for the run's history.
+struct GateChoice {
+    agent: String
+    model: String
+    effort: String
+    refused: List<String>
+    words: String
+}
+
+fn no_choice() -> GateChoice {
+    return GateChoice { agent: String(), model: String(), effort: String(), refused: List<String>(), words: String() }
 }
 
 // What runs a routine in a session of its own needs, beside the routine's
@@ -1086,6 +1106,9 @@ struct QuietTurn {
     posted: List<String>    // what its agent posted, oldest first
     step: String    // for a step of the routine's flow, its name, and the routine's run it goes on from; "" for the routine's own run
     of: String
+    model: String    // what its gate chose for this run, over the routine's: values its program takes, or ""
+    effort: String
+    other: bool    // its gate handed the run to another agent, whose program the routine's own picks aren't for
 }
 
 // A chat the person wrote in, which pauses `at` unless something more is
@@ -1367,6 +1390,7 @@ struct Grant {
     user: String
     agent: String
     conversation: String    // the session's, so a tool call finds its run
+    gate: String    // for a routine's gate, the run it's for: it reaches the person's MCP servers (loom tool) and its routine's state and posts, and asks no one
 }
 
 // A device that used a code another device showed (protocol.md, "Adding a device"),
@@ -1697,7 +1721,13 @@ fn install_text(domain: String) -> String {
 fn scheduled(r: Json) -> String {
     let zone = if routines.by_clock(at(r.copy(), "schedule")) { " ({str_at(r.copy(), "tz") ?? String("UTC")} time)" } else { String() }
     var text = "Scheduled: {str_at(r.copy(), "name") ?? String()}, {str_at(r.copy(), "when") ?? String()}{zone}, as routine {str_at(r.copy(), "id") ?? String()}."
-    if let g = routines.gate_of(r.copy()) { text.push_str(" Its gate, `{g.command}`, runs first, and its agent wakes only when it prints something.") }
+    if let g = routines.gate_of(r.copy()) {
+        if bool_at(r.copy(), "script_only") == some(true) {
+            text.push_str(" It runs {routines.gate_words(g)} only, and wakes no agent: the script posts with loom post, or ends quiet. Try it with run_command routine.test.")
+        } else {
+            text.push_str(" Its gate, {routines.gate_words(g)}, runs first, and its agent wakes only when it prints something. Try it with run_command routine.test.")
+        }
+    }
     let model = str_at(r.copy(), "model") ?? String()
     let effort = str_at(r.copy(), "effort") ?? String()
     if model.len() > 0 or effort.len() > 0 { text.push_str(" Its runs use {if model.len() > 0 { model } else { String("its agent's model") }}, at {if effort.len() > 0 { effort } else { String("its agent's effort") }}.") }
@@ -3846,7 +3876,7 @@ impl Instance {
         i.acting = i.call_actions.remove(call) ?? 0
         let site = if host.len() > 0 { host.copy() } else { String("a file on this computer") }
         let action = Obj.new().s("name", String("browser.fill")).j("args", Obj.new().s("secret", f.name.copy()).s("site", host).s("ref", f.ref_id.copy()).b("submit", f.submit).s("agent", f.agent.copy()).done()).done()
-        let g = Grant { user: f.user.copy(), agent: f.agent.copy(), conversation: String() }
+        let g = Grant { user: f.user.copy(), agent: f.agent.copy(), conversation: String(), gate: String() }
         let answer = match i.ask_person(req.copy(), g, "Fill your secret {f.name} on {site}", "other", action) {
             ok(a) => a,
             err(e) => some(tool_error("{e}")),
@@ -4926,7 +4956,7 @@ impl Instance {
         }
         if token.len() == 0 {
             token = bytes.hex(random_bytes(24))
-            i.grants.insert(token.copy(), Grant { user: user.copy(), agent: agent.copy(), conversation: conversation.copy() })
+            i.grants.insert(token.copy(), Grant { user: user.copy(), agent: agent.copy(), conversation: conversation.copy(), gate: String() })
         }
         let address = i.server.url()
         var base = if address.ends_with("/") { address[..address.len() - 1].copy() } else { address }
@@ -5724,9 +5754,9 @@ impl Instance {
     fn mcp_route(i: mut Instance, req: Request) -> Response? ! Error {
         let h = req.header(String("Authorization")) ?? String()
         let token = if h.starts_with("Bearer ") { h[7..].copy() } else { String() }
-        var grant = Grant { user: String(), agent: String(), conversation: String() }
+        var grant = Grant { user: String(), agent: String(), conversation: String(), gate: String() }
         if let g = i.grants.find(token.copy()) {
-            grant = Grant { user: g.user.copy(), agent: g.agent.copy(), conversation: g.conversation.copy() }
+            grant = Grant { user: g.user.copy(), agent: g.agent.copy(), conversation: g.conversation.copy(), gate: g.gate.copy() }
         } else {
             return some(http_error(401, "unauthorized", String("That isn't a token for loom's tools.")))
         }
@@ -5735,12 +5765,24 @@ impl Instance {
             if i.tools_body.len() == 0 { i.tools_body = "{Obj.new().j("tools", Json.Array(tools.all())).done()}" }
             return some(Response.new(200, String("application/json"), i.tools_body.to_bytes()))
         }
+        // A routine's gate: its routine's state and posts, and only the person's
+        // MCP servers' tools, never loom's own (PLAN.md, "Routines").
+        if req.path == "/api/mcp/state" or req.path == "/api/mcp/post" {
+            if grant.gate.len() == 0 or req.method != "POST" { return some(http_error(404, "not_found", String("There's nothing here."))) }
+            let body = match parse(req.text() ?? String()) {
+                ok(j) => j,
+                err(_) => return some(http_error(400, "bad_request", String("The body isn't JSON."))),
+            }
+            if req.path == "/api/mcp/state" { return some(try i.gate_state(grant, body)) }
+            return some(try i.gate_post(grant, body))
+        }
         for path in ["/api/mcp/servers", "/api/mcp/deno", "/api/mcp/allow", "/api/mcp/done", "/api/mcp/token", "/api/mcp/sign_in", "/api/mcp/icon", "/api/mcp/listed"] {
             if req.path == path { return try i.code_route(req, grant, token) }
         }
         if req.path != "/api/mcp/call" or req.method != "POST" {
             return some(http_error(404, "not_found", String("There's nothing here.")))
         }
+        if grant.gate.len() > 0 { return some(json_response(200, tool_error(String("A routine's script reaches your person's MCP servers with loom tool, not loom's own tools.")))) }
         let body = match parse(req.text() ?? String()) {
             ok(j) => j,
             err(_) => return some(http_error(400, "bad_request", String("The body isn't JSON."))),
@@ -5808,6 +5850,8 @@ impl Instance {
             for (_, p) in i.procs {
                 if p.agent == g.agent { boxed = p.boxed }
             }
+            // A gate runs where its agent's commands do.
+            if g.gate.len() > 0 { boxed = i.place(g.user.copy(), agent.copy()) != none }
             let servers = i.agent_servers(g.user.copy(), agent, true, boxed)
             // What the icons kept of each are known by, so loom mcp fetches
             // them only when the server gives others.
@@ -5914,7 +5958,8 @@ impl Instance {
         let read_only = bool_at(body.copy(), "read_only") ?? false
         let args = at(body, "arguments")
         let agent = try i.store.agent(g.user.copy(), g.agent.copy()) else return some(json_response(200, tool_error(String("You were deleted."))))
-        let mode = defaults.mode_of(agent, try i.store.defaults(g.user.copy()))
+        let mode = defaults.mode_of(agent.copy(), try i.store.defaults(g.user.copy()))
+        if g.gate.len() > 0 { return some(try i.gate_allow(g, token, agent, mode, server, tool, read_only, args, body)) }
         // A script itself, before it runs: the agent program doesn't ask about
         // run_code (acp.session_meta), so in `ask`, which asks about
         // everything, loom does. Any other mode puts each call in it instead.
@@ -5995,6 +6040,146 @@ impl Instance {
             },
             none => none,
         }
+    }
+
+    // --- A routine's script reaching out (PLAN.md, "Routines") ---
+
+    // The gate running for run `run`: its routine, whether it's a test run, what
+    // ran it, and the conversation its routine posts in; none once it has ended.
+    fn gate_running(i: Instance, run: String) -> (String, bool, String, String)? {
+        if let w = i.routine_work.gates.find(run) {
+            let testing = if let _ = w.test { true } else { false }
+            return some((w.routine.copy(), testing, w.by.copy(), w.conversation.copy()))
+        }
+        return none
+    }
+
+    // `loom tool` from a routine's gate: a call to one of the person's MCP
+    // servers, under the same rules as its agent's own calls in a script. The
+    // person's rules come first, then the agent's permission mode, of kind read
+    // for a tool marked readOnlyHint and other for the rest; and a tool that
+    // sends as the person goes only where a rule allows it. A gate runs with no
+    // one watching, so what would ask the person is refused instead, saying how
+    // to allow it, and a test run only reads.
+    fn gate_allow(i: mut Instance, g: Grant, token: String, agent: Json, mode: String, server: String, tool: String, read_only: bool, args: Json, body: Json) -> Response ! Error {
+        let (_, testing, by, _) = match i.gate_running(g.gate.copy()) {
+            some(x) => x,
+            none => return json_response(200, tool_error(String("The routine's script has finished."))),
+        }
+        let starter = if by == "webhook" or by == "event" { "webhook" } else { "routine" }
+        let agent_name = str_at(agent, "name") ?? String("its agent")
+        if bool_at(body.copy(), "script") == some(true) { return json_response(200, tool_error(String("A routine's script runs no scripts of Code Mode."))) }
+        if testing and not read_only { return json_response(200, tool_error("A test run only reads, and {server}.{tool} can change something: it runs in the routine's real runs.")) }
+        if not read_only {
+            var props = List<String>()
+            if let Json.Array(xs) = at(body.copy(), "props") {
+                for x in xs {
+                    if let p = x.as_str() { props.push(p) }
+                }
+            }
+            let says = str_at(body.copy(), "sends") ?? String()
+            if i.sends(g.user.copy(), server.copy(), tool.copy(), args.copy(), props, says) {
+                var sending = rules.act()
+                sending.tool = some("{server}.{tool}")
+                sending.effect = String("write")
+                sending.started_by = String(starter)
+                let said = try i.judge(g.user.copy(), g.agent.copy(), String(), sending)
+                if said.then != "allow" { return json_response(200, tool_error("{tool} sends as your person, and a routine's script sends only where one of their rules allows it: a rule allowing {server}.{tool} for {agent_name}, on the Rules page.")) }
+            }
+        }
+        let kind = if read_only { "read" } else { "other" }
+        let act: i64 = if read_only { 0 } else { i.record(g.user.copy(), g.agent.copy(), "tool", "{server}: {tool}", args.copy(), String("routine")) }
+        var touched = rules.act()
+        touched.tool = some("{server}.{tool}")
+        touched.effect = String(if read_only { "read" } else { "write" })
+        touched.started_by = String(starter)
+        let v = try i.judge(g.user.copy(), g.agent.copy(), String(), touched)
+        if v.then == "deny" {
+            if act > 0 { i.settle(act, String("refused"), "rule {str_at(v.rule.copy(), "id") ?? String()}: {v.why}") }
+            return json_response(200, tool_error(v.why))
+        }
+        if v.then == "allow" or (v.then != "ask" and acp.allows(mode, String(kind))) {
+            if act > 0 { i.code_acts.insert(act, token.copy()) }
+            let said = if v.then == "allow" { v.why.copy() } else { String("Allowed by its agent's permission mode.") }
+            return json_response(200, merge(tool_text(said), Obj.new().i("act", act).done()))
+        }
+        let why = "{server}.{tool} needs your person's yes, and a routine's script asks no one. A rule allowing {server}.{tool} for {agent_name}, on the Rules page, lets it; or leave it to the agent, which can ask."
+        if act > 0 { i.settle(act, String("refused"), why.copy()) }
+        return json_response(200, tool_error(why))
+    }
+
+    // Why `value` can't be `key` of routine `routine`'s state, or "": a key of
+    // 1 to 200 bytes, a value up to 64 KiB, and 1 MB in all.
+    fn state_fits(i: Instance, user: String, routine: String, key: String, value: String?) -> String ! Error {
+        if key.len() == 0 or key.len() > 200 { return String("A key is 1 to 200 bytes.") }
+        let v = value else return String()
+        if v.len() > 65536 { return String("A value is up to 64 KiB.") }
+        let rest = try i.store.routine_state_size(user, routine, key.copy())
+        if rest + i64.wrap(key.len() + v.len()) > 1000000 { return String("A routine's state holds up to 1 MB in all.") }
+        return String()
+    }
+
+    fn state_json(i: Instance, user: String, routine: String) -> Json ! Error {
+        var o = Obj.new()
+        for (k, v) in try i.store.routine_state(user, routine) { o.m.insert(k.copy(), Json.Str(v.copy())) }
+        return o.done()
+    }
+
+    // `loom state` from a routine's gate: `op` get, set, delete or list, with
+    // its `key` and, to set, `value`. A test run's writes aren't kept.
+    fn gate_state(i: mut Instance, g: Grant, body: Json) -> Response ! Error {
+        let (routine, testing, _, _) = match i.gate_running(g.gate.copy()) {
+            some(x) => x,
+            none => return http_error(410, "gone", String("The routine's script has finished.")),
+        }
+        let op = str_at(body.copy(), "op") ?? String()
+        if op == "list" { return json_response(200, Obj.new().j("state", try i.state_json(g.user, routine)).done()) }
+        let key = str_at(body.copy(), "key") ?? String()
+        if op == "get" {
+            for (k, v) in try i.store.routine_state(g.user.copy(), routine.copy()) {
+                if k == key { return json_response(200, Obj.new().s("value", v).done()) }
+            }
+            return json_response(200, Obj.new().j("value", Json.Null).done())
+        }
+        if op != "set" and op != "delete" { return http_error(400, "bad_request", String("op is get, set, delete or list.")) }
+        let value = if op == "set" { str_at(body, "value") } else { none }
+        if op == "set" and value == none { return http_error(400, "bad_request", String("set takes a value, as text.")) }
+        let why = try i.state_fits(g.user.copy(), routine.copy(), key.copy(), value.copy())
+        if why.len() > 0 { return http_error(400, "bad_request", why) }
+        if testing {
+            if let t = mut i.routine_work.gates.find(g.gate.copy()) { t.wrote.push("{op} {key}") }
+            return json_response(200, Obj.new().b("kept", false).done())
+        }
+        try i.store.set_routine_state(g.user, routine, key, value)
+        return json_response(200, Obj.new().b("kept", true).done())
+    }
+
+    // `loom post` from a routine's gate: `text` in the chat where the routine
+    // posts, as its agent's message from the routine, notified with `notify`
+    // when the routine notifies. A post waits for a turn going on there to end,
+    // as an agent's routine_post does. A test run's posts aren't posted.
+    fn gate_post(i: mut Instance, g: Grant, body: Json) -> Response ! Error {
+        let (routine, testing, _, given_conversation) = match i.gate_running(g.gate.copy()) {
+            some(x) => x,
+            none => return http_error(410, "gone", String("The routine's script has finished.")),
+        }
+        var conversation = given_conversation
+        let text = (str_at(body.copy(), "text") ?? String()).trim().copy()
+        if text.len() == 0 or text.len() > POST_MOST { return http_error(400, "bad_request", "Give text, what your person should read, of up to {POST_MOST} bytes.") }
+        if let t = mut i.routine_work.gates.find(g.gate.copy()) { t.posted.push(text.copy()) }
+        if testing { return json_response(200, Obj.new().b("posted", false).done()) }
+        let r = try i.store.routine(g.user.copy(), routine.copy()) else return http_error(410, "gone", String("The routine was deleted."))
+        if conversation.len() == 0 { conversation = str_at(try i.routine_chat(g.user.copy(), r.copy()), "id") ?? String() }
+        let rname = str_at(r.copy(), "name") ?? String("A routine")
+        let notify = bool_at(body, "notify") == some(true) and bool_at(r.copy(), "notify") != some(false)
+        i.log(g.user.copy(), g.agent.copy(), "routine", "Its script posted for the routine {rname}", String("routine"))
+        let h = HeldPost { user: g.user.copy(), conversation: conversation.copy(), agent: g.agent.copy(), routine: routine, name: rname, text: text, notify: notify }
+        if i.answering(g.user, conversation) != none {
+            i.routine_work.held.push(h)
+        } else {
+            try i.post_in_chat(h)
+        }
+        return json_response(200, Obj.new().b("posted", true).done())
     }
 
     // Where Code Mode's Deno is: in the instance's acp/ folder, which members'
@@ -7552,6 +7737,12 @@ impl Instance {
             try i.test_mcp(Waiter { socket: none, id: call }, g.user, a)
             return none
         }
+        if name == "routine.test" {
+            let call = try i.store.new_id("tc")
+            i.hold_call(call.copy(), req.copy())
+            try i.test_routine(Waiter { socket: none, id: call }, g.user, g.agent, a)
+            return none
+        }
         let reads = name.ends_with(".list") or name.ends_with(".get") or name.ends_with(".search") or name.ends_with(".revisions")
         let result = try i.command(g.user.copy(), g.agent.copy(), name.copy(), a)
         if not reads {
@@ -8826,7 +9017,7 @@ impl Instance {
             if rr.user == user and rr.routine == id { going = true }
         }
         for (_, g) in i.routine_work.gates {
-            if g.user == user and g.routine == id { going = true }
+            if g.user == user and g.routine == id and g.test == none { going = true }
         }
         if going {
             try i.routine_skipped(user, r, conversation_id, by, t, String(routines.STILL_RUNNING), false)
@@ -8836,26 +9027,74 @@ impl Instance {
         // With a gate, it runs first, and the agent wakes only if it says
         // something is new (gate_done).
         if let checks = routines.gate_of(r.copy()) {
-            try i.open_gate(user, r, conversation_id, run_id.copy(), by, came, t, checks)
+            try i.open_gate(user, r, conversation_id, run_id.copy(), by, came, t, checks, none)
             return Answer.Value(Obj.new().s("run", run_id).done())
         }
-        try i.start_routine(user, r, conversation, run_id.copy(), by, came, String(), t)
+        try i.start_routine(user, r, conversation, run_id.copy(), by, came, String(), t, no_choice(), List<String>())
         return Answer.Value(Obj.new().s("run", run_id).done())
+    }
+
+    // routine.test: runs routine `id`'s script now as a test, or the script
+    // `gate` given (as routine.put takes it), before the routine is kept, for
+    // `w` to hear how it went (PLAN.md, "Routines"). Nothing of it is kept: its
+    // posts aren't posted, its state isn't written, and its agent isn't woken.
+    // Its loom tool calls only read.
+    fn test_routine(i: mut Instance, w: Waiter, user: String, device: String, args: Json) ! Error {
+        var r = Json.Null
+        if let id = str_at(args.copy(), "id") {
+            r = try i.store.routine(user.copy(), id.copy()) ?? Json.Null
+            if r == Json.Null {
+                i.answer_cmd(w, Answer.Refused(String("not_found"), "There's no routine {id}."))
+                return
+            }
+        }
+        let given = at(args.copy(), "gate")
+        if given != Json.Null {
+            let (kept, why) = routines.read_gate(given)
+            if why.len() > 0 {
+                i.answer_cmd(w, Answer.Refused(String("bad_request"), why))
+                return
+            }
+            r = merge(r, Obj.new().j("gate", kept).done())
+        }
+        // A routine not kept yet runs as the agent it names would, or the caller.
+        if str_at(r.copy(), "agent") == none or str_at(args.copy(), "agent") != none {
+            let key = str_at(args.copy(), "agent") ?? device.copy()
+            let agent = try i.find_agent(user.copy(), key.copy()) else {
+                i.answer_cmd(w, Answer.Refused(String("not_found"), "There's no agent {key}."))
+                return
+            }
+            r = merge(r, Obj.new().s("agent", str_at(agent, "id") ?? String()).done())
+        }
+        if bool_at(args, "script_only") == some(true) { r = merge(r, Obj.new().b("script_only", true).done()) }
+        let checks = routines.gate_of(r.copy()) else {
+            i.answer_cmd(w, Answer.Refused(String("bad_request"), String("There's no script to test: give gate, a command or a Calx script.")))
+            return
+        }
+        let run_id = try i.store.new_id("test")
+        try i.open_gate(user, r, String(), run_id, device, String(), now(), checks, some(w.copy()))
     }
 
     // Runs routine `r`'s gate for its run `run_id`, due at `t`, off the loop:
     // where its agent's own commands run, as its agent would run it. The run is
     // kept as running, and as one that hasn't woken its agent, until the gate
-    // ends (gate_done).
-    fn open_gate(i: mut Instance, user: String, r: Json, conversation: String, run_id: String, by: String, came: String, t: i64, checks: routines.Gate) ! Error {
+    // ends (gate_done). While it runs, it has a grant of its own for loom tool,
+    // loom state and loom post. A test run (`test`, from routine.test) keeps
+    // nothing.
+    fn open_gate(i: mut Instance, user: String, r: Json, conversation: String, run_id: String, by: String, came: String, t: i64, checks: routines.Gate, test: Waiter?) ! Error {
         let id = str_at(r.copy(), "id") ?? String()
         let name = str_at(r.copy(), "name") ?? String("A routine")
         let agent_id = str_at(r.copy(), "agent") ?? String()
-        try i.store.put_routine_run(user.copy(), id.copy(), Obj.new().s("run", run_id.copy()).s("routine", id.copy()).s("conversation", conversation.copy()).s("by", by.copy()).i("at", t).i("started", now()).s("status", String("running")).b("woke", false).done())
-        try i.routine_ran(user.copy(), merge(r.copy(), Obj.new().s("conversation", conversation.copy()).j("last", Obj.new().i("at", t).s("status", String("running")).s("run", run_id.copy()).done()).done()))
-        i.routine_work.gates.insert(run_id.copy(), GateWait { user: user.copy(), routine: id.copy(), conversation: conversation.copy(), by: by.copy(), came: came.copy(), at: t, seconds: checks.seconds })
-        i.log(user.copy(), agent_id.copy(), "routine", "Checked the routine {name}'s gate", by)
-        let job = match i.gate_job(user.copy(), agent_id, run_id.copy(), checks.command.copy(), checks.seconds) {
+        let testing = test != none
+        if not testing {
+            try i.store.put_routine_run(user.copy(), id.copy(), Obj.new().s("run", run_id.copy()).s("routine", id.copy()).s("conversation", conversation.copy()).s("by", by.copy()).i("at", t).i("started", now()).s("status", String("running")).b("woke", false).b("script", bool_at(r.copy(), "script_only") == some(true)).done())
+            try i.routine_ran(user.copy(), merge(r.copy(), Obj.new().s("conversation", conversation.copy()).j("last", Obj.new().i("at", t).s("status", String("running")).s("run", run_id.copy()).done()).done()))
+        }
+        let token = bytes.hex(random_bytes(24))
+        i.grants.insert(token.copy(), Grant { user: user.copy(), agent: agent_id.copy(), conversation: String(), gate: run_id.copy() })
+        i.routine_work.gates.insert(run_id.copy(), GateWait { user: user.copy(), routine: id.copy(), conversation: conversation.copy(), by: by.copy(), came: came.copy(), at: t, seconds: checks.seconds, token: token.copy(), posted: List<String>(), test: test.copy(), wrote: List<String>() })
+        i.log(user.copy(), agent_id.copy(), "routine", if testing { "Tested the script of the routine {name}" } else { "Checked the routine {name}'s gate" }, by)
+        let job = match i.gate_job(user.copy(), agent_id, run_id.copy(), id, checks, token) {
             ok(j) => j,
             err(e) => {
                 i.gate_done(routine_gate.Done { run: run_id.copy(), code: none, out: String(), errors: String(), timed_out: false, broke: "{e}" })
@@ -8865,33 +9104,78 @@ impl Instance {
         routine_gate.start(job, i.routine_work.done.sender(), i.waker)
     }
 
-    // How routine `run`'s gate runs `command`: where its agent's own commands
-    // run, in its folder, and in its sandbox when it has one (PLAN.md,
-    // "Sandboxes"), with the environment its program has, so the gate can do
-    // no more than its agent could.
-    fn gate_job(i: mut Instance, user: String, agent_id: String, run: String, command: String, seconds: i64) -> routine_gate.Job ! Error {
+    // Where `loom` is for a gate on the instance's own computer: a folder with a
+    // `loom` that runs this program (or the desktop app's loom-mcp), which goes
+    // first in the gate's PATH, so `loom tool`, `loom state` and `loom post`
+    // work whatever the computer's PATH has.
+    fn gate_bin(i: Instance) -> String ! Error {
+        let folder = "{try fs.absolute(i.data.copy())}/gate-bin"
+        try fs.make_dir_all(folder.copy())
+        let exe = if i.mcp_exe.len() > 0 and fs.exists(i.mcp_exe.copy()) { i.mcp_exe.copy() } else { current_exe() }
+        let windows = os() == "windows"
+        let path = if windows { "{folder}/loom.cmd" } else { "{folder}/loom" }
+        let wanted = if windows { "@echo off\r\n\"{exe}\" %*\r\n" } else { "#!/bin/sh\nexec \"{exe}\" \"$@\"\n" }
+        let had = if fs.exists(path.copy()) { try fs.read_text(path.copy()) } else { none }
+        if had != some(wanted.copy()) {
+            try fs.write_text(path.copy(), wanted)
+            if not windows { try fs.set_mode(path, 0o755) }
+        }
+        return folder
+    }
+
+    // How routine `routine`'s gate runs for its run `run`: where its agent's own
+    // commands run, in its folder, and in its sandbox when it has one (PLAN.md,
+    // "Sandboxes"), with the environment its program has, so the gate can do no
+    // more than its agent could; with LOOM_URL and LOOM_MCP_TOKEN, its grant, for
+    // loom tool, loom state and loom post. A Calx script is written into the
+    // agent's folder and run with the person's calx.
+    fn gate_job(i: mut Instance, user: String, agent_id: String, run: String, routine: String, checks: routines.Gate, token: String) -> routine_gate.Job ! Error {
         let agent = try i.store.agent(user.copy(), agent_id.copy()) else { fail "its agent was deleted" }
         let program = str_at(agent.copy(), "acp_agent") ?? String()
         let acp_agent = try i.store.acp_agent(program.copy()) else { fail "there's no ACP agent named {program}" }
         let folder = i.agent_folder(user.copy(), agent.copy())
         let place = i.place(user.copy(), agent.copy())
-        let (settings, names) = try i.program_settings(user.copy(), program, acp_agent.env.copy(), place != none)
+        let (settings, given_names) = try i.program_settings(user.copy(), program, acp_agent.env.copy(), place != none)
+        var names = given_names
         var env = List<(String, String)>()
         if let Json.Object(m) = settings {
             for (k, v) in m {
                 if let s = v.as_str() { env.push((k.copy(), s)) }
             }
         }
-        let ms = u64.wrap(seconds) * 1000
+        let address = i.server.url()
+        var base = if address.ends_with("/") { address[..address.len() - 1].copy() } else { address }
+        if let p = place.copy() {
+            if let b = i.boxes { base = b.tools_url(p) }
+        }
+        env.push((String("LOOM_URL"), base))
+        env.push((String("LOOM_MCP_TOKEN"), token.copy()))
+        env.push((String("LOOM_ROUTINE"), routine.copy()))
+        for n in ["LOOM_URL", "LOOM_MCP_TOKEN", "LOOM_ROUTINE"] { names.push(String(n)) }
+        let ms = u64.wrap(checks.seconds) * 1000
+        try fs.make_dir_all(folder.copy())
+        // A Calx script, kept with the routine, goes into its agent's folder each run.
+        let command = checks.command.copy()
+        var calx_file = String()
+        if checks.calx.trim().len() > 0 {
+            try fs.make_dir_all("{folder}/.loom")
+            calx_file = ".loom/routine-{routine}.calx"
+            try fs.write_text("{folder}/{calx_file}", checks.calx.copy())
+        }
         if let p = place {
             let b = i.boxes.copy() else { fail "its agent runs in a sandbox, and this instance has none" }
             try b.ready(p.copy())
             if p.closed() { _ = try i.door(user.copy(), agent.copy()) }
-            let (shell, args) = routines.gate_shell(command, false)
+            let (shell, args) = if calx_file.len() > 0 { routines.calx_run(calx_file.copy()) } else { routines.gate_shell(command, false) }
             let (c, a) = b.wrap(p, folder.copy(), names, shell, args)
             return routine_gate.Job { run: run.copy(), program: c, args: a, env: env, dir: folder, ms: ms }
         }
-        try fs.make_dir_all(folder.copy())
+        let bin = try i.gate_bin()
+        let sep = if os() == "windows" { ";" } else { ":" }
+        env.push((String("PATH"), "{bin}{sep}{variable(String("PATH")) ?? String()}"))
+        if calx_file.len() > 0 {
+            return routine_gate.Job { run: run.copy(), program: String("calx"), args: routines.calx_run(calx_file.copy()).1, env: env, dir: folder, ms: ms }
+        }
         let (shell, args) = routines.gate_shell(command, os() == "windows")
         return routine_gate.Job { run: run.copy(), program: shell, args: args, env: env, dir: folder, ms: ms }
     }
@@ -8904,22 +9188,113 @@ impl Instance {
 
     fn gate_done_in(i: mut Instance, d: routine_gate.Done) ! Error {
         let w = i.routine_work.gates.remove(d.run.copy()) else return
+        _ = i.grants.remove(w.token.copy())
+        // A test run: whoever asked hears how it went, and nothing is kept.
+        if let tester = w.test.copy() {
+            let r = try i.store.routine(w.user.copy(), w.routine.copy()) ?? Json.Null
+            try i.tested(tester, w, r, d)
+            return
+        }
         // Deleted while its gate ran, with its runs.
         let r = try i.store.routine(w.user.copy(), w.routine.copy()) else return
         let agent_id = str_at(r.copy(), "agent") ?? String()
-        let (what, said) = routines.gate_outcome(d.code, d.out, d.errors, d.timed_out, d.broke, w.seconds)
+        let script_only = bool_at(r.copy(), "script_only") == some(true)
+        let (what, said, steer) = routines.gate_end(d.code, d.out.copy(), d.errors.copy(), d.timed_out, d.broke.copy(), w.seconds, script_only)
+        // What it printed, for the routine's page to show as its last output.
+        if let kept = try i.store.routine_run(w.user.copy(), w.routine.copy(), d.run.copy()) {
+            let printed = if d.errors.trim().len() > 0 and what == "failed" { "{d.out.trim()}\n{d.errors.trim()}".trim().copy() } else { d.out.trim().copy() }
+            try i.store.put_routine_run(w.user.copy(), w.routine.copy(), merge(kept, Obj.new().s("printed", routines.cut(printed, routines.SAID_MOST)).done()))
+        }
         if what == "wake" {
-            if try i.store.agent(w.user.copy(), agent_id.copy()) == none {
-                try i.routine_done(RoutineRun { user: w.user.copy(), routine: w.routine.copy() }, d.run, agent_id, w.conversation, String("failed"), some(String("Its agent was deleted.")), String(), String(), List<String>(), String())
+            let choice = try i.gate_choice(w.user.copy(), r.copy(), steer.copy())
+            let run_agent = if choice.agent.len() > 0 { choice.agent.copy() } else { agent_id.copy() }
+            if try i.store.agent(w.user.copy(), run_agent.copy()) == none {
+                try i.routine_done(RoutineRun { user: w.user.copy(), routine: w.routine.copy() }, d.run, agent_id, w.conversation, String("failed"), some(String("Its agent was deleted.")), String(), String(), w.posted, String())
                 return
             }
-            let conversation = try i.routine_chat(w.user.copy(), r.copy())
-            try i.start_routine(w.user, r, conversation, d.run, w.by, w.came, said, w.at)
+            // Handed to another agent, the run goes in that agent's chat.
+            let conversation = if choice.agent.len() > 0 { try i.agent_chat(w.user.copy(), run_agent, str_at(r.copy(), "name") ?? String()) } else { try i.routine_chat(w.user.copy(), r.copy()) }
+            let note = if steer.given { routines.steered_note(routines.gate_words(routines.gate_of(r.copy()) ?? routines.Gate { command: String(), calx: String(), seconds: 0 }), steer) } else { said }
+            try i.start_routine(w.user, r, conversation, d.run, w.by, w.came, note, w.at, choice, w.posted)
             return
         }
         let name = str_at(r, "name") ?? String("A routine")
-        i.log(w.user.copy(), agent_id.copy(), "routine", if what == "quiet" { "The routine {name}'s gate found nothing new" } else { "The routine {name}'s gate failed" }, w.by.copy())
-        try i.routine_done(RoutineRun { user: w.user.copy(), routine: w.routine.copy() }, d.run, agent_id, w.conversation, String("done"), none, what, said, List<String>(), String())
+        let line = if what == "failed" { "The routine {name}'s gate failed" } else if script_only { "The routine {name}'s script ran" } else { "The routine {name}'s gate found nothing new" }
+        i.log(w.user.copy(), agent_id.copy(), "routine", line, w.by.copy())
+        try i.routine_done(RoutineRun { user: w.user.copy(), routine: w.routine.copy() }, d.run, agent_id, w.conversation, String("done"), none, what, said, w.posted, String())
+    }
+
+    // A test run's end (routine.test), for `w` to hear: how it would have gone
+    // (`status`: wake, quiet or failed, with `error`), what it printed, what it
+    // would have posted, the state it would have written, what its first line
+    // asked, and what that would have chosen.
+    fn tested(i: mut Instance, w: Waiter, g: GateWait, r: Json, d: routine_gate.Done) ! Error {
+        let script_only = bool_at(r.copy(), "script_only") == some(true)
+        let (what, said, steer) = routines.gate_end(d.code, d.out.copy(), d.errors.copy(), d.timed_out, d.broke.copy(), g.seconds, script_only)
+        var posts = List<Json>()
+        for p in g.posted { posts.push(Json.Str(p.copy())) }
+        var wrote = List<Json>()
+        for k in g.wrote { wrote.push(Json.Str(k.copy())) }
+        var o = Obj.new().s("status", what.copy()).s("printed", routines.cut(d.out.copy(), routines.SAID_MOST)).s("errors", routines.cut(d.errors.copy(), routines.SAID_MOST)).j("posted", Json.Array(posts)).j("wrote", Json.Array(wrote)).b("steered", steer.given)
+        if what == "failed" { o = o.s("error", said.copy()) }
+        if what == "wake" {
+            let choice = try i.gate_choice(g.user.copy(), r.copy(), steer)
+            o = o.s("chosen", choice.words.copy())
+        }
+        // What it would say in the run's history.
+        let line = if what == "failed" { said.copy() } else if g.posted.len() > 0 { g.posted[0].copy() } else if what == "wake" { String("It would wake its agent.") } else { String("Nothing new.") }
+        o = o.s("said", routines.cut(line, 300))
+        i.answer_cmd(w, Answer.Value(o.done()))
+    }
+
+    // What a gate's first line chose for its run (`s`), as routine `r` lets it
+    // (`gate_may`): another agent, by id, a model and an effort, as values the
+    // run's program takes, each "" for the routine's own, what it asked for that
+    // isn't allowed, and all of it in words for the run's history.
+    fn gate_choice(i: Instance, user: String, r: Json, s: routines.Steer) -> GateChoice ! Error {
+        var c = no_choice()
+        if not s.given { return c }
+        let may = routines.may_of(r.copy())
+        let routine_agent = str_at(r.copy(), "agent") ?? String()
+        var agent = try i.store.agent(user.copy(), routine_agent.copy()) ?? Json.Null
+        var agent_name = String()
+        if s.agent.len() > 0 {
+            let found = try i.find_agent(user.copy(), s.agent.copy()) ?? Json.Null
+            let found_id = str_at(found.copy(), "id") ?? String()
+            if found_id == routine_agent {
+                agent_name = String()
+            } else if found_id.len() > 0 and may.agent.contains(found_id.copy()) {
+                c.agent = found_id
+                agent_name = str_at(found.copy(), "name") ?? String()
+                agent = found
+            } else {
+                c.refused.push("the agent {s.agent}")
+            }
+        }
+        let options = at(agent, "options")
+        var model_name = String()
+        var effort_name = String()
+        let picks: List<(String, str, str)> = [(s.model.copy(), "model", "model"), (s.effort.copy(), "thought_level", "effort")]
+        for (asked, category, what) in picks {
+            if asked.len() == 0 { continue }
+            let (found, _) = routines.offered_value(options.copy(), category, asked.copy())
+            let value = found ?? asked.copy()
+            let allowed = if what == "model" { may.model.contains(value.copy()) } else { may.effort.contains(value.copy()) }
+            if not allowed {
+                c.refused.push("the {what} {asked}")
+                continue
+            }
+            let name = routines.option_name(options.copy(), category, value.copy())
+            if what == "model" {
+                c.model = value
+                model_name = name
+            } else {
+                c.effort = value
+                effort_name = name
+            }
+        }
+        c.words = routines.chosen_words(model_name, effort_name, agent_name, c.refused.copy())
+        return c
     }
 
     // Whether a turn goes on in a conversation, or one just ended there and
@@ -9009,12 +9384,15 @@ impl Instance {
     // the chat, and neither is its answer, only what its agent posts with
     // routine_post. It's a session of its own (start_run_as), given how the
     // routine's last run went and, when its gate woke it, what the gate
-    // printed (`gated`). OpenBot's names for routine_quiet and routine_failed,
-    // in a prompt imported before they were changed on the way, are loom's.
-    fn start_routine(i: mut Instance, user: String, r: Json, conversation: Json, run_id: String, by: String, came: String, gated: String, t: i64) ! Error {
+    // printed (`gated`, or the note a gate that steered its run gives). What the
+    // gate chose (`choice`) is this run's model, effort or agent, and what its
+    // script posted (`posted`) counts as the run's. OpenBot's names for
+    // routine_quiet and routine_failed, in a prompt imported before they were
+    // changed on the way, are loom's.
+    fn start_routine(i: mut Instance, user: String, r: Json, conversation: Json, run_id: String, by: String, came: String, gated: String, t: i64, choice: GateChoice, posted: List<String>) ! Error {
         let id = str_at(r.copy(), "id") ?? String()
         let name = str_at(r.copy(), "name") ?? String("A routine")
-        let agent_id = str_at(r.copy(), "agent") ?? String()
+        let agent_id = str_at(conversation.copy(), "agent") ?? str_at(r.copy(), "agent") ?? String()
         let conversation_id = str_at(conversation.copy(), "id") ?? String()
         var prompt = routines.loom_tools(str_at(r.copy(), "prompt") ?? String())
         if came.len() > 0 { prompt = "{prompt}\n\n{came}" }
@@ -9027,18 +9405,29 @@ impl Instance {
             break
         }
         i.routine_runs.insert(run_id.copy(), RoutineRun { user: user.copy(), routine: id.copy() })
-        i.quiet_turns.insert(run_id.copy(), QuietTurn { routine: id.copy(), posted: List<String>(), step: String(), of: String() })
+        i.quiet_turns.insert(run_id.copy(), QuietTurn { routine: id.copy(), posted: posted.copy(), step: String(), of: String(), model: choice.model.copy(), effort: choice.effort.copy(), other: choice.agent.len() > 0 })
         let how = if by == "schedule" { routines.describe(routines.read(at(r.copy(), "schedule")) ?? routines.Schedule.Every(routines.EVERY_LEAST)) } else if by == "webhook" { String("by its webhook, with what it sent below the prompt") } else if by == "event" { String("by an event outside loom it follows, with what happened below the prompt") } else { String("now, as the person asked") }
         i.log(user.copy(), agent_id, "routine", "Ran the routine {name}", by.copy())
         let has_flow = if let Json.Array(steps) = at(r.copy(), "flow") { steps.len() > 0 } else { false }
-        try i.store.put_routine_run(user.copy(), id.copy(), Obj.new().s("run", run_id.copy()).s("routine", id.copy()).s("conversation", conversation_id.copy()).s("by", by.copy()).i("at", t).i("started", now()).s("status", String("running")).done())
-        try i.routine_ran(user.copy(), merge(r, Obj.new().s("conversation", conversation_id).j("last", Obj.new().i("at", t).s("status", String("running")).s("run", run_id.copy()).done()).done()))
+        // What its gate printed stays with it; what it chose is said in its history.
+        let printed = if let kept = try i.store.routine_run(user.copy(), id.copy(), run_id.copy()) { str_at(kept, "printed") } else { none }
+        var kept_run = Obj.new().s("run", run_id.copy()).s("routine", id.copy()).s("conversation", conversation_id.copy()).s("by", by.copy()).i("at", t).i("started", now()).s("status", String("running")).maybe("printed", printed)
+        if choice.words.len() > 0 { kept_run = kept_run.s("chosen", choice.words.copy()) }
+        if choice.agent.len() > 0 { kept_run = kept_run.s("agent", choice.agent.copy()) }
+        if choice.model.len() > 0 { kept_run = kept_run.s("model", choice.model.copy()) }
+        if choice.effort.len() > 0 { kept_run = kept_run.s("effort", choice.effort.copy()) }
+        try i.store.put_routine_run(user.copy(), id.copy(), kept_run.done())
+        // The conversation it last posted in is the routine's own, not another agent's it was handed to.
+        let posts_in = if choice.agent.len() > 0 { str_at(r.copy(), "conversation") ?? String() } else { conversation_id.copy() }
+        try i.routine_ran(user.copy(), merge(r.copy(), Obj.new().s("conversation", posts_in).j("last", Obj.new().i("at", t).s("status", String("running")).s("run", run_id.copy()).done()).done()))
         let from = "the person's routine \"{name}\", run {how}. The person set it up, but isn't writing this"
         var note = routines.quiet_note(has_flow)
         if last.len() > 0 { note = "{note}\n\n{last}" }
-        if gated.len() > 0 {
-            let command = if let g = routines.gate_of(r.copy()) { g.command } else { String() }
-            note = "{note}\n\n{routines.gate_note(command, gated)}"
+        if gated.starts_with("[loom: ") {
+            note = "{note}\n\n{gated}"
+        } else if gated.len() > 0 {
+            let what = if let g = routines.gate_of(r.copy()) { routines.gate_words(g) } else { String("its command") }
+            note = "{note}\n\n{routines.gate_note(what, gated)}"
         }
         try i.start_run(user, conversation, run_id.copy(), String(), prompt, List<Json>(), from, note, if by == "webhook" or by == "event" { "webhook" } else { "routine" })
         try i.store.mark_run_routine(run_id, id)
@@ -9095,10 +9484,40 @@ impl Instance {
     // it costs as routine.list says it.
     fn routine_ran(i: Instance, user: String, r: Json) ! Error {
         try i.store.put_routine(user.copy(), r.copy())
+        try i.event(user.copy(), "routine.updated", Obj.new().j("routine", try i.routine_now(user, r)).done())
+    }
+
+    // Routine `r` as routine_shown gives it, with what it costs now.
+    fn routine_now(i: Instance, user: String, r: Json) -> Json ! Error {
         let t = now()
         var cost = routines.cost(0, 0, 0, t, t)
         for (_, runs, quiet, tokens, oldest) in try i.store.routine_costs(user.copy(), t - routines.COST_DAYS * 86400000, str_at(r.copy(), "id") ?? String()) { cost = routines.cost(runs, quiet, tokens, oldest, t) }
-        try i.event(user, "routine.updated", Obj.new().j("routine", merge(routines.shown(r, i.minute_ms), Obj.new().j("cost", cost).done())).done())
+        return try i.routine_shown(user, r, cost)
+    }
+
+    // Routine `r` as routine.list and routine.updated give it: with when it runs
+    // next, what it costs (`cost`), and what its script saves, this week and the
+    // same week four weeks ago (`cost.saves`, `cost.before`), and what its gate
+    // may choose in words (`gate_may_said`).
+    fn routine_shown(i: Instance, user: String, r: Json, cost: Json) -> Json ! Error {
+        let id = str_at(r.copy(), "id") ?? String()
+        let today = routines.day_of(now())
+        var saves = routines.savings(0, 0, 0, 0, 0)
+        var before = routines.savings(0, 0, 0, 0, 0)
+        for (_, runs, zero, woke, tokens, posts) in try i.store.routine_days(user.copy(), today - routines.COST_DAYS + 1, today + 1, id.copy()) { saves = routines.savings(runs, zero, woke, tokens, posts) }
+        for (_, runs, zero, woke, tokens, posts) in try i.store.routine_days(user.copy(), today - 4 * routines.COST_DAYS + 1, today - 3 * routines.COST_DAYS + 1, id.copy()) { before = merge(routines.savings(runs, zero, woke, tokens, posts), Obj.new().i("runs", runs).i("tokens", tokens).done()) }
+        let with_saves = merge(cost, Obj.new().j("saves", saves).j("before", before).done())
+        // What its gate may choose, by name.
+        let may = routines.may_of(r.copy())
+        let agent = try i.store.agent(user.copy(), str_at(r.copy(), "agent") ?? String()) ?? Json.Null
+        var models = List<String>()
+        for v in may.model { models.push(routines.option_name(at(agent.copy(), "options"), "model", v.copy())) }
+        var efforts = List<String>()
+        for v in may.effort { efforts.push(routines.option_name(at(agent.copy(), "options"), "thought_level", v.copy())) }
+        var agents = List<String>()
+        for a in may.agent { agents.push(str_at(try i.store.agent(user.copy(), a.copy()) ?? Json.Null, "name") ?? a.copy()) }
+        let said = if bool_at(r.copy(), "script_only") == some(true) { String() } else { routines.may_words(models, efforts, agents) }
+        return merge(routines.shown(r, i.minute_ms), Obj.new().j("cost", with_saves).s("gate_may_said", said).done())
     }
 
     // Routine `r` was turned off by something other than its person: five
@@ -9154,6 +9573,10 @@ impl Instance {
         var posts = List<Json>()
         for p in posted { posts.push(Json.Str(routines.cut(p.copy(), routines.SAID_MOST))) }
         let kept = try i.store.routine_run(rr.user.copy(), rr.routine.copy(), run_id.copy()) ?? Obj.new().s("run", run_id.copy()).s("routine", rr.routine.copy()).done()
+        // Counted for its stats by day, which outlast its runs (PLAN.md, "Routines").
+        let woke = bool_at(kept.copy(), "woke") != some(false)
+        let spent = if woke { try i.store.run_tokens(rr.user.copy(), run_id.copy()) } else { 0 }
+        try i.store.count_routine_day(rr.user.copy(), rr.routine.copy(), routines.day_of(now()), spent == 0, woke, spent, i64.wrap(posted.len()))
         try i.store.put_routine_run(rr.user.copy(), rr.routine.copy(), merge(kept, Obj.new().s("status", status.copy()).maybe("error", error.copy()).i("ended", now()).s("said", routines.cut(said.copy(), routines.SAID_MOST)).j("posted", Json.Array(posts)).done()))
         let last = merge(at(r.copy(), "last"), Obj.new().s("status", status.copy()).maybe("error", error.copy()).done())
         // Failures in a row: five turn it off, and its person hears so whether
@@ -9268,7 +9691,7 @@ impl Instance {
                 f.steps[k].state = flows.State.Running
                 f.steps[k].run = run_id.copy()
                 i.flow_steps.insert(run_id.copy(), (f.id.copy(), k))
-                i.quiet_turns.insert(run_id.copy(), QuietTurn { routine: f.routine.copy(), posted: List<String>(), step: f.steps[k].name.copy(), of: f.run.copy() })
+                i.quiet_turns.insert(run_id.copy(), QuietTurn { routine: f.routine.copy(), posted: List<String>(), step: f.steps[k].name.copy(), of: f.run.copy(), model: String(), effort: String(), other: false })
                 i.log(f.user.copy(), agent_id, "routine", "Ran step {f.steps[k].name} of the flow of {f.name}", String("schedule"))
                 let from = "the person's routine \"{f.name}\": step {f.steps[k].name} of its flow, which hands each agent's answer on to the next. The person set it up, but isn't writing this"
                 try i.start_run(f.user.copy(), conversation, run_id, String(), f.steps[k].prompt.copy(), List<Json>(), from, inputs, "routine")
@@ -9352,8 +9775,10 @@ impl Instance {
         let m = merge(old.copy(), args)
         let name = (str_at(m.copy(), "name") ?? String()).trim().copy()
         if name.len() == 0 or name.len() > 100 { return Answer.Refused(String("bad_request"), String("A routine needs a name, of up to 100 bytes.")) }
+        // A routine that runs its script only wakes no agent, so it needs no prompt.
+        let script_only = bool_at(m.copy(), "script_only") ?? false
         let prompt = (str_at(m.copy(), "prompt") ?? String()).trim().copy()
-        if prompt.len() == 0 or prompt.len() > 20000 { return Answer.Refused(String("bad_request"), String("A routine needs a prompt, what its agent is asked each time, of up to 20,000 bytes.")) }
+        if prompt.len() > 20000 or (prompt.len() == 0 and not script_only) { return Answer.Refused(String("bad_request"), String("A routine needs a prompt, what its agent is asked each time, of up to 20,000 bytes.")) }
         let agent_key = str_at(m.copy(), "agent") ?? String()
         let agent = try i.find_agent(user.copy(), agent_key.copy()) else return Answer.Refused(String("not_found"), "There's no agent {agent_key}.")
         let agent_id = str_at(agent.copy(), "id") ?? String()
@@ -9361,6 +9786,26 @@ impl Instance {
         // a model and effort of its own, from those its agent's program offers.
         let (gate_kept, gate_why) = routines.read_gate(at(m.copy(), "gate"))
         if gate_why.len() > 0 { return Answer.Refused(String("bad_request"), gate_why) }
+        if script_only and gate_kept == Json.Null { return Answer.Refused(String("bad_request"), String("A routine that runs its script only needs its script: gate, with a command or a Calx script.")) }
+        // What its gate may choose for a run: models and efforts its agent's
+        // program offers, kept as their values, and agents, kept by id.
+        let (may_given, may_why) = routines.read_may(at(m.copy(), "gate_may"))
+        if may_why.len() > 0 { return Answer.Refused(String("bad_request"), may_why) }
+        var may = routines.May { model: List<String>(), effort: List<String>(), agent: List<String>() }
+        let may_picks: List<(List<String>, str, str)> = [(may_given.model.copy(), "model", "model"), (may_given.effort.copy(), "thought_level", "effort")]
+        for (values, category, what) in may_picks {
+            for value in values {
+                let (found, offered) = routines.offered_value(at(agent.copy(), "options"), category, value.copy())
+                let v = if offered.len() == 0 { value.copy() } else { found ?? String() }
+                if v.len() == 0 { return Answer.Refused(String("bad_request"), "{str_at(agent.copy(), "name") ?? String("Its agent")}'s program has no {what} {value}, for gate_may. It offers {offered.join(", ")}.") }
+                if what == "model" { may.model.push(v) } else { may.effort.push(v) }
+            }
+        }
+        for key in may_given.agent {
+            let found = try i.find_agent(user.copy(), key.copy()) else return Answer.Refused(String("not_found"), "gate_may names no agent {key}.")
+            may.agent.push(str_at(found, "id") ?? String())
+        }
+        let may_kept = if script_only { Json.Null } else { routines.may_json(may) }
         // Each is kept as the value the program takes, named by it or by its name;
         // before the program has said what it offers, as it's given.
         var model = (str_at(m.copy(), "model") ?? String()).trim().copy()
@@ -9451,11 +9896,11 @@ impl Instance {
         // The card it left when it was turned off stays with it while it's off,
         // and says once it's on again.
         let off_card = str_at(old.copy(), "off_card")
-        let r = Obj.new().s("id", id).s("name", name.copy()).s("agent", agent_id.copy()).s("prompt", prompt).j("schedule", schedule).maybe("hook", if webhook { some(hook) } else { none }).maybe("secret", if webhook { some(secret) } else { none }).s("when", when).s("tz", tz).b("on", on).b("notify", notify).b("catch_up", catch_up).s("post", post).s("conversation", conversation).i("next", next).j("last", at(old.copy(), "last")).j("flow", flow).j("event", event).j("gate", gate_kept).maybe("model", if model.len() > 0 { some(model) } else { none }).maybe("effort", if effort.len() > 0 { some(effort) } else { none }).maybe("off_card", if on { none } else { off_card.copy() }).s("by", by.copy()).i("at", t).done()
+        let r = Obj.new().s("id", id).s("name", name.copy()).s("agent", agent_id.copy()).s("prompt", prompt).j("schedule", schedule).maybe("hook", if webhook { some(hook) } else { none }).maybe("secret", if webhook { some(secret) } else { none }).s("when", when).s("tz", tz).b("on", on).b("notify", notify).b("catch_up", catch_up).s("post", post).s("conversation", conversation).i("next", next).j("last", at(old.copy(), "last")).j("flow", flow).j("event", event).j("gate", gate_kept).b("script_only", script_only).j("gate_may", may_kept).maybe("model", if model.len() > 0 { some(model) } else { none }).maybe("effort", if effort.len() > 0 { some(effort) } else { none }).maybe("off_card", if on { none } else { off_card.copy() }).s("by", by.copy()).i("at", t).done()
         i.log(user.copy(), agent_id, "routine", if old == Json.Null { "Made the routine {name}" } else { "Changed the routine {name}" }, by)
         try i.routine_ran(user.copy(), r.copy())
-        if on and off_card != none { try i.off_card_now(user, old, "on") }
-        return Answer.Value(Obj.new().j("routine", routines.shown(r, i.minute_ms)).done())
+        if on and off_card != none { try i.off_card_now(user.copy(), old, "on") }
+        return Answer.Value(Obj.new().j("routine", try i.routine_now(user, r)).done())
     }
 
     // POST /hooks/<id>: runs a routine from outside, such as GitHub Actions
@@ -15056,14 +15501,17 @@ impl Instance {
             _ => Json.Null,
         }
         // A routine's own run takes the model and effort the routine picked, over
-        // its agent's (PLAN.md, "Routines").
+        // its agent's (PLAN.md, "Routines"), and what its gate chose for this run
+        // over both. Handed to another agent, only what the gate chose.
         if let q = i.quiet_turns.find(run.copy()) {
             if q.step.len() == 0 and wanted != Json.Null {
                 if let ok(some(r)) = i.store.routine(p.user.copy(), q.routine.copy()) {
                     var picked = Obj.new()
                     let picks: List<(str, str)> = [("model", "model"), ("effort", "thought_level")]
                     for (key, category) in picks {
-                        let value = str_at(r.copy(), key) ?? String()
+                        let chosen = if key == "model" { q.model.copy() } else { q.effort.copy() }
+                        let own_pick = if q.other { String() } else { str_at(r.copy(), key) ?? String() }
+                        let value = if chosen.len() > 0 { chosen } else { own_pick }
                         if value.len() == 0 { continue }
                         if let id = acp.option_in(config.copy(), category) { picked.m.insert(id, Json.Str(value)) }
                     }
@@ -16012,7 +16460,7 @@ impl Instance {
         let act = i.call_actions.remove(a.call.copy()) ?? 0
         var conversation = String()
         if let r = i.runs.find(a.run.copy()) { conversation = r.conversation.copy() }
-        let g = Grant { user: user.copy(), agent: a.agent.copy(), conversation: conversation }
+        let g = Grant { user: user.copy(), agent: a.agent.copy(), conversation: conversation, gate: String() }
         let called = at(a.action.copy(), "args")
         i.acting = act
         var failed = String()
@@ -17309,6 +17757,10 @@ impl Instance {
             try i.test_mcp(Waiter { socket: some(s), id: id }, user, args)
             return
         }
+        if name == "routine.test" {
+            try i.test_routine(Waiter { socket: some(s), id: id }, user, device, args)
+            return
+        }
         if name == "mcp.sign_in" {
             try i.sign_in(Waiter { socket: some(s), id: id }, user, args)
             return
@@ -18337,9 +18789,9 @@ impl Instance {
             var costs = Map<String, Json>()
             for (id, runs, quiet, tokens, oldest) in try i.store.routine_costs(user.copy(), t - routines.COST_DAYS * 86400000, String()) { costs.insert(id.copy(), routines.cost(runs, quiet, tokens, oldest, t)) }
             var shown = List<Json>()
-            for r in try i.store.routines(user) {
+            for r in try i.store.routines(user.copy()) {
                 let cost = if let c = costs.find(str_at(r.copy(), "id") ?? String()) { c.copy() } else { routines.cost(0, 0, 0, t, t) }
-                shown.push(merge(routines.shown(r, i.minute_ms), Obj.new().j("cost", cost).done()))
+                shown.push(try i.routine_shown(user.copy(), r, cost))
             }
             return Answer.Value(Obj.new().j("routines", Json.Array(shown)).done())
         }
@@ -18349,6 +18801,23 @@ impl Instance {
             return put
         }
         if name == "watch.list" or name == "watch.put" or name == "watch.remove" { return try i.watch_cmd(user, device, name, args) }
+        // What a routine's script keeps between runs (loom state), and changes
+        // to it: `set`, each key's new value, or null to take it away.
+        if name == "routine.state" {
+            let id = str_at(args.copy(), "id") ?? String()
+            if try i.store.routine(user.copy(), id.copy()) == none { return Answer.Refused(String("not_found"), "There's no routine {id}.") }
+            if let Json.Object(set) = at(args, "set") {
+                for (k, v) in set {
+                    let value = v.as_str()
+                    if v != Json.Null and value == none { return Answer.Refused(String("bad_request"), "set gives each key text, or null to take it away, not {v}.") }
+                    let why = try i.state_fits(user.copy(), id.copy(), k.copy(), value.copy())
+                    if why.len() > 0 { return Answer.Refused(String("bad_request"), why) }
+                    try i.store.set_routine_state(user.copy(), id.copy(), k.copy(), value)
+                }
+                i.log(user.copy(), String(), "routine", "Changed a routine's state", device.copy())
+            }
+            return Answer.Value(Obj.new().j("state", try i.state_json(user, id)).done())
+        }
         // A routine's runs, newest first: when each ran, how it ended, what its
         // agent answered and what it posted (PLAN.md, "Routines").
         if name == "routine.runs" {

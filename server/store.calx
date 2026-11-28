@@ -234,6 +234,15 @@ CREATE TABLE IF NOT EXISTS routine_runs (
     id TEXT PRIMARY KEY, user TEXT NOT NULL REFERENCES users(id), routine TEXT NOT NULL,
     json TEXT NOT NULL, at INTEGER NOT NULL);
 CREATE INDEX IF NOT EXISTS routine_runs_newest ON routine_runs (user, routine, at);
+-- What a routine's script keeps between its runs (`loom state`), a little text by key.
+CREATE TABLE IF NOT EXISTS routine_state (
+    user TEXT NOT NULL REFERENCES users(id), routine TEXT NOT NULL, key TEXT NOT NULL,
+    value TEXT NOT NULL, at INTEGER NOT NULL, PRIMARY KEY (user, routine, key));
+-- Each routine's runs counted by day, kept after its runs go, for its stats over weeks.
+CREATE TABLE IF NOT EXISTS routine_days (
+    user TEXT NOT NULL REFERENCES users(id), routine TEXT NOT NULL, day INTEGER NOT NULL,
+    runs INTEGER NOT NULL, zero INTEGER NOT NULL, woke INTEGER NOT NULL,
+    tokens INTEGER NOT NULL, posts INTEGER NOT NULL, PRIMARY KEY (user, routine, day));
 CREATE TABLE IF NOT EXISTS flows (
     id TEXT PRIMARY KEY, user TEXT NOT NULL REFERENCES users(id), json TEXT NOT NULL);
 -- What each person follows outside loom (server/watches.calx), with how far each has read,
@@ -2525,6 +2534,8 @@ impl Store {
 
     pub fn delete_routine(self, user: String, id: String) -> bool ! Error {
         _ = try self.db.execute(String("DELETE FROM routine_runs WHERE routine = ? AND user = ?"), [t(id.copy()), t(user.copy())])
+        _ = try self.db.execute(String("DELETE FROM routine_state WHERE routine = ? AND user = ?"), [t(id.copy()), t(user.copy())])
+        _ = try self.db.execute(String("DELETE FROM routine_days WHERE routine = ? AND user = ?"), [t(id.copy()), t(user.copy())])
         return try self.db.execute(String("DELETE FROM routines WHERE id = ? AND user = ?"), [t(id), t(user)]) > 0
     }
 
@@ -2535,6 +2546,54 @@ impl Store {
         let at = (run.get(String("at")) ?? Json.Null).as_i64() ?? now()
         _ = try self.db.execute(String("INSERT INTO routine_runs (id, user, routine, json, at) VALUES (?, ?, ?, ?, ?) ON CONFLICT (id) DO UPDATE SET json = excluded.json"), [t(id), t(user.copy()), t(routine.copy()), t("{run}"), Value.Int(at)])
         _ = try self.db.execute(String("DELETE FROM routine_runs WHERE user = ?1 AND routine = ?2 AND id NOT IN (SELECT id FROM routine_runs WHERE user = ?1 AND routine = ?2 ORDER BY at DESC, rowid DESC LIMIT ?3)"), [t(user), t(routine), Value.Int(ROUTINE_RUNS_KEPT)])
+    }
+
+    // --- What a routine's script keeps between runs (`loom state`) ---
+
+    // Routine `routine`'s state, every key with its value, by key.
+    pub fn routine_state(self, user: String, routine: String) -> List<(String, String)> ! Error {
+        var out = List<(String, String)>()
+        for r in try self.db.query(String("SELECT key, value FROM routine_state WHERE user = ? AND routine = ? ORDER BY key"), [t(user), t(routine)]) { out.push((text(r[0].copy()), text(r[1].copy()))) }
+        return out
+    }
+
+    // How many bytes routine `routine`'s state holds, keys and values, without `but`'s.
+    pub fn routine_state_size(self, user: String, routine: String, but: String) -> i64 ! Error {
+        let r = try self.db.query_one(String("SELECT COALESCE(SUM(LENGTH(CAST(key AS BLOB)) + LENGTH(CAST(value AS BLOB))), 0) FROM routine_state WHERE user = ? AND routine = ? AND key <> ?"), [t(user), t(routine), t(but)]) else return 0
+        return int(r[0].copy())
+    }
+
+    // Sets `key` of routine `routine`'s state to `value`, or takes it away for none.
+    pub fn set_routine_state(self, user: String, routine: String, key: String, value: String?) ! Error {
+        match value {
+            some(v) => _ = try self.db.execute(String("INSERT INTO routine_state (user, routine, key, value, at) VALUES (?, ?, ?, ?, ?) ON CONFLICT (user, routine, key) DO UPDATE SET value = excluded.value, at = excluded.at"), [t(user), t(routine), t(key), t(v), Value.Int(now())]),
+            none => _ = try self.db.execute(String("DELETE FROM routine_state WHERE user = ? AND routine = ? AND key = ?"), [t(user), t(routine), t(key)]),
+        }
+    }
+
+    // --- Each routine's runs by day, for its stats ---
+
+    // Counts a run of routine `routine` that ended on `day`: whether it used no
+    // tokens, whether it woke an agent, its tokens and its posts.
+    pub fn count_routine_day(self, user: String, routine: String, day: i64, zero: bool, woke: bool, tokens: i64, posts: i64) ! Error {
+        _ = try self.db.execute(String("INSERT INTO routine_days (user, routine, day, runs, zero, woke, tokens, posts) VALUES (?, ?, ?, 1, ?, ?, ?, ?) ON CONFLICT (user, routine, day) DO UPDATE SET runs = runs + 1, zero = zero + excluded.zero, woke = woke + excluded.woke, tokens = tokens + excluded.tokens, posts = posts + excluded.posts"), [t(user), t(routine), Value.Int(day), Value.Int(if zero { 1 } else { 0 }), Value.Int(if woke { 1 } else { 0 }), Value.Int(tokens), Value.Int(posts)])
+    }
+
+    // `user`'s routines' runs counted from day `from` up to `to`, not counting
+    // `to`: each routine's id, runs, zero-token runs, runs that woke an agent,
+    // tokens and posts. `only` is one routine's id, or "" for all of them.
+    pub fn routine_days(self, user: String, from: i64, to: i64, only: String) -> List<(String, i64, i64, i64, i64, i64)> ! Error {
+        var out = List<(String, i64, i64, i64, i64, i64)>()
+        for r in try self.db.query(String("SELECT routine, SUM(runs), SUM(zero), SUM(woke), SUM(tokens), SUM(posts) FROM routine_days WHERE user = ?1 AND day >= ?2 AND day < ?3 AND (?4 = '' OR routine = ?4) GROUP BY routine"), [t(user), Value.Int(from), Value.Int(to), t(only)]) {
+            out.push((text(r[0].copy()), int(r[1].copy()), int(r[2].copy()), int(r[3].copy()), int(r[4].copy()), int(r[5].copy())))
+        }
+        return out
+    }
+
+    // The tokens run `run`'s turn used, as usage counts them.
+    pub fn run_tokens(self, user: String, run: String) -> i64 ! Error {
+        let r = try self.db.query_one(String("SELECT COALESCE(SUM(total), 0) FROM usage WHERE user = ? AND run = ?"), [t(user), t(run)]) else return 0
+        return int(r[0].copy())
     }
 
     // One of routine `routine`'s runs, by its run id.

@@ -465,9 +465,12 @@ pub fn posts_note(messages: List<Json>) -> String {
 pub const GATE_SECONDS: i64 = 60
 pub const GATE_SECONDS_MOST: i64 = 600
 pub const GATE_COMMAND_MOST: usize = 4000
+// A gate written in Calx, kept with the routine, is a whole script.
+pub const GATE_CALX_MOST: usize = 200000
 
 pub struct Gate {
-    pub command: String
+    pub command: String    // a shell command, or "" for one in Calx
+    pub calx: String    // the Calx script it runs instead, or ""
     pub seconds: i64
 }
 
@@ -475,19 +478,33 @@ pub struct Gate {
 pub fn gate_of(r: Json) -> Gate? {
     let g = at(r, "gate")
     let command = (str_at(g.copy(), "command") ?? String()).trim().copy()
-    if command.len() == 0 { return none }
-    return some(Gate { command: command, seconds: int_at(g, "timeout") ?? GATE_SECONDS })
+    let calx = str_at(g.copy(), "calx") ?? String()
+    if command.len() == 0 and calx.trim().len() == 0 { return none }
+    return some(Gate { command: command, calx: calx, seconds: int_at(g, "timeout") ?? GATE_SECONDS })
+}
+
+// What a gate is, in a few words: its command, or that it's a Calx script.
+pub fn gate_words(g: Gate) -> String {
+    if g.calx.trim().len() > 0 { return String("its Calx script") }
+    return "the command `{g.command}`"
 }
 
 // A gate as routine.put takes it, as the routine keeps it (null for none, as
-// null or an empty command gives), or why it isn't one.
+// null or an empty command gives), or why it isn't one: a shell `command`, or a
+// Calx script as `calx`, with the seconds it may take.
 pub fn read_gate(j: Json) -> (Json, String) {
     if j == Json.Null { return (Json.Null, String()) }
     let given = at(j.copy(), "command")
     let command = (given.as_str() ?? String()).trim().copy()
-    if given != Json.Null and given.as_str() == none { return (Json.Null, String("A gate is \{\"command\": \"...\", \"timeout\": seconds\}.")) }
-    if command.len() == 0 { return (Json.Null, String()) }
+    if given != Json.Null and given.as_str() == none { return (Json.Null, String("A gate is \{\"command\": \"...\", \"timeout\": seconds\}, or \{\"calx\": \"...\"\} for a Calx script.")) }
+    let script_given = at(j.copy(), "calx")
+    if script_given != Json.Null and script_given.as_str() == none { return (Json.Null, String("A gate's calx is the Calx script, as text.")) }
+    let script = script_given.as_str() ?? String()
+    let has_script = script.trim().len() > 0
+    if command.len() == 0 and not has_script { return (Json.Null, String()) }
+    if command.len() > 0 and has_script { return (Json.Null, String("A gate is a command or a Calx script, not both.")) }
     if command.len() > GATE_COMMAND_MOST { return (Json.Null, "A gate's command is up to {GATE_COMMAND_MOST} bytes.") }
+    if script.len() > GATE_CALX_MOST { return (Json.Null, "A gate's Calx script is up to {GATE_CALX_MOST} bytes.") }
     var seconds = GATE_SECONDS
     let t = at(j, "timeout")
     if t != Json.Null {
@@ -495,7 +512,182 @@ pub fn read_gate(j: Json) -> (Json, String) {
         if n < 1 or n > GATE_SECONDS_MOST { return (Json.Null, "A gate's timeout is in seconds, 1 to {GATE_SECONDS_MOST}.") }
         seconds = n
     }
+    if has_script { return (Obj.new().s("calx", script).i("timeout", seconds).done(), String()) }
     return (Obj.new().s("command", command).i("timeout", seconds).done(), String())
+}
+
+// --- What a gate's output asks for (PLAN.md, "Routines") ---
+//
+// A gate whose first line is a JSON object with `wake` steers its run: whether
+// its agent wakes, and for this run the model, effort or agent, what to add to
+// the prompt, and data for the agent. Any other output is read as it always
+// was, so a gate that prints JSON of its own, without `wake`, still just wakes.
+
+// How much a gate may hand on as `prompt` and as `data`, in bytes.
+pub const STEER_PROMPT_MOST: usize = 4000
+pub const STEER_DATA_MOST: usize = 20000
+
+pub struct Steer {
+    pub given: bool    // its first line was such an object
+    pub wake: bool
+    pub model: String    // each "" for the routine's own
+    pub effort: String
+    pub agent: String
+    pub prompt: String
+    pub data: Json
+    pub rest: String    // what it printed after that line
+    pub why: String    // what's wrong with the object, or ""
+}
+
+fn no_steer(printed: String) -> Steer {
+    return Steer { given: false, wake: printed.trim().len() > 0, model: String(), effort: String(), agent: String(), prompt: String(), data: Json.Null, rest: printed.trim().copy(), why: String() }
+}
+
+// What a gate's output (`printed`, as it exited 0) asks of its run.
+pub fn steer_of(printed: String) -> Steer {
+    let text = printed.trim()
+    if not text.starts_with("\{") { return no_steer(text.copy()) }
+    let cut_at = text.find("\n") ?? text.len()
+    let first = text[..cut_at].trim().copy()
+    let rest = if cut_at < text.len() { text[cut_at + 1..].trim().copy() } else { String() }
+    let j = match parse(first) {
+        ok(v) => v,
+        err(_) => return no_steer(text.copy()),
+    }
+    let Json.Object(_) = j.copy() else return no_steer(text.copy())
+    let w = j.get(String("wake")) else return no_steer(text.copy())
+    var s = Steer { given: true, wake: false, model: String(), effort: String(), agent: String(), prompt: String(), data: at(j.copy(), "data"), rest: rest, why: String() }
+    let wake = w.as_bool() else {
+        s.why = String("wake is true or false")
+        return s
+    }
+    s.wake = wake
+    for key in ["model", "effort", "agent", "prompt"] {
+        let v = at(j.copy(), key)
+        if v == Json.Null { continue }
+        let said = v.as_str() else {
+            s.why = "{key} is text"
+            return s
+        }
+        let value = said.trim().copy()
+        if key == "model" { s.model = value } else if key == "effort" { s.effort = value } else if key == "agent" { s.agent = value } else { s.prompt = value }
+    }
+    if s.prompt.len() > STEER_PROMPT_MOST { s.why = "prompt is up to {STEER_PROMPT_MOST} bytes" }
+    if "{s.data}".len() > STEER_DATA_MOST { s.why = "data is up to {STEER_DATA_MOST} bytes as JSON" }
+    return s
+}
+
+// What a gate's end means for its run (PLAN.md, "Routines"), as gate_outcome
+// says, with what its output asks for: "wake", "quiet" or "failed", with what
+// its agent is given or why it failed, and what it asked (steer_of). A routine
+// that's `script_only` never wakes an agent: its script does the work.
+pub fn gate_end(code: i64?, out: String, errors: String, timed_out: bool, broke: String, seconds: i64, script_only: bool) -> (String, String, Steer) {
+    let (what, said) = gate_outcome(code, out, errors, timed_out, broke, seconds)
+    if what != "wake" { return (what, said.copy(), no_steer(String())) }
+    let s = steer_of(said.copy())
+    if s.why.len() > 0 { return (String("failed"), "Its gate's first line is JSON with wake, but {s.why}.", s) }
+    if script_only {
+        if s.given and s.wake { return (String("failed"), String("Its script asked to wake an agent, and the routine runs its script only."), s) }
+        return (String("quiet"), String(), s)
+    }
+    if not s.wake { return (String("quiet"), String(), s) }
+    if s.given {
+        let given = s.rest.copy()
+        return (String("wake"), given, s)
+    }
+    return (String("wake"), said, s)
+}
+
+// What a routine lets its gate choose for a run (`gate_may`): models and
+// efforts, as values its agent's program takes, and agents, by id. Empty
+// lists let it choose none.
+pub struct May {
+    pub model: List<String>
+    pub effort: List<String>
+    pub agent: List<String>
+}
+
+fn list_of(j: Json) -> List<String> {
+    var out = List<String>()
+    if let Json.Array(items) = j {
+        for v in items {
+            if let s = v.as_str() {
+                if s.trim().len() > 0 and not out.contains(s.trim().copy()) { out.push(s.trim().copy()) }
+            }
+        }
+    }
+    return out
+}
+
+pub fn may_of(r: Json) -> May {
+    let m = at(r, "gate_may")
+    return May { model: list_of(at(m.copy(), "model")), effort: list_of(at(m.copy(), "effort")), agent: list_of(at(m, "agent")) }
+}
+
+// `gate_may` as routine.put takes it, before its values are checked against
+// what its agents offer: each of `model`, `effort` and `agent` a list of text,
+// up to 20. Gives it as lists, or why it isn't one.
+pub fn read_may(j: Json) -> (May, String) {
+    var m = May { model: List<String>(), effort: List<String>(), agent: List<String>() }
+    if j == Json.Null { return (m, String()) }
+    let Json.Object(o) = j.copy() else return (m, String("gate_may is \{\"model\": [...], \"effort\": [...], \"agent\": [...]\}."))
+    for (k, v) in o {
+        if k != "model" and k != "effort" and k != "agent" { return (m, "gate_may has model, effort and agent, not {k}.") }
+        let Json.Array(items) = v.copy() else return (m, "gate_may's {k} is a list.")
+        if items.len() > 20 { return (m, "gate_may's {k} has up to 20.") }
+        for item in items {
+            if item.as_str() == none { return (m, "gate_may's {k} is a list of text.") }
+        }
+    }
+    m.model = list_of(at(j.copy(), "model"))
+    m.effort = list_of(at(j.copy(), "effort"))
+    m.agent = list_of(at(j, "agent"))
+    return (m, String())
+}
+
+pub fn may_json(m: May) -> Json {
+    if m.model.len() == 0 and m.effort.len() == 0 and m.agent.len() == 0 { return Json.Null }
+    var o = Obj.new()
+    let lists: List<(str, List<String>)> = [("model", m.model.copy()), ("effort", m.effort.copy()), ("agent", m.agent.copy())]
+    for (key, values) in lists {
+        var items = List<Json>()
+        for v in values { items.push(Json.Str(v.copy())) }
+        o = o.j(key, Json.Array(items))
+    }
+    return o.done()
+}
+
+// What the routine's page says its gate may choose, from the names of what it
+// may: "The gate may choose model: Haiku 5.5, Opus 5.5 · agent: Hermes", or ""
+// for none.
+pub fn may_words(models: List<String>, efforts: List<String>, agents: List<String>) -> String {
+    var parts = List<String>()
+    if models.len() > 0 { parts.push("model: {models.join(", ")}") }
+    if efforts.len() > 0 { parts.push("effort: {efforts.join(", ")}") }
+    if agents.len() > 0 { parts.push("agent: {agents.join(", ")}") }
+    if parts.len() == 0 { return String() }
+    return "The gate may choose {parts.join(" · ")}"
+}
+
+// What a run says of what its gate chose for it, by name: "Ran on Haiku 5.5,
+// chosen by the gate", "Ran on Ledger, on Opus 5.5 at High, chosen by the
+// gate". `refused` is what it asked for that the routine doesn't let it
+// choose, which the run went without. "" when it chose nothing.
+pub fn chosen_words(model: String, effort: String, agent: String, refused: List<String>) -> String {
+    var on = List<String>()
+    if agent.len() > 0 { on.push(agent.copy()) }
+    if model.len() > 0 { on.push(model.copy()) }
+    var said = String()
+    if on.len() > 0 or effort.len() > 0 {
+        var what = if on.len() > 0 { "Ran on {on.join(", on ")}" } else { String("Ran") }
+        if effort.len() > 0 { what = "{what} at {effort}" }
+        said = "{what}, chosen by the gate"
+    }
+    if refused.len() > 0 {
+        let not_said = "The gate asked for {and_list(refused)}, which this routine doesn't let it choose"
+        said = if said.len() > 0 { "{said}. {not_said}" } else { not_said }
+    }
+    return said
 }
 
 // What a gate's end means for its run: "wake", with what it printed for its
@@ -517,13 +709,29 @@ pub fn gate_outcome(code: i64?, out: String, errors: String, timed_out: bool, br
     return (String("failed"), "Its gate failed ({how}): {cut(said, 500)}")
 }
 
-// What its agent is told of the gate that woke it.
-pub fn gate_note(command: String, said: String) -> String {
-    return "[loom: This routine's gate, the command `{command}`, found something new, so you were woken for it. What it printed:\n\n```\n{said}\n```]"
+// What its agent is told of the gate that woke it: `what` is gate_words',
+// `said` what it printed, and `s` what its first line asked, when it did.
+pub fn gate_note(what: String, said: String) -> String {
+    return "[loom: This routine's gate, {what}, found something new, so you were woken for it. What it printed:\n\n```\n{said}\n```]"
+}
+
+// The same for a gate that steered its run: what it asks of this run, its
+// data, and what else it printed.
+pub fn steered_note(what: String, s: Steer) -> String {
+    var parts: List<String> = ["[loom: This routine's gate, {what}, found something that needs you, so you were woken for it."]
+    if s.prompt.len() > 0 { parts.push("It asks this of this run:\n\n{s.prompt}") }
+    if s.data != Json.Null { parts.push("Its data:\n\n```json\n{s.data}\n```") }
+    if s.rest.len() > 0 { parts.push("What else it printed:\n\n```\n{cut(s.rest.copy(), GATE_SAID_MOST)}\n```") }
+    return "{parts.join("\n\n")}]"
 }
 
 // The shell a gate's command runs in: `sh -c` in a sandbox and off Windows,
 // and `cmd /C` on Windows.
+// How a gate in Calx runs: the person's calx, on the script's file.
+pub fn calx_run(file: String) -> (String, List<String>) {
+    return (String("calx"), [file.copy()])
+}
+
 pub fn gate_shell(command: String, windows: bool) -> (String, List<String>) {
     if windows { return (String("cmd"), [String("/C"), command.copy()]) }
     return (String("sh"), [String("-c"), command.copy()])
@@ -553,6 +761,22 @@ pub fn offered_value(options: Json, category: str, typed: String) -> (String?, L
     return (found, names)
 }
 
+// The name an agent's program gives `value` of its option in `category`, or
+// the value itself where it gives none.
+pub fn option_name(options: Json, category: str, value: String) -> String {
+    if let Json.Array(list) = options {
+        for o in list {
+            if str_at(o.copy(), "category") != some(String(category)) { continue }
+            if let Json.Array(values) = at(o, "options") {
+                for v in values {
+                    if str_at(v.copy(), "value") == some(value.copy()) { return str_at(v, "name") ?? value.copy() }
+                }
+            }
+        }
+    }
+    return value.copy()
+}
+
 // --- What a routine costs (PLAN.md, "Routines") ---
 
 // How far back what a routine costs is counted, and the tokens a day that
@@ -573,6 +797,37 @@ pub fn cost(runs: i64, quiet: i64, tokens: i64, oldest: i64, now: i64) -> Json {
     let per_day = if runs > 0 { tokens * DAY_MS / span } else { 0 }
     let wasted = runs >= 2 and quiet * 2 > runs and per_day >= WASTED_DAY
     return Obj.new().i("run", per_run).i("day", per_day).i("runs", runs).i("quiet", quiet).b("wasted", wasted).done()
+}
+
+// Tokens in short: 950, 41k, 1.4M.
+pub fn tokens_short(n: i64) -> String {
+    if n < 1000 { return "{n}" }
+    if n < 999500 { return "{(n + 500) / 1000}k" }
+    let tenths = (n + 50000) / 100000
+    if tenths % 10 == 0 or tenths >= 100 { return "{(tenths + 5) / 10}M" }
+    return "{tenths / 10}.{tenths % 10}M"
+}
+
+// What a routine's script saves (PLAN.md, "Routines"), from its runs that
+// ended in the last COST_DAYS: `runs` of them, `zero` that used no tokens,
+// `woke` that woke an agent, the `tokens` they used and the `posts` they made.
+// A run that didn't wake one saved what a run that did cost, on average:
+// `saved`. Gives `zero`, `zero_share` (a percent), `saved`, `posts`,
+// `per_post` (tokens for each post) and `said`, for the routine's page.
+pub fn savings(runs: i64, zero: i64, woke: i64, tokens: i64, posts: i64) -> Json {
+    let share = if runs > 0 { zero * 100 / runs } else { 0 }
+    let saved = if woke > 0 and runs > woke { (runs - woke) * (tokens / woke) } else { 0 }
+    let per_post = if posts > 0 { tokens / posts } else { 0 }
+    var parts = List<String>()
+    if runs > 0 { parts.push("{share}% of runs used no tokens") }
+    if saved > 0 { parts.push("{tokens_short(saved)} tokens saved by its script") }
+    if posts > 0 and tokens > 0 { parts.push("{tokens_short(per_post)} a post") }
+    return Obj.new().i("zero", zero).i("zero_share", share).i("saved", saved).i("posts", posts).i("per_post", per_post).s("said", parts.join(" · ")).done()
+}
+
+// The day a run counts on, for the routine's days (Unix ms to days since 1970).
+pub fn day_of(t: i64) -> i64 {
+    return t / DAY_MS
 }
 
 // Why a routine's time was skipped, as its runs keep it (PLAN.md, "Routines").
@@ -685,7 +940,7 @@ fn a_gate_is_read_and_kept() {
     let (_, too_long) = read_gate(parse(#"{"command":"x","timeout":601}"#)!)
     let (_, not_text) = read_gate(parse(#"{"command":3}"#)!)
     assert(too_long.contains("1 to 600") and not_text.len() > 0)
-    let g = gate_of(Obj.new().j("gate", timed).done()) ?? Gate { command: String(), seconds: 0 }
+    let g = gate_of(Obj.new().j("gate", timed).done()) ?? Gate { command: String(), calx: String(), seconds: 0 }
     assert(g.command == "x" and g.seconds == 5 and gate_of(Obj.new().done()) == none)
 }
 
@@ -701,6 +956,81 @@ fn a_gate_wakes_its_agent_only_when_it_prints_something() {
     assert(gate_shell(String("echo hi"), true) == (String("cmd"), [String("/C"), String("echo hi")]))
     assert(gate_shell(String("echo hi"), false) == (String("sh"), [String("-c"), String("echo hi")]))
     assert(gate_note(String("./check.sh"), String("new")).starts_with("[loom: ") and gate_note(String("./check.sh"), String("new")).contains("new\n```]"))
+}
+
+@test
+fn a_gate_can_be_a_calx_script() {
+    let (kept, why) = read_gate(parse(#"{"calx":"fn main() {}","timeout":30}"#)!)
+    assert(why == "" and "{kept}" == #"{"calx":"fn main() {}","timeout":30}"#)
+    let g = gate_of(Obj.new().j("gate", kept).done()) ?? Gate { command: String(), calx: String(), seconds: 0 }
+    assert(g.command == "" and g.calx == #"fn main() {}"# and g.seconds == 30 and gate_words(g) == "its Calx script")
+    let (_, both) = read_gate(parse(#"{"command":"x","calx":"y"}"#)!)
+    assert(both.contains("not both"))
+    let (_, not_text) = read_gate(parse(#"{"calx":5}"#)!)
+    assert(not_text.len() > 0)
+}
+
+@test
+fn a_gate_steers_its_run_with_json_on_its_first_line() {
+    let plain = steer_of(String("1.21.5\n"))
+    assert(not plain.given and plain.wake and plain.rest == "1.21.5")
+    // JSON of its own, without wake, is plain output, as it always was.
+    let theirs = steer_of(String(#"{"state":"OPEN"}"#))
+    assert(not theirs.given and theirs.rest == #"{"state":"OPEN"}"#)
+    let s = steer_of(String("\{\"wake\":true,\"model\":\"haiku\",\"agent\":\"Ledger\",\"prompt\":\"Label these.\",\"data\":\{\"ids\":[1,2]\}\}\nmore lines\nhere"))
+    assert(s.given and s.wake and s.model == "haiku" and s.agent == "Ledger" and s.prompt == "Label these." and "{s.data}" == #"{"ids":[1,2]}"# and s.rest == "more lines\nhere" and s.why == "")
+    assert(steer_of(String(#"{"wake":"yes"}"#)).why == "wake is true or false")
+    assert(steer_of(String(#"{"wake":true,"model":3}"#)).why == "model is text")
+    let asleep = steer_of(String(#"{"wake":false}"#))
+    assert(asleep.given and not asleep.wake)
+}
+
+@test
+fn what_a_gate_end_means_for_its_run() {
+    let killed: i64? = none
+    let (woke, said, _) = gate_end(some(0), String("new mail"), String(), false, String(), 60, false)
+    assert(woke == "wake" and said == "new mail")
+    let (quiet, _, _) = gate_end(some(0), String(#"{"wake":false}"#), String(), false, String(), 60, false)
+    assert(quiet == "quiet")
+    let (steered, rest, s) = gate_end(some(0), String("\{\"wake\":true,\"model\":\"haiku\"\}\nleft"), String(), false, String(), 60, false)
+    assert(steered == "wake" and rest == "left" and s.model == "haiku")
+    let (bad, why, _) = gate_end(some(0), String(#"{"wake":1}"#), String(), false, String(), 60, false)
+    assert(bad == "failed" and why.contains("wake is true or false"))
+    // A script-only routine never wakes an agent: what it prints is only kept.
+    let (alone, _, _) = gate_end(some(0), String("Posted the version."), String(), false, String(), 60, true)
+    assert(alone == "quiet")
+    let (asked, asked_why, _) = gate_end(some(0), String(#"{"wake":true}"#), String(), false, String(), 60, true)
+    assert(asked == "failed" and asked_why.contains("script only"))
+    let (failed, _, _) = gate_end(killed, String(), String(), true, String(), 5, true)
+    assert(failed == "failed")
+}
+
+@test
+fn what_a_gate_may_choose() {
+    let (m, why) = read_may(parse(#"{"model":["haiku","opus","haiku"],"agent":["Ledger"]}"#)!)
+    assert(why == "" and m.model == [String("haiku"), String("opus")] and m.effort.len() == 0 and m.agent == [String("Ledger")])
+    assert("{may_json(m)}" == #"{"model":["haiku","opus"],"effort":[],"agent":["Ledger"]}"#)
+    let (_, other) = read_may(parse(#"{"tools":[]}"#)!)
+    let (_, not_list) = read_may(parse(#"{"model":"haiku"}"#)!)
+    assert(other.contains("not tools") and not_list.contains("a list"))
+    let (none_may, none_why) = read_may(Json.Null)
+    assert(none_why == "" and may_json(none_may) == Json.Null)
+    assert(may_words([String("Haiku 5.5"), String("Opus 5.5")], List<String>(), [String("Hermes"), String("Ledger")]) == "The gate may choose model: Haiku 5.5, Opus 5.5 · agent: Hermes, Ledger")
+    assert(may_words(List<String>(), List<String>(), List<String>()) == "")
+    assert(chosen_words(String("Haiku 5.5"), String(), String(), List<String>()) == "Ran on Haiku 5.5, chosen by the gate")
+    assert(chosen_words(String("Opus 5.5"), String("High"), String("Ledger"), List<String>()) == "Ran on Ledger, on Opus 5.5 at High, chosen by the gate")
+    assert(chosen_words(String(), String(), String(), [String("the model opus")]) == "The gate asked for the model opus, which this routine doesn't let it choose")
+    assert(chosen_words(String(), String(), String(), List<String>()) == "")
+}
+
+@test
+fn what_a_script_saves() {
+    assert(tokens_short(950) == "950" and tokens_short(41200) == "41k" and tokens_short(1400000) == "1.4M" and tokens_short(2000000) == "2M" and tokens_short(19000000) == "19M")
+    // 48 runs, 45 found nothing, 3 woke the agent at 400k each.
+    let s = savings(48, 45, 3, 1200000, 3)
+    assert(int_at(s.copy(), "zero_share") == some(93) and int_at(s.copy(), "saved") == some(18000000) and int_at(s.copy(), "per_post") == some(400000))
+    assert(str_at(s, "said") == some(String("93% of runs used no tokens · 18M tokens saved by its script · 400k a post")))
+    assert(str_at(savings(0, 0, 0, 0, 0), "said") == some(String()))
 }
 
 @test

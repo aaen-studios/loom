@@ -4,9 +4,15 @@ module server.mcp_main
 // instance in the desktop app gives each agent's session, in place of the app
 // itself, which takes twice as long to start (LOO-222). The desktop app
 // carries it, built by desktop/build.rs, and writes it into the instance's
-// folder (PLAN.md, "Loom's own tools").
+// folder (PLAN.md, "Loom's own tools"). It's also the `loom` a routine's
+// script calls there, for `loom tool`, `loom state` and `loom post` (PLAN.md,
+// "Routines").
+import std.env
+import std.process.{exit}
 import server.mcp
 
 fn main() ! Error {
+    let given = env.args()
+    if given.len() > 0 and mcp.is_gate_command(given[0].copy()) { exit(mcp.gate_command(given)) }
     try mcp.serve()
 }

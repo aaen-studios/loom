@@ -120,6 +120,12 @@ usage: loom <command>
   update                    update this program to the newest signed release (--check: only say if there's one)
   version                   print loom's version and the protocol versions it speaks
   mcp                       loom's own tools as an MCP server on standard input and output, which the instance starts for its agents
+  tool SERVER [TOOL [JSON | KEY=VALUE ...]]
+                            in a routine's script: a tool of one of the person's MCP servers, called as them under
+                            the routine's agent's rules, printing what it gives; without TOOL, the tools there
+  state get KEY | set KEY VALUE | delete KEY | list
+                            in a routine's script: what it keeps between its runs
+  post [--notify] TEXT      in a routine's script: TEXT in the chat the routine posts in
   egress                    in a sandbox closed to the network: carries loom's tools and the proxy on 127.0.0.1:3128
                             to the instance, over standard input and output
 
@@ -428,6 +434,9 @@ fn said(text: own String, value: own Json) -> Said {
 }
 
 fn main() ! Error {
+    // What a routine's script calls (PLAN.md, "Routines"), with its own arguments.
+    let given = env.args()
+    if given.len() > 0 and mcp.is_gate_command(given[0].copy()) { exit(mcp.gate_command(given)) }
     let a = try read_args(env.args())
     if a.words.len() == 0 {
         if a.json { println("{failure("usage", String("Give a command, such as status."))}") } else { eprint(usage()) }
