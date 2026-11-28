@@ -69,6 +69,10 @@ struct ChatView: View {
                             } else if let card = m.routineOff {
                                 // A routine that turned off on its own: its card, to turn it on.
                                 RoutineOffRow(card: card)
+                            } else if let card = m.modelFallback {
+                                // A chat its program moved to another model: its card, to
+                                // switch back or start a new chat.
+                                ModelFallbackRow(card: card)
                             } else if m.isPerson {
                                 PersonMessage(message: m, agent: agent, tint: room.map { $0.color.isEmpty ? "grey" : $0.color })
                             } else {
@@ -115,7 +119,7 @@ struct ChatView: View {
                             }
                             // A card on one of the person's Acta boards, made from its words
                             // (PLAN.md, "Acta beside the chat").
-                            if model.hasActa && thread == nil && !m.live && !m.queued && !m.deleted && !isStartLine(m) && m.routineOff == nil && m.watchLine == nil {
+                            if model.hasActa && thread == nil && !m.live && !m.queued && !m.deleted && !isStartLine(m) && m.routineOff == nil && m.modelFallback == nil && m.watchLine == nil {
                                 Button {
                                     session.send(model.startCard(message: m.id, text: text))
                                 } label: {

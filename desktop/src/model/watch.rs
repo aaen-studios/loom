@@ -757,6 +757,7 @@ mod tests {
             asked_by: None,
             main: false,
             made_by: None,
+            model_now: None,
             title: String::new(),
         }
     }

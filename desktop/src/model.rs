@@ -15,6 +15,7 @@ pub mod draft_card;
 pub mod drafts;
 pub mod header;
 pub mod live;
+pub mod model_fallback;
 pub mod pools;
 mod popover;
 pub mod popup;
@@ -1964,6 +1965,10 @@ pub struct Conversation {
     /// For a thread an agent made with conversation.create, that agent's id (or a
     /// plugin's or a script's): a thread beside the chat, never the chat.
     pub made_by: Option<String>,
+    /// The model its agent program moved it to after a model's safeguards flagged a
+    /// request (`model_now` with `fallback`; `model/model_fallback.rs`), while it's
+    /// there.
+    pub model_now: Option<model_fallback::ModelNow>,
     pub title: String,
 }
 
@@ -2493,6 +2498,18 @@ pub enum CardBody {
         sending: bool,
         error: String,
     },
+    /// A chat its agent program moved to another model (loom's own card, in a `loom`
+    /// message; `model/model_fallback.rs`): its agent, the model it was on, how it stands
+    /// (`fallback`, `back`, `moved` or `picked`), what happened once it's done, which
+    /// button is on its way, and what the instance said to one it refused.
+    ModelFallback {
+        agent: String,
+        from_name: String,
+        state: String,
+        said: String,
+        going: Option<model_fallback::Going>,
+        error: String,
+    },
     /// One of Spools' entries an agent asked its person to connect with spool_connect
     /// (loom's own card; `model/spool_card.rs`): the entry, its name and mark, the
     /// server it becomes and its address, the agents it's for, the keys the person
@@ -2694,6 +2711,7 @@ impl Card {
                 tools: strings(v.get("tools")),
             },
             "routine_off" => routine_off::body_of(v),
+            "model_fallback" => model_fallback::body_of(v),
             "draft" => draft_card::body_of(v),
             "spool_connect" => spool_card::body_of(v),
             "voice_setup" => CardBody::VoiceSetup(Box::new(voice::card_of(v, ""))),
@@ -6555,6 +6573,9 @@ pub struct Model {
     /// Turn on, on the cards routines leave when they turn off on their own
     /// (`model/routine_off.rs`).
     routine_off: routine_off::Turning,
+    /// Switch back and New chat, on the cards of chats on a fallback model
+    /// (`model/model_fallback.rs`).
+    fallback_ui: model_fallback::Pending,
     /// What the app keeps of the chat's draft cards (`model/draft_card.rs`).
     draft_ui: draft_card::DraftUi,
     /// Sign in on the cards of spools agents asked to connect (`model/spool_card.rs`).
@@ -8635,6 +8656,10 @@ impl Model {
         if self.take_routine_on_answer(&id, f) {
             return;
         }
+        // Switch back or New chat, on a chat's fallback card (src/model/model_fallback.rs).
+        if self.take_fallback_answer(&id, f) {
+            return;
+        }
         // An answer on a draft card (src/model/draft_card.rs).
         if self.take_draft_answer(&id, f) {
             return;
@@ -9827,6 +9852,7 @@ impl Model {
                         asked_by: c.get("asked_by").and_then(Value::as_str).map(String::from),
                         main: c.get("main").and_then(Value::as_bool).unwrap_or(false),
                         made_by: c.get("made_by").and_then(Value::as_str).map(String::from),
+                        model_now: model_fallback::model_now_of(c.get("model_now")),
                         title: s(c, "title"),
                     })
                     .collect();
@@ -10015,6 +10041,7 @@ impl Model {
         }
         self.line_cards(&mut out);
         self.routine_off_cards(&mut out);
+        self.fallback_cards(&mut out);
         self.draft_cards(&mut out);
         let conversation = self.conversation();
         for r in &self.runs {
@@ -13019,6 +13046,7 @@ mod tests {
             asked_by: None,
             main: false,
             made_by: None,
+            model_now: None,
             title: String::new(),
         }];
         m.select(Some("a_1".into()));
@@ -13126,6 +13154,7 @@ mod tests {
             asked_by: None,
             main: false,
             made_by: None,
+            model_now: None,
             title: String::new(),
         }];
         m.select(Some("a_1".into()));
@@ -13179,6 +13208,7 @@ mod tests {
             asked_by: None,
             main: false,
             made_by: None,
+            model_now: None,
             program: None,
             title: String::new(),
         }];
@@ -14643,6 +14673,7 @@ mod tests {
             asked_by: None,
             main: false,
             made_by: None,
+            model_now: None,
             title: String::new(),
         }];
         m.select(Some("a_1".into()));
@@ -14677,6 +14708,7 @@ mod tests {
             asked_by: None,
             main: false,
             made_by: None,
+            model_now: None,
             title: String::new(),
         }];
         m.select(Some("a_1".into()));
@@ -15173,6 +15205,7 @@ mod tests {
             asked_by: None,
             main: false,
             made_by: None,
+            model_now: None,
             title: String::new(),
         }];
         m.select(Some("a_1".into()));
@@ -15288,6 +15321,7 @@ mod tests {
             asked_by: None,
             main: false,
             made_by: None,
+            model_now: None,
             title: String::new(),
         }];
         m.select(Some("a_1".into()));
@@ -15386,6 +15420,7 @@ mod tests {
             asked_by: None,
             main: false,
             made_by: None,
+            model_now: None,
             title: String::new(),
         }];
         m.select(Some("a_1".into()));
@@ -15488,6 +15523,7 @@ mod tests {
             asked_by: None,
             main: false,
             made_by: None,
+            model_now: None,
             title: String::new(),
         }];
         m.select(Some("a_1".into()));
@@ -15527,6 +15563,7 @@ mod tests {
             asked_by: None,
             main: false,
             made_by: None,
+            model_now: None,
             title: String::new(),
         }];
         m.select(Some("a_1".into()));
@@ -15990,6 +16027,7 @@ mod tests {
             asked_by: None,
             main: false,
             made_by: None,
+            model_now: None,
             title: String::new(),
         }];
         m.select(Some("a_1".into()));
@@ -16038,6 +16076,7 @@ mod tests {
                 asked_by: None,
                 main: false,
                 made_by: None,
+                model_now: None,
                 title: String::new(),
             },
             Conversation {
@@ -16052,6 +16091,7 @@ mod tests {
                 asked_by: None,
                 main: false,
                 made_by: None,
+                model_now: None,
                 title: String::new(),
             },
         ];
@@ -16112,6 +16152,7 @@ mod tests {
                 asked_by: None,
                 main: false,
                 made_by: None,
+                model_now: None,
                 title: String::new(),
             })
             .collect();
@@ -16249,6 +16290,7 @@ mod tests {
             asked_by: None,
             main: false,
             made_by: None,
+            model_now: None,
             title: String::new(),
         };
         // The thread first, as if it were newer than the chat.
@@ -16795,6 +16837,7 @@ mod tests {
                 asked_by: None,
                 main: false,
                 made_by: None,
+                model_now: None,
                 title: String::new(),
             },
             Conversation {
@@ -16809,6 +16852,7 @@ mod tests {
                 asked_by: None,
                 main: false,
                 made_by: None,
+                model_now: None,
                 title: String::new(),
             },
         ];
@@ -17385,6 +17429,7 @@ mod tests {
             asked_by: None,
             main: false,
             made_by: None,
+            model_now: None,
             title: String::new(),
         };
         let mut m = Model::new();
@@ -17411,6 +17456,7 @@ mod tests {
             asked_by: None,
             main: false,
             made_by: None,
+            model_now: None,
             title: "Socks, again".into(),
             ..chat
         });
@@ -17501,6 +17547,7 @@ mod tests {
                 asked_by: None,
                 main: false,
                 made_by: None,
+                model_now: None,
                 title: String::new(),
             },
             Conversation {
@@ -17515,6 +17562,7 @@ mod tests {
                 asked_by: None,
                 main: false,
                 made_by: None,
+                model_now: None,
                 title: String::new(),
             },
         ];
@@ -17556,6 +17604,7 @@ mod tests {
             asked_by: None,
             main: false,
             made_by: None,
+            model_now: None,
             title: String::new(),
         }];
         m.select(Some("a_1".into()));
@@ -18101,6 +18150,7 @@ mod tests {
             asked_by: None,
             main: false,
             made_by: None,
+            model_now: None,
             title: String::new(),
         };
         m.conversations = vec![

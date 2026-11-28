@@ -1,0 +1,247 @@
+module server.fallback
+
+// A model fallback (PLAN.md, "A model fallback"): when a model's safeguards
+// flag a request, its program can answer it on another model and carry the
+// session on there, as Claude's adapter does (its model_refusal_fallback). It
+// says so with a `notice` session update, or for a client without notices, a
+// blockquote in the reply's words, and then a config_option_update whose model
+// is the fallback. The instance does the rest; what's here only reads text and
+// JSON, and words loom's own line.
+import std.json.{Json}
+import shared.obj.{Obj, at, str_at}
+
+// What the program said of a fallback: the models by id, as it named them,
+// and whether the session carries on there (rather than only that answer).
+pub struct Said {
+    pub from: String
+    pub to: String
+    pub stays: bool
+}
+
+const DECLINED: str = " declined this request"
+const RETRIED: str = "; retried with "
+const LABEL: str = "**Model fallback:**"
+
+// Whether a piece of the reply's words is the adapter's fallback line, for a
+// client without notices: "> **Model fallback:** …", or the title alone in
+// bold, "> **MODEL declined this request; retried with OTHER. …**".
+pub fn in_words(text: String) -> bool {
+    if text.contains(LABEL) { return true }
+    let t = text.trim()
+    return t.starts_with(">") and t.contains(DECLINED) and t.contains(RETRIED)
+}
+
+// Whether a `notice` update is about a fallback: its title or description
+// says a model declined the request and another was tried.
+pub fn is_notice(update: Json) -> bool {
+    let title = str_at(update.copy(), "title") ?? String()
+    let description = str_at(update, "description") ?? String()
+    if title == "Model fallback" { return true }
+    return read(title).len() > 0 or read(description).len() > 0
+}
+
+// The whole of what a fallback `notice` says: its title and description.
+pub fn notice_text(update: Json) -> String {
+    let title = str_at(update.copy(), "title") ?? String()
+    let description = str_at(update, "description") ?? String()
+    if description.len() == 0 { return title }
+    if title == "Model fallback" { return description }
+    return "{title}\n\n{description}"
+}
+
+// What the program's words say of a fallback, or nothing for words that don't
+// say one: "MODEL declined this request (CATEGORY); retried with OTHER. The
+// session will continue on OTHER." in a notice or a blockquote, with or
+// without the bold and the label.
+pub fn read(text: String) -> List<Said> {
+    var out = List<Said>()
+    let plain = text.replace("**", "").replace(LABEL.replace("**", ""), "")
+    for raw in plain.lines() {
+        let one = raw.trim().trim_prefix(">").trim().copy()
+        let d = one.find(DECLINED) else continue
+        let r = one.find(RETRIED) else continue
+        if r < d { continue }
+        let from = one[..d].trim().copy()
+        let after = one[r + RETRIED.len()..].copy()
+        // The fallback's id runs to the full stop before what happens next.
+        let cut = after.find(". ") ?? (after.trim_suffix(".").len())
+        let to = after[..cut].trim().trim_suffix(".").copy()
+        if from.len() == 0 or to.len() == 0 { continue }
+        let rest = after[cut..].copy()
+        // "The session stays on" and "Only that response came from" say it didn't stay.
+        let stays = not rest.contains("stays on") and not rest.contains("Only that response")
+        out.push(Said { from: from, to: to, stays: stays })
+        break
+    }
+    return out
+}
+
+// A model's name from its id, where the program names it no better:
+// claude-sonnet-5-5 is Sonnet 5.5, claude-opus-4-1-20250805 is Opus 4.1.
+pub fn tidy(id: String) -> String {
+    var words = List<String>()
+    var number = List<String>()
+    let parts = id.trim_prefix("claude-").split("-")
+    for p in parts {
+        if p.len() == 0 { continue }
+        // A date at its end isn't part of its name.
+        if p.len() == 8 and digits(p.copy()) { continue }
+        if digits(p.copy()) {
+            number.push(p.copy())
+            continue
+        }
+        if number.len() > 0 {
+            words.push(number.join("."))
+            number = List<String>()
+        }
+        words.push(capital(p.copy()))
+    }
+    if number.len() > 0 { words.push(number.join(".")) }
+    if words.len() == 0 { return id.copy() }
+    return words.join(" ")
+}
+
+fn digits(s: String) -> bool {
+    if s.len() == 0 { return false }
+    for r in s.runes() {
+        if r < '0' or r > '9' { return false }
+    }
+    return true
+}
+
+fn capital(s: String) -> String {
+    if s.len() == 0 { return s.copy() }
+    var out = s[..1].to_upper_root()
+    out.push_str(s[1..].copy())
+    return out
+}
+
+// What model `value` is called in a session's configOptions: its option's
+// name, where it has one other than its id, or for the program's default its
+// description, which names the model it runs; otherwise a tidy name from `id`,
+// the id the program gave in its words, or `value` itself.
+pub fn name_in(config: Json, value: String, id: String) -> String {
+    if let Json.Array(list) = config {
+        for c in list {
+            if str_at(c.copy(), "category") != some(String("model")) { continue }
+            for v in values_of(c) {
+                if str_at(v.copy(), "value") != some(value.copy()) { continue }
+                let name = str_at(v.copy(), "name") ?? String()
+                let description = str_at(v, "description") ?? String()
+                if value == "default" and description.len() > 0 and description.len() <= 40 { return description }
+                if name.len() > 0 and name != value { return name }
+            }
+        }
+    }
+    return tidy(if id.len() > 0 { id.copy() } else { value.copy() })
+}
+
+// The model a program starts a session on, as its options say (acp.offered's
+// `value`, or a session's `currentValue`), or "".
+pub fn start_value(options: Json) -> String {
+    if let Json.Array(list) = options {
+        for c in list {
+            if str_at(c.copy(), "category") != some(String("model")) { continue }
+            return str_at(c.copy(), "value") ?? (str_at(c, "currentValue") ?? String())
+        }
+    }
+    return String()
+}
+
+fn values_of(option: Json) -> List<Json> {
+    var out = List<Json>()
+    if let Json.Array(list) = at(option, "options") {
+        for o in list {
+            if let Json.Array(grouped) = at(o.copy(), "options") {
+                for g in grouped { out.push(g.copy()) }
+            } else {
+                out.push(o.copy())
+            }
+        }
+    }
+    return out
+}
+
+// Loom's line in the reply, at the point it happened.
+pub fn line(from: String, to: String) -> String {
+    return "{from}'s safeguards flagged this request, so {to} answers from here."
+}
+
+// The same, for a fallback that answered once and left the session where it was.
+pub fn once_line(from: String, to: String) -> String {
+    return "{from}'s safeguards flagged this request, so {to} answered it."
+}
+
+// What a chat on a fallback keeps, and its apps are told, as `model_now`.
+pub fn model_now(value: String, name: String, from: String, from_name: String) -> Json {
+    return Obj.new().s("value", value).s("name", name).b("fallback", true).s("from", from).s("from_name", from_name).done()
+}
+
+// Loom's card under the reply: the chat is on another model now, with Switch
+// back and New chat, until one is used or the person picks a model.
+pub fn card(id: String, agent: String, now: Json) -> Json {
+    let name = str_at(now.copy(), "name") ?? String()
+    return Obj.new().s("id", id).s("type", String("model_fallback")).s("title", "This chat is on {name} now.").s("agent", agent).s("model", str_at(now.copy(), "value") ?? String()).s("model_name", name).s("from", str_at(now.copy(), "from") ?? String()).s("from_name", str_at(now, "from_name") ?? String()).s("state", String("fallback")).done()
+}
+
+// The card once it's done with: `state` `back` (it switched back to `name`),
+// `moved` (a new chat took over) or `picked` (the person picked `name`), with
+// `said`, its one line, and no buttons.
+pub fn card_done(was: Json, state: str, name: String) -> Json {
+    let said = if state == "moved" { String("Moved to a new chat.") } else if state == "back" { "Back on {name}." } else { "On {name} now." }
+    var o = Obj.new()
+    if let Json.Object(m) = was {
+        for (k, v) in m { o.m.insert(k.copy(), v.copy()) }
+    }
+    return o.s("state", String(state)).s("said", said).done()
+}
+
+@test
+fn the_adapters_words_are_read() {
+    let notice = read(String("claude-opus-5-5 declined this request (cyber); retried with claude-sonnet-5-5. The session will continue on claude-sonnet-5-5."))
+    assert(notice.len() == 1 and notice[0].from == "claude-opus-5-5" and notice[0].to == "claude-sonnet-5-5" and notice[0].stays)
+    let quoted = read(String("\n\n> **Model fallback:** claude-opus-5-5 declined this request; retried with claude-sonnet-5-5. The session will continue on claude-sonnet-5-5.\n>\n> It looked like malware.\n\n"))
+    assert(quoted.len() == 1 and quoted[0].to == "claude-sonnet-5-5")
+    let bold = read(String("> **opus declined this request; retried with sonnet. The session will continue on sonnet.**"))
+    assert(bold.len() == 1 and bold[0].from == "opus" and bold[0].to == "sonnet")
+    let once = read(String("opus declined this request; retried with sonnet. Only that response came from sonnet; the session stays on opus."))
+    assert(once.len() == 1 and not once[0].stays)
+    assert(read(String("I declined this request; it seemed unwise.")).len() == 0)
+    assert(in_words(String("\n\n> **Model fallback:** a declined this request; retried with b.\n\n")))
+    assert(in_words(String("> **a declined this request; retried with b. The session will continue on b.**")))
+    assert(not in_words(String("The model declined this request; retried with a hammer.")))
+}
+
+@test
+fn notices_are_told_apart() {
+    let fell = Obj.new().s("sessionUpdate", String("notice")).s("severity", String("warning")).s("title", String("a declined this request; retried with b. The session will continue on b.")).done()
+    assert(is_notice(fell.copy()))
+    let long = Obj.new().s("title", String("Model fallback")).s("description", String("a declined this request; retried with b.\n\nWhy.")).done()
+    assert(is_notice(long.copy()) and notice_text(long).starts_with("a declined"))
+    assert(not is_notice(Obj.new().s("title", String("MCP server github failed to start")).done()))
+}
+
+@test
+fn models_are_named() {
+    assert(tidy(String("claude-sonnet-5-5")) == "Sonnet 5.5")
+    assert(tidy(String("claude-opus-4-1-20250805")) == "Opus 4.1")
+    assert(tidy(String("fake-3")) == "Fake 3")
+    assert(tidy(String("sonnet")) == "Sonnet")
+    let option = Obj.new().s("id", String("model")).s("category", String("model")).j("options", Json.Array([Obj.new().s("value", String("default")).s("name", String("Default (recommended)")).s("description", String("Opus 5.5")).done(), Obj.new().s("value", String("sonnet")).s("name", String("Sonnet 5.5")).done(), Obj.new().s("value", String("claude-haiku-5")).s("name", String("claude-haiku-5")).done()])).done()
+    let config = Json.Array([option])
+    assert(name_in(config.copy(), String("default"), String("claude-opus-5-5")) == "Opus 5.5")
+    assert(name_in(config.copy(), String("sonnet"), String()) == "Sonnet 5.5")
+    assert(name_in(config.copy(), String("claude-haiku-5"), String()) == "Haiku 5")
+    assert(name_in(config, String("claude-sonnet-5-5"), String()) == "Sonnet 5.5")
+    assert(line(String("Opus 5.5"), String("Sonnet 5.5")) == "Opus 5.5's safeguards flagged this request, so Sonnet 5.5 answers from here.")
+}
+
+@test
+fn the_card_says_what_happened() {
+    let now = model_now(String("sonnet"), String("Sonnet 5.5"), String("default"), String("Opus 5.5"))
+    let c = card(String("msg_1"), String("a_1"), now)
+    assert(str_at(c.copy(), "title") == some(String("This chat is on Sonnet 5.5 now.")) and str_at(c.copy(), "state") == some(String("fallback")))
+    assert(str_at(card_done(c.copy(), "back", String("Opus 5.5")), "said") == some(String("Back on Opus 5.5.")))
+    assert(str_at(card_done(c.copy(), "moved", String()), "said") == some(String("Moved to a new chat.")))
+    assert(str_at(card_done(c, "picked", String("Haiku 5")), "said") == some(String("On Haiku 5 now.")))
+}

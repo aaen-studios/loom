@@ -75,7 +75,7 @@ CREATE TABLE IF NOT EXISTS acp_people (
 CREATE TABLE IF NOT EXISTS usage (
     user TEXT NOT NULL REFERENCES users(id), program TEXT NOT NULL, run TEXT NOT NULL,
     input INTEGER NOT NULL, output INTEGER NOT NULL, total INTEGER NOT NULL,
-    shared INTEGER NOT NULL, at INTEGER NOT NULL);
+    shared INTEGER NOT NULL, at INTEGER NOT NULL, model TEXT NOT NULL DEFAULT '');
 CREATE INDEX IF NOT EXISTS usage_by_user ON usage (user, program, at);
 CREATE TABLE IF NOT EXISTS agents (
     id TEXT PRIMARY KEY, user TEXT NOT NULL REFERENCES users(id), json TEXT NOT NULL,
@@ -147,6 +147,9 @@ CREATE TABLE IF NOT EXISTS posts_untold (
 CREATE TABLE IF NOT EXISTS conversation_programs (
     conversation TEXT PRIMARY KEY, user TEXT NOT NULL REFERENCES users(id), program TEXT NOT NULL,
     summary_from TEXT NOT NULL DEFAULT '');
+CREATE TABLE IF NOT EXISTS model_fallbacks (
+    conversation TEXT PRIMARY KEY, user TEXT NOT NULL REFERENCES users(id), now TEXT NOT NULL DEFAULT '',
+    card TEXT NOT NULL DEFAULT '', back TEXT NOT NULL DEFAULT '');
 CREATE TABLE IF NOT EXISTS routine_threads (
     conversation TEXT PRIMARY KEY, user TEXT NOT NULL REFERENCES users(id), routine TEXT NOT NULL);
 -- A conversation another agent (by its id) or a plugin's panel (plugin:ID) keeps with
@@ -436,6 +439,12 @@ fn conversation_of(r: List<Value>) -> Json {
     // When the newest message its person has read is from, once they've read one.
     let read = int(r[21].copy())
     if read > 0 { o = o.i("read", read) }
+    // The model it's on in place of the one loom set, after a fallback (PLAN.md,
+    // "A model fallback").
+    let model_now = text(r[22].copy())
+    if model_now.len() > 0 {
+        if let ok(j) = parse(model_now) { o = o.j("model_now", j) }
+    }
     return o.done()
 }
 
@@ -648,6 +657,13 @@ impl Store {
             if text(r[1].copy()) == "compacted" { compacted = true }
         }
         if not compacted { try s.db.execute_script(String("ALTER TABLE contexts ADD COLUMN compacted INTEGER NOT NULL DEFAULT 0; ALTER TABLE contexts ADD COLUMN compacts INTEGER NOT NULL DEFAULT 0; ALTER TABLE contexts ADD COLUMN agent TEXT NOT NULL DEFAULT ''; ALTER TABLE contexts ADD COLUMN fresh INTEGER NOT NULL DEFAULT 0;")) }
+        // Usage from before it kept the model a turn ended on gets the column, empty
+        // for not known (PLAN.md, "A model fallback").
+        var modelled = false
+        for r in try s.db.query(String("PRAGMA table_info(usage)")) {
+            if text(r[1].copy()) == "model" { modelled = true }
+        }
+        if not modelled { try s.db.execute_script(String("ALTER TABLE usage ADD COLUMN model TEXT NOT NULL DEFAULT '';")) }
         try s.db.execute_script(String("CREATE INDEX IF NOT EXISTS proposals_by_message ON proposals (user, message) WHERE message != '';"))
         // What prune_rows looks for, by age.
         try s.db.execute_script(String("CREATE INDEX IF NOT EXISTS runs_by_at ON runs (at); CREATE INDEX IF NOT EXISTS sent_by_at ON sent (at); CREATE INDEX IF NOT EXISTS usage_by_at ON usage (at);"))
@@ -1144,7 +1160,69 @@ impl Store {
     // The tokens a turn used, as its agent program reported them, and whether on
     // settings the owner shared.
     pub fn add_usage(self, user: String, program: String, run: String, input: i64, output: i64, total: i64, shared: bool) ! Error {
-        _ = try self.db.execute(String("INSERT INTO usage (user, program, run, input, output, total, shared, at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)"), [t(user), t(program), t(run), Value.Int(input), Value.Int(output), Value.Int(total), Value.Int(if shared { 1 } else { 0 }), Value.Int(now())])
+        try self.add_usage_on(user, program, run, input, output, total, shared, String())
+    }
+
+    // The same, with the model its session was on as the turn ended, by its
+    // program's id for it, or "" for not known.
+    pub fn add_usage_on(self, user: String, program: String, run: String, input: i64, output: i64, total: i64, shared: bool, model: String) ! Error {
+        _ = try self.db.execute(String("INSERT INTO usage (user, program, run, input, output, total, shared, at, model) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"), [t(user), t(program), t(run), Value.Int(input), Value.Int(output), Value.Int(total), Value.Int(if shared { 1 } else { 0 }), Value.Int(now()), t(model)])
+    }
+
+    // What an agent's runs used since `since`, by model: each `model` (its
+    // program's id, "" for turns from before it was kept) and its `tokens`,
+    // most first.
+    pub fn agent_models(self, user: String, agent: String, since: i64) -> Json ! Error {
+        var out = List<Json>()
+        for r in try self.db.query(String("SELECT u.model, SUM(u.total) AS tokens FROM usage u JOIN runs r ON r.id = u.run JOIN conversations c ON c.id = r.conversation WHERE u.user = ? AND c.agent = ? AND u.at >= ? GROUP BY u.model ORDER BY tokens DESC, u.model"), [t(user), t(agent), Value.Int(since)]) {
+            out.push(Obj.new().s("model", text(r[0].copy())).i("tokens", int(r[1].copy())).done())
+        }
+        return Json.Array(out)
+    }
+
+    // --- A model fallback (PLAN.md, "A model fallback") ---
+
+    // The model a chat is on now in place of the one loom set, its `model_now`,
+    // or none while it's on its own.
+    pub fn model_now(self, user: String, conversation: String) -> Json? ! Error {
+        let r = try self.db.query_one(String("SELECT now FROM model_fallbacks WHERE conversation = ? AND user = ? AND now != ''"), [t(conversation), t(user)]) else return none
+        return some(try parse(text(r[0].copy())))
+    }
+
+    // Keeps `now` as the model a chat is on, or with null, that it's on its own again.
+    pub fn put_model_now(self, user: String, conversation: String, model: Json) ! Error {
+        let kept = if model == Json.Null { String() } else { "{model}" }
+        _ = try self.db.execute(String("INSERT INTO model_fallbacks (conversation, user, now) VALUES (?, ?, ?) ON CONFLICT (conversation) DO UPDATE SET now = excluded.now"), [t(conversation), t(user), t(kept)])
+    }
+
+    // The message of the card that says a chat went to another model, or "".
+    pub fn fallback_card(self, user: String, conversation: String) -> String ! Error {
+        let r = try self.db.query_one(String("SELECT card FROM model_fallbacks WHERE conversation = ? AND user = ?"), [t(conversation), t(user)]) else return String()
+        return text(r[0].copy())
+    }
+
+    pub fn put_fallback_card(self, user: String, conversation: String, card: String) ! Error {
+        _ = try self.db.execute(String("INSERT INTO model_fallbacks (conversation, user, card) VALUES (?, ?, ?) ON CONFLICT (conversation) DO UPDATE SET card = excluded.card"), [t(conversation), t(user), t(card)])
+    }
+
+    // The model a chat's next session is set back to, when it had no session
+    // to switch back in; "" for none. `put_model_back` with "" takes it away.
+    pub fn model_back(self, user: String, conversation: String) -> String ! Error {
+        let r = try self.db.query_one(String("SELECT back FROM model_fallbacks WHERE conversation = ? AND user = ?"), [t(conversation), t(user)]) else return String()
+        return text(r[0].copy())
+    }
+
+    pub fn put_model_back(self, user: String, conversation: String, value: String) ! Error {
+        _ = try self.db.execute(String("INSERT INTO model_fallbacks (conversation, user, back) VALUES (?, ?, ?) ON CONFLICT (conversation) DO UPDATE SET back = excluded.back"), [t(conversation), t(user), t(value)])
+    }
+
+    // `user`'s chats with `agent` on another model than loom set.
+    pub fn fallback_chats(self, user: String, agent: String) -> List<String> ! Error {
+        var out = List<String>()
+        for r in try self.db.query(String("SELECT f.conversation FROM model_fallbacks f JOIN conversations c ON c.id = f.conversation WHERE f.user = ? AND c.agent = ? AND f.now != '' AND c.deleted = 0"), [t(user), t(agent)]) {
+            out.push(text(r[0].copy()))
+        }
+        return out
     }
 
     // What an agent has, counted: its own `memories`, the person's `skills`
@@ -1264,7 +1342,7 @@ impl Store {
     }
 
     pub fn conversation(self, user: String, id: String) -> Json? ! Error {
-        let row = try self.db.query_one("SELECT c.id, c.agent, c.title, c.at, k.id, s.agent, b.from_conversation, b.from_message, rt.routine, cp.program, ak.by, rm.json, cx.used, cx.size, cx.compacted, cx.compacts, cx.agent, CAST(COALESCE(mt.value, '0') AS INTEGER), COALESCE(d.day, 0), {MAIN_COLUMNS}, c.read FROM conversations c LEFT JOIN tasks k ON k.conversation = c.id LEFT JOIN sides s ON s.conversation = c.id LEFT JOIN branches b ON b.conversation = c.id LEFT JOIN routine_threads rt ON rt.conversation = c.id LEFT JOIN conversation_programs cp ON cp.conversation = c.id LEFT JOIN asks ak ON ak.conversation = c.id LEFT JOIN rooms rm ON rm.conversation = c.id LEFT JOIN contexts cx ON cx.user = c.user AND cx.conversation = c.id {COSTS} {MAIN_JOINS} WHERE c.id = ? AND c.user = ? AND c.deleted = 0", [t(user.copy()), Value.Int(now() - DAY_MS), t(id), t(user)])
+        let row = try self.db.query_one("SELECT c.id, c.agent, c.title, c.at, k.id, s.agent, b.from_conversation, b.from_message, rt.routine, cp.program, ak.by, rm.json, cx.used, cx.size, cx.compacted, cx.compacts, cx.agent, CAST(COALESCE(mt.value, '0') AS INTEGER), COALESCE(d.day, 0), {MAIN_COLUMNS}, c.read, (SELECT now FROM model_fallbacks WHERE conversation = c.id) FROM conversations c LEFT JOIN tasks k ON k.conversation = c.id LEFT JOIN sides s ON s.conversation = c.id LEFT JOIN branches b ON b.conversation = c.id LEFT JOIN routine_threads rt ON rt.conversation = c.id LEFT JOIN conversation_programs cp ON cp.conversation = c.id LEFT JOIN asks ak ON ak.conversation = c.id LEFT JOIN rooms rm ON rm.conversation = c.id LEFT JOIN contexts cx ON cx.user = c.user AND cx.conversation = c.id {COSTS} {MAIN_JOINS} WHERE c.id = ? AND c.user = ? AND c.deleted = 0", [t(user.copy()), Value.Int(now() - DAY_MS), t(id), t(user)])
         let r = row else return none
         return some(conversation_of(r))
     }
@@ -1272,7 +1350,7 @@ impl Store {
     // `agent`'s chat with the person, as every app shows it (`main_chats`): never
     // merely its newest conversation. None until it has one.
     pub fn main_chat(self, user: String, agent: String) -> Json? ! Error {
-        let r = try self.db.query_one(String("SELECT c.id, c.agent, c.title, c.at, NULL, NULL, NULL, NULL, NULL, (SELECT program FROM conversation_programs WHERE conversation = c.id), NULL, NULL, (SELECT used FROM contexts WHERE user = c.user AND conversation = c.id), (SELECT size FROM contexts WHERE user = c.user AND conversation = c.id), (SELECT compacted FROM contexts WHERE user = c.user AND conversation = c.id), (SELECT compacts FROM contexts WHERE user = c.user AND conversation = c.id), (SELECT agent FROM contexts WHERE user = c.user AND conversation = c.id), (SELECT CAST(value AS INTEGER) FROM meta WHERE key = 'turn_tokens/' || c.user || '/' || c.id), (SELECT COALESCE(SUM(u.total), 0) FROM usage u JOIN runs r ON r.id = u.run WHERE u.user = c.user AND r.conversation = c.id AND u.at >= ?), 1, NULL, c.read FROM main_chats mc JOIN conversations c ON c.id = mc.conversation AND c.user = mc.user WHERE mc.user = ? AND mc.agent = ? AND c.deleted = 0"), [Value.Int(now() - DAY_MS), t(user), t(agent)]) else return none
+        let r = try self.db.query_one(String("SELECT c.id, c.agent, c.title, c.at, NULL, NULL, NULL, NULL, NULL, (SELECT program FROM conversation_programs WHERE conversation = c.id), NULL, NULL, (SELECT used FROM contexts WHERE user = c.user AND conversation = c.id), (SELECT size FROM contexts WHERE user = c.user AND conversation = c.id), (SELECT compacted FROM contexts WHERE user = c.user AND conversation = c.id), (SELECT compacts FROM contexts WHERE user = c.user AND conversation = c.id), (SELECT agent FROM contexts WHERE user = c.user AND conversation = c.id), (SELECT CAST(value AS INTEGER) FROM meta WHERE key = 'turn_tokens/' || c.user || '/' || c.id), (SELECT COALESCE(SUM(u.total), 0) FROM usage u JOIN runs r ON r.id = u.run WHERE u.user = c.user AND r.conversation = c.id AND u.at >= ?), 1, NULL, c.read, (SELECT now FROM model_fallbacks WHERE conversation = c.id) FROM main_chats mc JOIN conversations c ON c.id = mc.conversation AND c.user = mc.user WHERE mc.user = ? AND mc.agent = ? AND c.deleted = 0"), [Value.Int(now() - DAY_MS), t(user), t(agent)]) else return none
         return some(conversation_of(r))
     }
 
@@ -1345,7 +1423,7 @@ impl Store {
 
     pub fn conversations(self, user: String) -> List<Json> ! Error {
         var out = List<Json>()
-        for r in try self.db.query("SELECT c.id, c.agent, c.title, c.at, k.id, s.agent, b.from_conversation, b.from_message, rt.routine, cp.program, ak.by, rm.json, cx.used, cx.size, cx.compacted, cx.compacts, cx.agent, CAST(COALESCE(mt.value, '0') AS INTEGER), COALESCE(d.day, 0), {MAIN_COLUMNS}, c.read FROM conversations c LEFT JOIN tasks k ON k.conversation = c.id LEFT JOIN sides s ON s.conversation = c.id LEFT JOIN branches b ON b.conversation = c.id LEFT JOIN routine_threads rt ON rt.conversation = c.id LEFT JOIN conversation_programs cp ON cp.conversation = c.id LEFT JOIN asks ak ON ak.conversation = c.id LEFT JOIN rooms rm ON rm.conversation = c.id LEFT JOIN contexts cx ON cx.user = c.user AND cx.conversation = c.id {COSTS} {MAIN_JOINS} WHERE c.user = ? AND c.deleted = 0 ORDER BY c.at", [t(user.copy()), Value.Int(now() - DAY_MS), t(user)]) {
+        for r in try self.db.query("SELECT c.id, c.agent, c.title, c.at, k.id, s.agent, b.from_conversation, b.from_message, rt.routine, cp.program, ak.by, rm.json, cx.used, cx.size, cx.compacted, cx.compacts, cx.agent, CAST(COALESCE(mt.value, '0') AS INTEGER), COALESCE(d.day, 0), {MAIN_COLUMNS}, c.read, (SELECT now FROM model_fallbacks WHERE conversation = c.id) FROM conversations c LEFT JOIN tasks k ON k.conversation = c.id LEFT JOIN sides s ON s.conversation = c.id LEFT JOIN branches b ON b.conversation = c.id LEFT JOIN routine_threads rt ON rt.conversation = c.id LEFT JOIN conversation_programs cp ON cp.conversation = c.id LEFT JOIN asks ak ON ak.conversation = c.id LEFT JOIN rooms rm ON rm.conversation = c.id LEFT JOIN contexts cx ON cx.user = c.user AND cx.conversation = c.id {COSTS} {MAIN_JOINS} WHERE c.user = ? AND c.deleted = 0 ORDER BY c.at", [t(user.copy()), Value.Int(now() - DAY_MS), t(user)]) {
             out.push(conversation_of(r))
         }
         return out
@@ -1374,6 +1452,7 @@ impl Store {
         _ = try self.db.execute(String("DELETE FROM made_threads WHERE conversation = ? AND user = ?"), [t(id.copy()), t(user.copy())])
         _ = try self.db.execute(String("DELETE FROM main_chats WHERE conversation = ? AND user = ?"), [t(id.copy()), t(user.copy())])
         _ = try self.db.execute(String("DELETE FROM conversation_programs WHERE conversation = ? AND user = ?"), [t(id.copy()), t(user.copy())])
+        _ = try self.db.execute(String("DELETE FROM model_fallbacks WHERE conversation = ? AND user = ?"), [t(id.copy()), t(user.copy())])
         _ = try self.db.execute(String("DELETE FROM deleted_untold WHERE conversation = ? AND user = ?"), [t(id.copy()), t(user.copy())])
         _ = try self.db.execute(String("DELETE FROM posts_untold WHERE conversation = ? AND user = ?"), [t(id.copy()), t(user.copy())])
         _ = try self.db.execute(String("DELETE FROM rooms WHERE conversation = ? AND user = ?"), [t(id.copy()), t(user.copy())])
@@ -4590,4 +4669,34 @@ fn a_group_chat_s_usage_has_its_turns_and_the_router_s_picks() {
     assert(s.room_usage(a.id.copy(), String("c_room"), 0)! == (140, 12))
     assert(s.room_usage(a.id.copy(), String("c_own"), 0)! == (1000, 0))
     assert(s.room_usage(a.id.copy(), String("c_room"), now() + 60000)! == (0, 0))
+}
+
+@test
+fn usage_is_counted_by_model_and_a_chat_keeps_its_fallback() {
+    let s = test_store()
+    let a = s.add_user(String("a"), String("password1"), "owner")!
+    let c = s.add_conversation(a.id.copy(), String("a_1"), String("Chat"))!
+    let chat = field(c, "id")
+    s.add_run(a.id.copy(), String("run_1"), chat.copy())!
+    s.add_run(a.id.copy(), String("run_2"), chat.copy())!
+    s.add_run(a.id.copy(), String("run_3"), chat.copy())!
+    s.add_usage_on(a.id.copy(), String("claude"), String("run_1"), 50, 50, 100, false, String("default"))!
+    s.add_usage_on(a.id.copy(), String("claude"), String("run_2"), 200, 200, 400, false, String("sonnet"))!
+    s.add_usage(a.id.copy(), String("claude"), String("run_3"), 5, 5, 10, false)!
+    let models = "{s.agent_models(a.id.copy(), String("a_1"), 0)!}"
+    assert(models == #"[{"model":"sonnet","tokens":400},{"model":"default","tokens":100},{"model":"","tokens":10}]"#)
+    // On a fallback: the chat says which model, and stops once it's on its own again.
+    assert(s.model_now(a.id.copy(), chat.copy())! == none)
+    let now_on = Obj.new().s("value", String("sonnet")).b("fallback", true).done()
+    s.put_model_now(a.id.copy(), chat.copy(), now_on.copy())!
+    s.put_fallback_card(a.id.copy(), chat.copy(), String("msg_9"))!
+    let shown = s.conversation(a.id.copy(), chat.copy())! ?? Json.Null
+    assert((shown.get(String("model_now")) ?? Json.Null) == now_on)
+    assert(s.fallback_chats(a.id.copy(), String("a_1"))!.len() == 1)
+    s.put_model_now(a.id.copy(), chat.copy(), Json.Null)!
+    s.put_model_back(a.id.copy(), chat.copy(), String("default"))!
+    let after = s.conversation(a.id.copy(), chat.copy())! ?? Json.Null
+    assert(after.get(String("model_now")) == none)
+    assert(s.fallback_card(a.id.copy(), chat.copy())! == "msg_9" and s.model_back(a.id.copy(), chat.copy())! == "default")
+    assert(s.fallback_chats(a.id.copy(), String("a_1"))!.len() == 0)
 }

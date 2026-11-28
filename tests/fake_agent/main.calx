@@ -80,6 +80,15 @@ module tests.fake_agent.main
 //                         used, resetting at SR (Unix seconds), and the week W%, at WR
 //     /account NAME       says its login is a plan's, NAME, as Claude's adapter does
 //                         with _auth/status_update; "/account" alone, an API key's
+//     /fallback MODEL     the model's safeguards flag the request, as Claude's adapter
+//                         plays it: a `notice` (or, for a client without notices,
+//                         the "> **Model fallback:** …" blockquote in its words) that
+//                         the session goes on on MODEL, then a config_option_update
+//                         whose model is MODEL, listed as its own where it isn't offered
+//     /fallbackwords MODEL
+//                         the same, said in its words whatever the client takes
+//     /fallbackonce MODEL a notice that MODEL answered this once, and the session
+//                         stays where it was, with no config_option_update
 //     /env NAME           says NAME=VALUE, its environment variable NAME
 //     /net HOST:PORT      says whether HOST:PORT can be reached straight ("direct
 //                         open" or "direct closed"), and through the proxy
@@ -218,6 +227,7 @@ pub enum Step {
     Compacted(i64, i64)
     Next(String)    // a step for its next turn
     Compact(i64, i64, i64)
+    Fallback(String, String)    // the model it goes to, and how it says so: "notice" (a notice, or the words for a client without), "words" or "once"
 }
 
 // The steps a prompt spells out. Blank lines are skipped.
@@ -304,6 +314,9 @@ pub fn script(text: String) -> List<Step> {
             steps.push(Step.Session)
         } else if word == "/servers" {
             steps.push(Step.Servers)
+        } else if word == "/fallback" or word == "/fallbackwords" or word == "/fallbackonce" {
+            let how = if word == "/fallback" { "notice" } else if word == "/fallbackwords" { "words" } else { "once" }
+            steps.push(Step.Fallback(rest, String(how)))
         } else if word == "/config" {
             steps.push(Step.Config)
         } else if word == "/meta" {
@@ -474,6 +487,8 @@ struct Agent {
     record: String
     // Each session's turns so far, and the characters they sent and said, for --record.
     history: Map<String, (i64, i64)>
+    // Whether the client takes `notice` session updates (its clientCapabilities.session.notices).
+    notices: bool
     // With --log=PATH, the file its start and each session it picks up are written to.
     log: String
 }
@@ -506,9 +521,24 @@ fn config_option(values: Map<String, String>, id: str, name: str, category: str)
     c.insert("type", js(String("select")))
     var current = String()
     if let v = values.find(String(id)) { current = v.copy() }
+    // A value it doesn't offer, as a fallback's model, is listed as its own, by its id,
+    // as Claude's adapter lists one.
+    if current.len() > 0 and not offered(String(id)).contains(current.copy()) {
+        var extra = LinkedMap<String, Json>()
+        extra.insert("value", js(current.copy()))
+        extra.insert("name", js(current.copy()))
+        options.push(Json.Object(extra))
+    }
     c.insert("currentValue", js(current))
     c.insert("options", Json.Array(options))
     return Json.Object(c)
+}
+
+// What's at `a`.`b`.`c` in `j`, or null.
+fn at_path(j: Json, a: str, b: str, c: str) -> Json {
+    let one = j.get(String(a)) ?? Json.Null
+    let two = one.get(String(b)) ?? Json.Null
+    return two.get(String(c)) ?? Json.Null
 }
 
 fn config_default() -> Map<String, String> {
@@ -1227,6 +1257,7 @@ impl Agent {
                     compaction(session.copy(), "compact_{a.next_id}", from, to, of)
                     a.usage.insert(session.copy(), (to, of))
                 },
+                Step.Fallback(model, how) => a.fall_back(session.copy(), model, how),
                 Step.Limits(words) => limits(session.copy(), words),
                 Step.Account(name) => account(name),
                 Step.Config => {
@@ -1313,6 +1344,44 @@ impl Agent {
         if let err(e) = fs.append_text(a.log.copy(), "{line}\n") { eprintln("fake agent: logging to {a.log}: {e}") }
     }
 
+    // A model fallback, as Claude's adapter plays one when the model's safeguards
+    // flag a request: what it says of it, a `notice` for a client that takes them
+    // (`how` "notice") or the blockquote in its words ("words", or "notice" for a
+    // client without), and the session carried on on `model`, with the
+    // config_option_update that says so. "once" is a fallback for that answer
+    // alone: a notice, and the session stays where it was.
+    fn fall_back(a: mut Agent, session: String, model: String, how: String) {
+        let values = a.values(session.copy())
+        let from = value_of(values.copy(), "model")
+        if how == "once" {
+            var u = LinkedMap<String, Json>()
+            u.insert("sessionUpdate", js(String("notice")))
+            u.insert("severity", js(String("warning")))
+            u.insert("title", js("{from} declined this request; retried with {model}. Only that response came from {model}; the session stays on {from}."))
+            update(session, u)
+            return
+        }
+        let summary = "{from} declined this request (cyber); retried with {model}. The session will continue on {model}."
+        let why = String("The request looked like it could be misused.")
+        if how == "notice" and a.notices {
+            var u = LinkedMap<String, Json>()
+            u.insert("sessionUpdate", js(String("notice")))
+            u.insert("severity", js(String("warning")))
+            u.insert("title", js(summary))
+            u.insert("description", js(why))
+            update(session.copy(), u)
+        } else {
+            chunk(session.copy(), "agent_message_chunk", "\n\n> **Model fallback:** {summary}\n>\n> {why}\n\n")
+        }
+        var now = values
+        now.insert(String("model"), model.copy())
+        a.config.insert(session.copy(), now.copy())
+        var u = LinkedMap<String, Json>()
+        u.insert("sessionUpdate", js(String("config_option_update")))
+        u.insert("configOptions", config_options(now))
+        update(session, u)
+    }
+
     // Session `session`'s config values: its own, or the defaults (a session
     // picked up after the agent restarted).
     fn values(a: Agent, session: String) -> Map<String, String> {
@@ -1327,6 +1396,7 @@ impl Agent {
         if name == "initialize" and a.picks_up == "broken" {
             respond_error(id ?? Json.Null, -32603, String("the fake agent is broken"))
         } else if name == "initialize" {
+            if let Json.Object(_) = at_path(params.copy(), "clientCapabilities", "session", "notices") { a.notices = true }
             var prompt = LinkedMap<String, Json>()
             prompt.insert("image", Json.Bool(true))
             prompt.insert("audio", Json.Bool(false))
@@ -1557,7 +1627,7 @@ fn main() {
             picks_up = arg.replace("--", "")
         }
     }
-    var a = Agent { inbox: inbox, sessions: 0, next_id: 0, tools: 0, picks_up: picks_up, mcp: Map<String, Json>(), meta: Map<String, Json>(), stamp: bytes.hex(random_bytes(3)), backlog: List<Json>(), config: Map<String, Map<String, String>>(), kept: Map<String, Child>(), kept_id: 1, born: unsafe { Instant.now() }, later: List<String>(), usage: Map<String, (i64, i64)>(), record: record, history: Map<String, (i64, i64)>(), log: log }
+    var a = Agent { inbox: inbox, sessions: 0, next_id: 0, tools: 0, picks_up: picks_up, mcp: Map<String, Json>(), meta: Map<String, Json>(), stamp: bytes.hex(random_bytes(3)), backlog: List<Json>(), config: Map<String, Map<String, String>>(), kept: Map<String, Child>(), kept_id: 1, born: unsafe { Instant.now() }, later: List<String>(), usage: Map<String, (i64, i64)>(), record: record, history: Map<String, (i64, i64)>(), log: log, notices: false }
     a.write_log(String("started"))
     loop {
         if a.backlog.len() > 0 {
