@@ -993,9 +993,9 @@ impl Loom {
         self.emoji_search.update(cx, |s, cx| s.focus(window, cx));
     }
 
-    /// Settings → Emoji: the person's own as tiles, an Add tile first and how many there
-    /// are, then how emoji are shown and typed.
-    pub(super) fn emoji_page(&mut self, cx: &mut Context<Self>) -> Div {
+    /// Appearance's emoji: the person's own as tiles, an Add tile first and how many
+    /// there are, then how emoji are shown and typed.
+    pub(super) fn emoji_groups(&mut self, cx: &mut Context<Self>) -> Vec<AnyElement> {
         let p = self.p;
         let own = self.model.emoji.own.clone();
         for c in &own {
@@ -1110,10 +1110,11 @@ impl Loom {
                     })),
             );
         }
-        let groups = vec![
+        // The person's own first: the picker's + opens Appearance to add one.
+        vec![
             self.group(Some("Your emoji"), vec![yours.into_any_element()]),
             self.group(
-                None,
+                Some("Emoji"),
                 vec![
                     self.row(None, "Play animated emoji", None, Some(play))
                         .into_any_element(),
@@ -1153,11 +1154,10 @@ impl Loom {
                     ),
                 ],
             ),
-        ];
-        self.settings_page("emoji-page", "Emoji", None, groups)
+        ]
     }
 
-    /// One of the person's own on Settings → Emoji: the picture at 40 px, its `:name:`
+    /// One of the person's own on Settings → Appearance: the picture at 40 px, its `:name:`
     /// under it, which a click renames in place, a GIF mark on one that moves, and × to
     /// delete it under the pointer.
     fn emoji_tile(&self, c: &emoji::Custom, cx: &mut Context<Self>) -> AnyElement {
@@ -1384,7 +1384,7 @@ fn grid_line(p: Palette, line: &Line, i: usize, this: WeakEntity<Loom>) -> AnyEl
                         .on_click(move |_, _, cx| {
                             let _ = open.update(cx, |loom, cx| {
                                 loom.close_emoji_picker(cx);
-                                loom.open(Screen::Emoji, cx);
+                                loom.open(Screen::Appearance, cx);
                             });
                         }),
                 );

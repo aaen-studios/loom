@@ -239,6 +239,10 @@ pub struct Prefs {
     pub dictation_shortcut: bool,
     pub hold_to_talk: bool,
     pub live_shortcut: bool,
+    /// Settings › Voice › Microphone: the input dictation and live mode record from, by
+    /// its id and its name (to say it when it isn't plugged in), or `None` for the
+    /// system's default.
+    pub mic: Option<crate::voice::Input>,
 }
 
 impl Default for Prefs {
@@ -272,6 +276,7 @@ impl Default for Prefs {
             dictation_shortcut: false,
             hold_to_talk: false,
             live_shortcut: true,
+            mic: None,
         }
     }
 }
@@ -399,6 +404,12 @@ impl Prefs {
             dictation_shortcut: b("dictation_shortcut", d.dictation_shortcut),
             hold_to_talk: b("hold_to_talk", d.hold_to_talk),
             live_shortcut: b("live_shortcut", d.live_shortcut),
+            mic: v.get("mic").and_then(|m| {
+                Some(crate::voice::Input {
+                    id: m.get("id")?.as_str().filter(|s| !s.is_empty())?.to_string(),
+                    name: m.get("name")?.as_str()?.to_string(),
+                })
+            }),
         }
     }
 
@@ -479,6 +490,9 @@ impl Prefs {
         m.insert("dictation_shortcut".into(), json!(self.dictation_shortcut));
         m.insert("hold_to_talk".into(), json!(self.hold_to_talk));
         m.insert("live_shortcut".into(), json!(self.live_shortcut));
+        if let Some(mic) = &self.mic {
+            m.insert("mic".into(), json!({"id": mic.id, "name": mic.name}));
+        }
         Value::Object(m)
     }
 
@@ -718,6 +732,24 @@ mod tests {
         assert!(Prefs::from_json(&json!({"card_boards": "w/b"}))
             .card_boards
             .is_empty());
+    }
+
+    #[test]
+    fn the_mic_picked_is_kept_and_the_default_is_none() {
+        assert!(Prefs::default().to_json().get("mic").is_none());
+        let p = Prefs {
+            mic: Some(crate::voice::Input {
+                id: "wasapi:{0.0.1.00000000}.{abc}".into(),
+                name: "Microphone (USB Audio)".into(),
+            }),
+            ..Prefs::default()
+        };
+        assert_eq!(Prefs::from_json(&p.to_json()), p);
+        assert_eq!(
+            Prefs::from_json(&json!({"mic": {"id": "", "name": "x"}})).mic,
+            None
+        );
+        assert_eq!(Prefs::from_json(&json!({"mic": "wasapi:x"})).mic, None);
     }
 
     #[test]

@@ -53,6 +53,10 @@ struct McpServer: Equatable, Sendable, Identifiable {
     /// The name of its mark as the app has it built in (`mark-composio`): its entry's,
     /// or the one loom knows it by, by its host or its name.
     var mark = ""
+    /// Its settings as its form shows them (`settingsText`), and the client of the
+    /// person's own it signs in with, for one over HTTP.
+    var settings = ""
+    var clientId = ""
 
     var id: String { name }
 
@@ -83,7 +87,73 @@ struct McpServer: Equatable, Sendable, Identifiable {
         catalog = s["catalog"].text
         badge = Badge(s["badge"])
         mark = s["mark"].text
+        settings = settingsText(s["env"].isNull ? s["headers"] : s["env"])
+        clientId = s["client_id"].text
     }
+}
+
+/// A server's `env` or `headers` as its form shows them, as desktop/src/model.rs's
+/// `settings_text`: one `NAME=value` or `NAME=secret:KEY` a line, a secret's prefix before
+/// it, as `Authorization=Bearer secret:GITHUB_TOKEN`, by name.
+func settingsText(_ pairs: JSON) -> String {
+    guard case .object(let o) = pairs else { return "" }
+    return o.keys.sorted().map { k in
+        let v = o[k] ?? .null
+        if let secret = v["secret"].string { return "\(k)=\(v["prefix"].text)secret:\(secret)" }
+        return "\(k)=\(v.text)"
+    }.joined(separator: "\n")
+}
+
+/// A setting's value as the form has it, as `setting_value` in desktop/src/model.rs:
+/// `secret:KEY`, with any prefix before it ending in a space (`Bearer secret:KEY`), names
+/// one of the person's secrets, whose name is letters, digits, `_`, `-` and `.`; anything
+/// else is text.
+func settingValue(_ v: String) -> JSON {
+    if let at = v.range(of: "secret:", options: .backwards) {
+        let prefix = String(v[..<at.lowerBound])
+        let name = v[at.upperBound...].trimmingCharacters(in: .whitespaces)
+        let named = !name.isEmpty && name.allSatisfy { $0.isASCII && ($0.isLetter || $0.isNumber || "_-.".contains($0)) }
+        if named, prefix.isEmpty || prefix.last?.isWhitespace == true {
+            return prefix.isEmpty ? ["secret": JSON(name)] : ["secret": JSON(name), "prefix": JSON(prefix)]
+        }
+    }
+    return JSON(v)
+}
+
+/// The `mcp.put` arguments for a server added or changed by hand, as `server_args` and
+/// `with_client` in desktop/src/model.rs: a command line, or an http(s) address, its
+/// settings, one `NAME=value` or `NAME=secret:KEY` a line, and for one over HTTP a client
+/// of the person's own, whose secret left empty stays as it was. `was` is the name it's
+/// saved under, so a new name renames it.
+func serverArgs(name: String, line: String, settings: String, clientId: String = "", clientSecret: String = "", was: String? = nil) -> [String: JSON] {
+    var pairs: [String: JSON] = [:]
+    for l in settings.split(whereSeparator: \.isNewline) {
+        guard let eq = l.firstIndex(of: "=") else { continue }
+        let k = l[..<eq].trimmingCharacters(in: .whitespaces)
+        let v = l[l.index(after: eq)...].trimmingCharacters(in: .whitespaces)
+        if k.isEmpty { continue }
+        pairs[k] = settingValue(v)
+    }
+    let line = line.trimmingCharacters(in: .whitespaces)
+    let name = name.trimmingCharacters(in: .whitespaces)
+    var args: [String: JSON]
+    if line.hasPrefix("http://") || line.hasPrefix("https://") {
+        args = ["name": JSON(name), "url": JSON(line), "headers": .object(pairs)]
+        let (id, secret) = (clientId.trimmingCharacters(in: .whitespaces), clientSecret.trimmingCharacters(in: .whitespaces))
+        if !id.isEmpty {
+            args["client_id"] = JSON(id)
+            if !secret.isEmpty {
+                args["client_secret"] = secret.hasPrefix("secret:")
+                    ? ["secret": JSON(String(secret.dropFirst("secret:".count)).trimmingCharacters(in: .whitespaces))]
+                    : JSON(secret)
+            }
+        }
+    } else {
+        let words = line.split(whereSeparator: \.isWhitespace).map(String.init)
+        args = ["name": JSON(name), "command": JSON(words.first ?? ""), "args": JSON(Array(words.dropFirst())), "env": .object(pairs)]
+    }
+    if let was { args["was"] = JSON(was) }
+    return args
 }
 
 /// A field an entry asks the person to fill in, such as T3's address. One from the
@@ -832,7 +902,16 @@ extension Model {
         return (statusLine(m), statusDot(m))
     }
 
-    /// Try it: one not tried yet is tested, as the MCP servers page tests one.
+    /// Save on Installed's form, for a server added by hand (`was` none) or changed: the
+    /// `mcp.put` that keeps it, whose answer reads the servers again; none while it has no
+    /// name, or no command or address.
+    func putServer(name: String, line: String, settings: String, clientId: String, clientSecret: String, was: String?) -> JSON? {
+        if name.trimmingCharacters(in: .whitespaces).isEmpty || line.trimmingCharacters(in: .whitespaces).isEmpty { return nil }
+        let args = serverArgs(name: name, line: line, settings: settings, clientId: clientId, clientSecret: clientSecret, was: was)
+        return ["t": "cmd", "id": JSON(id("app.spools_server")), "name": "mcp.put", "args": .object(args)]
+    }
+
+    /// Try it: one not tried yet is tested.
     func spoolTry(_ server: String) -> JSON {
         spools.trying.insert(server)
         return ["t": "cmd", "id": JSON("app.spools_try:\(server)"), "name": "mcp.test", "args": ["name": JSON(server)]]

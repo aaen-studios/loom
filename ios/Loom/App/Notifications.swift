@@ -47,7 +47,29 @@ enum Notifications {
             info["call"] = call
         }
         content.userInfo = info
-        let request = UNNotificationRequest(identifier: UUID().uuidString, content: content, trigger: nil)
+        // The core's tag, so `core.unnotify` takes it back once it's read or answered.
+        let tag = f["tag"].text
+        let request = UNNotificationRequest(identifier: tag.isEmpty ? UUID().uuidString : tag, content: content, trigger: nil)
         UNUserNotificationCenter.current().add(request)
+    }
+
+    /// Takes back what the core says is read or answered (`core.unnotify`): the ones it
+    /// showed by their tags, and with a `conversation` read through, every one about it,
+    /// those that came by push too.
+    static func withdraw(_ f: JSON) {
+        let tags = f["tags"].array.map(\.text)
+        let conversation = f["conversation"].text
+        guard !conversation.isEmpty else {
+            UNUserNotificationCenter.current().removeDeliveredNotifications(withIdentifiers: tags)
+            return
+        }
+        UNUserNotificationCenter.current().getDeliveredNotifications { delivered in
+            let about = delivered.filter { n in
+                let info = n.request.content.userInfo
+                let c = info["conversation"] as? String ?? (info["loom"] as? [String: Any])?["conversation"] as? String
+                return c == conversation
+            }.map(\.request.identifier)
+            UNUserNotificationCenter.current().removeDeliveredNotifications(withIdentifiers: tags + about)
+        }
     }
 }

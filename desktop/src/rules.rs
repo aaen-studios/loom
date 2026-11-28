@@ -1,6 +1,6 @@
-//! The Rules page in the popup: the person's rules on what agents touch, for every
-//! agent and for one, to add and remove, and a what-if that asks the instance what an
-//! action would get. The instance matches and decides; this only draws and asks.
+//! The rules on Defaults in the popup: the person's rules on what agents touch, for
+//! every agent and for one, to add and remove, and a what-if that asks the instance what
+//! an action would get. The instance matches and decides; this only draws and asks.
 
 use super::*;
 
@@ -138,76 +138,72 @@ impl Loom {
         row.into_any_element()
     }
 
-    /// The Rules page: the person's rules, a form for a new one, and the what-if.
-    pub(super) fn rules_page(&mut self, cx: &mut Context<Self>) -> Div {
-        if self.rule_open {
-            return self.rule_form(cx);
-        }
+    /// Defaults' rules: every agent's, with New rule under them, then each agent's own
+    /// under its name, and the what-if.
+    pub(super) fn rules_groups(&mut self, cx: &mut Context<Self>) -> Vec<AnyElement> {
         let p = self.p;
-        let new_rule = |this: &Self, cx: &mut Context<Self>, primary: bool| {
-            this.small_button("new-rule", "New rule", primary)
-                .on_click(cx.listener(|this, _, window, cx| {
-                    for s in [&this.rule_in, &this.rule_note_in] {
-                        s.update(cx, |s, cx| s.set_value("", window, cx));
-                    }
-                    this.rule_open = true;
-                    cx.notify();
-                }))
-        };
+        let new_rule = self
+            .link_row(
+                "new-rule".into(),
+                self.row(Some(self.tile(Ico::Plus)), "New rule", None, None),
+            )
+            .on_click(cx.listener(|this, _, window, cx| {
+                for s in [&this.rule_in, &this.rule_note_in] {
+                    s.update(cx, |s, cx| s.set_value("", window, cx));
+                }
+                this.rule_open = true;
+                cx.notify();
+            }))
+            .into_any_element();
         let mut groups = Vec::new();
         let rules = self.model.rules.clone();
-        if rules.is_empty() {
-            groups.push(self.empty(
-                Ico::ShieldCheck,
-                "No rules yet",
-                None,
-                Some(new_rule(self, cx, true).into_any_element()),
-            ));
-        } else {
-            // Every agent's first, then each agent's own, under its name.
-            let mut scopes: Vec<String> = vec![String::new()];
-            for r in &rules {
-                if !scopes.contains(&r.agent) {
-                    scopes.push(r.agent.clone());
-                }
+        // Every agent's first, then each agent's own, under its name.
+        let mut scopes: Vec<String> = vec![String::new()];
+        for r in &rules {
+            if !scopes.contains(&r.agent) {
+                scopes.push(r.agent.clone());
             }
-            for scope in scopes {
-                let mut rows = Vec::new();
-                for r in rules.iter().filter(|r| r.agent == scope) {
-                    let id = r.id.clone();
-                    let remove = self
-                        .small_button(format!("remove-rule-{id}"), "Remove", false)
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            let f = this.model.delete_rule(&id);
-                            this.send(f);
-                            cx.notify();
-                        }));
-                    let sub = if r.note.is_empty() {
-                        outcome_word(&r.then).to_string()
-                    } else {
-                        format!("{} · {}", outcome_word(&r.then), r.note)
-                    };
-                    rows.push(
-                        self.row(
-                            None,
-                            r.said.clone(),
-                            Some(sub),
-                            Some(remove.into_any_element()),
-                        )
-                        .into_any_element(),
-                    );
-                }
-                if rows.is_empty() {
-                    continue;
-                }
-                let title = if scope.is_empty() {
-                    "Every agent".to_string()
+        }
+        let mut new_rule = Some(new_rule);
+        for scope in scopes {
+            let mut rows = Vec::new();
+            for r in rules.iter().filter(|r| r.agent == scope) {
+                let id = r.id.clone();
+                let remove = self
+                    .small_button(format!("remove-rule-{id}"), "Remove", false)
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        let f = this.model.delete_rule(&id);
+                        this.send(f);
+                        cx.notify();
+                    }));
+                let sub = if r.note.is_empty() {
+                    outcome_word(&r.then).to_string()
                 } else {
-                    self.model
-                        .agent(&scope)
-                        .map(|a| a.name.clone())
-                        .unwrap_or(scope.clone())
+                    format!("{} · {}", outcome_word(&r.then), r.note)
                 };
+                rows.push(
+                    self.row(
+                        None,
+                        r.said.clone(),
+                        Some(sub),
+                        Some(remove.into_any_element()),
+                    )
+                    .into_any_element(),
+                );
+            }
+            // Every agent's group ends with New rule, so it's there with none yet.
+            let title = if scope.is_empty() {
+                rows.extend(new_rule.take());
+                "Rules".to_string()
+            } else {
+                let name = self
+                    .model
+                    .agent(&scope)
+                    .map(|a| a.name.clone())
+                    .unwrap_or(scope.clone());
+                format!("Rules for {name}")
+            };
+            if !rows.is_empty() {
                 groups.push(self.group(Some(&title), rows));
             }
         }
@@ -220,8 +216,7 @@ impl Loom {
                 .child("Deny wins over ask, and ask over allow")
                 .into_any_element(),
         );
-        let action = (!rules.is_empty()).then(|| new_rule(self, cx, false).into_any_element());
-        self.settings_page("rules-page", "Rules", action, groups)
+        groups
     }
 
     /// The what-if: an action, who started the turn and whose it is, and what it gets.
@@ -288,8 +283,8 @@ impl Loom {
         self.group(Some("What if"), rows)
     }
 
-    /// The form for a new rule.
-    fn rule_form(&mut self, cx: &mut Context<Self>) -> Div {
+    /// The form for a new rule, in Defaults' place until it's saved or cancelled.
+    pub(super) fn rule_form(&mut self, cx: &mut Context<Self>) -> Div {
         let then = self.rules_choice(
             "rule-then",
             self.rule_then,
@@ -382,7 +377,7 @@ impl Loom {
             self.group(None, rows),
             self.form_actions(None, cancel, save),
         ];
-        self.settings_page("rules-page", "New rule", None, groups)
+        self.settings_page("rule-form", "New rule", None, groups)
     }
 }
 

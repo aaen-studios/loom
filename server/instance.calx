@@ -30,6 +30,7 @@ import shared.protocol
 import shared.pushrelay
 import shared.shape
 import shared.sounds
+import shared.notices
 import shared.stop.{Stop}
 import server.acp
 import server.acp.{Line, Out}
@@ -82,6 +83,7 @@ import server.stage
 import server.tokenfile
 import server.update
 import server.watches
+import server.walls
 import server.watches.{T3Next}
 import shared.checkpoint
 import shared.emoji
@@ -169,6 +171,8 @@ struct Session {
     hosts: Json    // the person's hosts it reaches with ssh: [{name, target, via, tools}], checked
     version: i32    // the protocol version it speaks, from hello
     shown: (i64, i64)    // the size it shows the browser it watches at, in pixels, as browser.watch says, or 0 × 0
+    active: bool    // someone is using it now, as its `device` frame last said
+    front: String    // the conversation in front of them there, or ""
 }
 
 // A call to one of the person's devices, until its result comes.
@@ -702,7 +706,7 @@ pub struct Instance {
     search_done: Receiver<searcher.Done>
     searches: Map<String, Waiter>    // each search under way, by its key, and who it answers
     next_search: u64
-    disk_used: Map<String, (i64, i64)>    // person -> when their sandbox folder was measured, and its bytes
+    disk_used: Map<String, (i64, i64)>    // a sandbox folder -> when it was measured, and its bytes
     doors: LinkedMap<String, egress.Door>    // "user/agent" -> the egress of an agent closed to the network (server/egress.calx)
     moving: String    // where the instance is moving to, while it is
     move_waiters: List<Waiter>    // instance.move commands waiting on the move
@@ -2327,7 +2331,7 @@ fn an_mcp_server_is_checked_once_for_both_ways_in() {
     }
 }
 
-// Whether `server` is the MCP server the MCP servers page's Add a browser set
+// Whether `server` is the MCP server the old MCP servers page's Add a browser set
 // up, as it set it up: named browser, running `npx -y @playwright/mcp@latest`,
 // with no settings.
 pub fn added_browser(server: Json) -> bool {
@@ -2815,25 +2819,36 @@ impl Instance {
         return i.sandboxed(user) or bool_at(agent, "isolated") == some(true)
     }
 
-    // How much a person's sandbox folder holds, in bytes: measured in the sandbox at
-    // most once every DISK_LOOK_MS, or 0 when it can't be told.
+    // How much a person's sandbox folders hold, in bytes: their own folder and each
+    // of their private agents' (PLAN.md, "Private agents"), which `p`'s is one of.
+    // `p`'s is measured in its sandbox at most once every DISK_LOOK_MS, and the
+    // others are as they were last measured, or 0 when they can't be told.
     fn sandbox_used(i: mut Instance, p: sandbox.Place) -> i64 {
+        let b = i.boxes.copy() else return 0
         let t = now()
-        if let seen = i.disk_used.find(p.user.copy()) {
-            if t - seen.0 < DISK_LOOK_MS { return seen.1 }
+        let folder = b.seen(p.copy())
+        var fresh = false
+        if let seen = i.disk_used.find(folder.copy()) { fresh = t - seen.0 < DISK_LOOK_MS }
+        if not fresh {
+            if let used = b.used(p.copy()) { i.disk_used.insert(folder, (t, used)) }
         }
-        let measured = if let b = i.boxes { b.used(p.copy()) } else { none }
-        let used = measured else return 0
-        i.disk_used.insert(p.user.copy(), (t, used))
-        return used
+        let home = b.home(p.user.copy())
+        let private = "{home}.private/"
+        var total: i64 = 0
+        for (k, v) in i.disk_used {
+            if k == home or k.starts_with(private.copy()) { total += v.1 }
+        }
+        return total
     }
 
     // The sandbox `agent` runs in: its person's, or its own for one closed to
-    // the network. none for the owner's agents that aren't isolated.
+    // the network or private. none for the owner's agents that aren't isolated.
     fn place(i: Instance, user: String, agent: Json) -> sandbox.Place? {
         if not i.isolated(user.copy(), agent.copy()) { return none }
         let closed = hosts_of(agent.copy()) != none
-        return some(sandbox.Place { user: user.copy(), agent: if closed { str_at(agent, "id") ?? String() } else { String() } })
+        let private = bool_at(agent.copy(), "private") == some(true)
+        if not closed and not private { return some(sandbox.person(user)) }
+        return some(sandbox.Place { user: user.copy(), agent: str_at(agent, "id") ?? String(), closed: closed, private: private })
     }
 
     // The agent `id` of `user`'s, or one with only its id once it's gone.
@@ -2862,18 +2877,50 @@ impl Instance {
         }
     }
 
-    // The shared folder as `agent` sees it.
+    // The shared folder as `agent` sees it. A private agent has none (PLAN.md,
+    // "Private agents"): its own folder stands in, so whatever names the
+    // shared folder reaches only its own files.
     fn shared_of(i: Instance, user: String, agent: String) -> String {
         let a = i.agent_or_id(user.copy(), agent)
+        if bool_at(a.copy(), "private") == some(true) { return i.agent_folder(user, a) }
         return i.shared_folder(user.copy(), i.isolated(user, a))
+    }
+
+    // Whether `user`'s agent `agent` is private (PLAN.md, "Private agents").
+    fn is_private(i: Instance, user: String, agent: String) -> bool {
+        return match i.store.agent(user, agent) {
+            ok(some(a)) => bool_at(a, "private") == some(true),
+            _ => false,
+        }
+    }
+
+    // The ids of `user`'s private agents.
+    fn private_ids(i: Instance, user: String) -> List<String> {
+        var out = List<String>()
+        let all = match i.store.agents(user) {
+            ok(list) => list,
+            err(e) => {
+                eprintln("loom: the agents: {e}")
+                return out
+            },
+        }
+        for a in all {
+            if bool_at(a.copy(), "private") == some(true) { out.push(str_at(a, "id") ?? String()) }
+        }
+        return out
     }
 
     // `agent`'s folder, where its program runs and its instructions and skills
     // are: the folder it names, or one in the data folder. An agent in a
-    // sandbox always has its in the person's own folder, whatever it names.
+    // sandbox always has its in the person's own folder, whatever it names, or a
+    // private one beside it, which its sandbox of its own sees alone.
     fn agent_folder(i: Instance, user: String, agent: Json) -> String {
         let id = str_at(agent.copy(), "id") ?? String()
         if i.isolated(user.copy(), agent.copy()) {
+            if bool_at(agent.copy(), "private") == some(true) {
+                if let b = i.boxes { return b.private_folder(user, id) }
+                return "{i.data}/sandboxes/{user}.private/{id}"
+            }
             if let b = i.boxes { return "{b.home(user)}/agents/{id}" }
             return "{i.data}/sandboxes/{user}/agents/{id}"
         }
@@ -2887,7 +2934,8 @@ impl Instance {
         let key = "{user}/{id}"
         if let d = i.doors.find(key.copy()) { return d.port }
         let b = i.boxes.copy() else { fail "this instance has no sandboxes" }
-        let place = sandbox.Place { user: user.copy(), agent: id }
+        let place = i.place(user.copy(), agent.copy()) ?? sandbox.person(user.copy())
+        if not place.closed { fail "the agent isn't closed to the network" }
         try b.ready(place.copy())
         let d = try egress.open(b.runtime.copy(), place.name(), b.gate_host.copy(), b.gate, hosts_of(agent) ?? List<String>())
         let port = d.port
@@ -2931,6 +2979,8 @@ impl Instance {
         i.close_browser("{user}/{id}")
         i.close_doors(user.copy(), some(id.copy()))
         if let old = was {
+            // A write there next readies it again, rather than finding it gone.
+            if old.its_own() and i.ready_now == old.name() { i.ready_now = String() }
             if let b = i.boxes { b.drop_place(old) }
         }
     }
@@ -3128,7 +3178,7 @@ impl Instance {
 
     fn put_file(i: Instance, place: sandbox.Place?, path: String, data: List<u8>) ! Error {
         if let b = try i.box_of(place.copy()) {
-            try b.write(place.copy() ?? sandbox.Place { user: String(), agent: String() }, path, data)
+            try b.write(place.copy() ?? sandbox.person(String()), path, data)
             return
         }
         if let cut = path.find_last("/") { try fs.make_dir_all(path[..cut].copy()) }
@@ -3140,7 +3190,7 @@ impl Instance {
     fn put_files(i: Instance, place: sandbox.Place?, dirs: List<String>, writes: List<(String, List<u8>)>) ! Error {
         if dirs.len() == 0 and writes.len() == 0 { return }
         if let b = try i.box_of(place.copy()) {
-            try b.write_all(place.copy() ?? sandbox.Place { user: String(), agent: String() }, dirs, writes)
+            try b.write_all(place.copy() ?? sandbox.person(String()), dirs, writes)
             return
         }
         for d in dirs {
@@ -3154,7 +3204,7 @@ impl Instance {
 
     fn drop_file(i: Instance, place: sandbox.Place?, path: String) ! Error {
         if let b = try i.box_of(place.copy()) {
-            try b.remove_file(place.copy() ?? sandbox.Place { user: String(), agent: String() }, path)
+            try b.remove_file(place.copy() ?? sandbox.person(String()), path)
             return
         }
         if fs.exists(path.copy()) { try fs.remove_file(path) }
@@ -3162,7 +3212,7 @@ impl Instance {
 
     fn drop_dir(i: Instance, place: sandbox.Place?, path: String) ! Error {
         if let b = try i.box_of(place.copy()) {
-            try b.remove_dir(place.copy() ?? sandbox.Place { user: String(), agent: String() }, path)
+            try b.remove_dir(place.copy() ?? sandbox.person(String()), path)
             return
         }
         try fs.remove_dir(path)
@@ -3372,7 +3422,7 @@ impl Instance {
                     if req.path == "/ws" and req.method == "GET" {
                         // upgrade answers the request itself.
                         match i.server.upgrade(req.copy()) {
-                            ok(s) => i.sessions.insert(s.id(), Session { socket: s, user: String(), device: String(), live: false, key: String(), tools: Json.Null, hosts: Json.Null, version: protocol.OLDEST, shown: (0, 0) }),
+                            ok(s) => i.sessions.insert(s.id(), Session { socket: s, user: String(), device: String(), live: false, key: String(), tools: Json.Null, hosts: Json.Null, version: protocol.OLDEST, shown: (0, 0), active: false, front: String() }),
                             err(e) => eprintln("loom: /ws from {req.client}: {e}"),
                         }
                         continue
@@ -4241,6 +4291,8 @@ impl Instance {
         }
         if not fresh { return plain }
         let (user, agent) = key.split_once("/") ?? (String(), String())
+        // A private agent is shown only its own (PLAN.md, "Private agents").
+        let mine = i.is_private(user.copy(), agent.copy())
         let notes = match i.store.site_notes(user, agent, here.copy()) {
             ok(n) => n,
             err(e) => {
@@ -4248,12 +4300,13 @@ impl Instance {
                 return plain
             },
         }
-        if notes.len() == 0 { return plain }
         var lines = List<String>()
         for n in notes {
+            if mine and bool_at(n.copy(), "shared") == some(true) { continue }
             let shared = if bool_at(n.copy(), "shared") == some(true) { " (shared)" } else { "" }
             lines.push("- {int_at(n.copy(), "id") ?? 0}{shared}: {str_at(n, "text") ?? String()}")
         }
+        if lines.len() == 0 { return plain }
         var content = List<Json>()
         if let Json.Array(had) = at(plain.copy(), "content") { content = had }
         content.push(Obj.new().s("type", String("text")).s("text", "[loom: Your notes for {here}, kept for when you're on it:\n{lines.join("\n")}]").done())
@@ -4716,6 +4769,25 @@ impl Instance {
         return false
     }
 
+    // Whether someone is looking at `conversation` on one of `user`'s devices now: one
+    // in use, with that chat in front, as its `device` frame said (shared/notices.calx).
+    fn looked_at(i: Instance, user: String, conversation: String) -> bool {
+        for (_, s) in i.sessions {
+            if s.live and s.user == user and notices.looking_at(s.active, s.front.copy(), conversation.copy()) { return true }
+        }
+        return false
+    }
+
+    // A message from `upto` that came into `conversation` while someone looks at it is
+    // read at once (PLAN.md, "Unread"), and every device hears so before the run that
+    // made it ends, so none of them notifies for what the person has seen.
+    fn read_if_looked_at(i: Instance, user: String, conversation: String, upto: i64) ! Error {
+        if not i.looked_at(user.copy(), conversation.copy()) { return }
+        let had = int_at(try i.store.conversation(user.copy(), conversation.copy()) ?? Json.Null, "read") ?? 0
+        let read = try i.store.mark_read(user.copy(), conversation.copy(), upto) else return
+        if read != had { try i.event(user, "conversation.updated", Obj.new().j("conversation", Obj.new().s("id", conversation).i("read", read).done()).done()) }
+    }
+
     // The agent's name, for a notification's title.
     fn agent_name(i: Instance, user: String, agent: String) -> String {
         if let ok(some(a)) = i.store.agent(user, agent.copy()) {
@@ -4732,6 +4804,8 @@ impl Instance {
         if kind == "notify" {
             let agent = str_at(fields.copy(), "agent") ?? String()
             let conversation = str_at(fields.copy(), "conversation") ?? String()
+            // A routine's post in a chat someone is looking at was read as it came.
+            if str_at(fields.copy(), "about") == some(String("routine.posted")) and i.looked_at(user.copy(), conversation.copy()) { return }
             let body = push.payload(str_at(fields.copy(), "title") ?? String(), i.agent_name(user.copy(), agent.copy()), str_at(fields.copy(), "body") ?? String(), conversation.copy(), String(), Obj.new().s("kind", String("notify")).s("agent", agent.copy()).maybe("conversation", if conversation.len() > 0 { some(conversation) } else { none }).done())
             let cue = sounds.cue_of(String("notify"), str_at(fields, "about") ?? String(), String(), false) ?? String("reply")
             i.send_push(user, body, String(), cue, agent)
@@ -4971,7 +5045,7 @@ impl Instance {
         if boxed {
             if let b = i.boxes {
                 // The gate, or in a sandbox closed to the network, its egress.
-                let place = i.place(user.copy(), merge(wanted.copy(), Obj.new().s("id", agent.copy()).done())) ?? sandbox.Place { user: user.copy(), agent: String() }
+                let place = i.place(user.copy(), merge(wanted.copy(), Obj.new().s("id", agent.copy()).done())) ?? sandbox.person(user.copy())
                 base = b.tools_url(place)
                 exe = String("loom")
             }
@@ -5014,7 +5088,7 @@ impl Instance {
             }
         }
         if missing.len() > 0 {
-            let why = "It uses {if missing.len() == 1 { "a secret" } else { "secrets" }} you don't have: {missing.join(", ")}. Add {if missing.len() == 1 { "it" } else { "them" }} under Keys on the MCP servers page."
+            let why = "It uses {if missing.len() == 1 { "a secret" } else { "secrets" }} you don't have: {missing.join(", ")}. Add {if missing.len() == 1 { "it" } else { "them" }} in Settings, on Secrets."
             try i.keep_tested(user.copy(), server_name.copy(), List<String>(), why.copy(), false)
             i.answer_cmd(w, Answer.Refused(String("mcp_failed"), why))
             return
@@ -5036,7 +5110,7 @@ impl Instance {
 
     // A test's answer: the tools, and whether it's signed in, or why it didn't
     // start. A 401 from a server with no key of the person's own is a sign-in
-    // it needs, which the MCP servers page then offers.
+    // it needs, which Spools' Installed then offers.
     fn mcp_tested(i: mut Instance, d: mcptest.Done) ! Error {
         let t = i.mcp_tests.remove(d.id) else return
         if d.grant != Json.Null { try i.keep_grant(t.user.copy(), t.server.copy(), d.grant.copy()) }
@@ -5457,7 +5531,7 @@ impl Instance {
         try i.store.set_meta(String("imported_servers_given"), String("1"))
     }
 
-    // The MCP server the MCP servers page's Add a browser set up, Microsoft's
+    // The MCP server the old MCP servers page's Add a browser set up, Microsoft's
     // Playwright MCP, goes once, for each person who has it as that button
     // added it, now that every agent has loom's own browser (PLAN.md, "The
     // agent's browser"); and with it, each agent's pick of it. One changed in
@@ -5521,7 +5595,9 @@ impl Instance {
                 if let s = i.session_server(user.copy(), server, http) { out.push(s) }
             }
         }
-        if not boxed { out.extend(i.plugin_servers(user)) }
+        // A private agent has only the servers given to it, never the plugins'
+        // that every agent gets (PLAN.md, "Private agents").
+        if not boxed and bool_at(agent, "private") != some(true) { out.extend(i.plugin_servers(user)) }
         return out
     }
 
@@ -6221,9 +6297,18 @@ impl Instance {
     // Does what a tool call says: its MCP result, or none when it's answered
     // later (message_agent, when the other agent's run ends).
     fn tool(i: mut Instance, req: Request, g: Grant, name: String, args: Json) -> Json? ! Error {
+        // A private agent's calls never reach another agent, or write what
+        // every agent reads (PLAN.md, "Private agents").
+        let private = i.private_ids(g.user.copy())
+        let mine = private.contains(g.agent.copy())
+        if mine {
+            if let why = walls.never_tool(name.copy()) { return some(rule_refusal("private", why)) }
+        }
         if name == "list_agents" {
             var out = List<Json>()
             for a in try i.store.agents(g.user.copy()) {
+                // A private agent lists only itself, and no other lists it.
+                if walls.apart(g.agent.copy(), str_at(a.copy(), "id") ?? String(), private.copy()) { continue }
                 out.push(Obj.new().s("id", str_at(a.copy(), "id") ?? String()).s("name", str_at(a.copy(), "name") ?? String()).s("acp_agent", str_at(a.copy(), "acp_agent") ?? String()).s("instructions", str_at(a, "instructions") ?? String()).done())
             }
             return some(tool_text("{Json.Array(out)}"))
@@ -6235,8 +6320,12 @@ impl Instance {
             var a = Obj.new().s("query", str_at(args.copy(), "query") ?? String())
             if let key = str_at(args, "agent") {
                 let found = try i.find_agent(g.user.copy(), key.copy()) else return some(tool_error("There's no agent {key}."))
-                a = a.s("agent", str_at(found, "id") ?? String())
+                let found_id = str_at(found, "id") ?? String()
+                if walls.apart(g.agent.copy(), found_id.copy(), private.copy()) { return some(rule_refusal("private", String(if mine { walls.MINE } else { walls.THEIRS }))) }
+                a = a.s("agent", found_id)
             }
+            // A private agent finds only its own chats, and no other finds a private one's.
+            if mine { a = a.s("own", g.agent.copy()) } else if private.len() > 0 { a = a.j("hide", Json.Array(private.map(|p| Json.Str(p.copy())))) }
             // Off the loop, as the app's search is: the call is answered when it's done.
             let call = try i.store.new_id("sc")
             i.hold_call(call.copy(), req)
@@ -6305,7 +6394,7 @@ impl Instance {
             let what = (str_at(args.copy(), "text") ?? String()).trim().copy()
             if what.len() == 0 { return some(tool_error(String("text is empty."))) }
             let site = site_of(str_at(args.copy(), "site") ?? String())
-            let note = Obj.new().s("text", what).s("site", site).b("shared", bool_at(args.copy(), "shared") ?? false).done()
+            let note = Obj.new().s("text", what).s("site", site).b("shared", (bool_at(args.copy(), "shared") ?? false) and not mine).done()
             let p = try i.propose(g.copy(), "note", note, (str_at(args, "why") ?? String()).trim().copy(), String())
             let whose = if bool_at(at(p.copy(), "note"), "shared") == some(true) { "every agent of your person's reads" } else { "of yours" }
             let status = str_at(p.copy(), "status") ?? String()
@@ -6470,11 +6559,14 @@ impl Instance {
         if name == "remember" {
             let what = (str_at(args.copy(), "text") ?? String()).trim().copy()
             if what.len() == 0 { return some(tool_error(String("text is empty."))) }
-            let shared = bool_at(args.copy(), "shared") ?? false
+            // A private agent's notes are its own, even one it asks to share.
+            let asked_shared = bool_at(args.copy(), "shared") ?? false
+            let shared = asked_shared and not mine
             let site = site_of(str_at(args, "site") ?? String())
             let id = try i.store.remember_on(g.user.copy(), if shared { String() } else { g.agent.copy() }, what.copy(), g.agent.copy(), site.copy())
             i.log(g.user, g.agent.copy(), "memory", "Remembered: {cut_short(what, 120)}", g.agent)
-            return some(tool_text(if site.len() > 0 { "Remembered, as note {id}, for {site}: you're shown it when your browser's there." } else { "Remembered, as note {id}." }))
+            let kept = if asked_shared and mine { " It's yours alone: you're private, so you don't share notes." } else { "" }
+            return some(tool_text(if site.len() > 0 { "Remembered, as note {id}, for {site}: you're shown it when your browser's there.{kept}" } else { "Remembered, as note {id}.{kept}" }))
         }
         if name == "update_profile" {
             let what = (str_at(args, "text") ?? String()).trim().copy()
@@ -6567,7 +6659,8 @@ impl Instance {
         }
         if name == "recall" {
             let query = str_at(args, "query") ?? String()
-            let notes = try i.store.memories(g.user, some(g.agent.copy()), query.copy(), 20)
+            // A private agent recalls only its own notes, never the shared ones.
+            let notes = try i.store.memories_of(g.user, some(g.agent.copy()), query.copy(), 20, not mine)
             if notes.len() == 0 { return some(tool_text(if query.trim().len() > 0 { "Nothing remembered about {query}." } else { String("Nothing remembered yet.") })) }
             var lines = List<String>()
             for n in notes {
@@ -6578,7 +6671,7 @@ impl Instance {
         }
         if name == "forget" {
             let id = int_at(args, "id") ?? 0
-            if not try i.store.forget(g.user, id, some(g.agent.copy())) { return some(tool_error("There's no note {id} of yours. recall gives their numbers.")) }
+            if not try i.store.forget_of(g.user, id, some(g.agent.copy()), not mine) { return some(tool_error("There's no note {id} of yours. recall gives their numbers.")) }
             return some(tool_text(String("Forgotten.")))
         }
         // These three ask the person first, every time.
@@ -6799,6 +6892,8 @@ impl Instance {
         let to = try i.find_agent(g.user.copy(), key.copy()) else return some(tool_error("There's no agent {key}. list_agents gives their names."))
         let to_id = str_at(to.copy(), "id") ?? String()
         if to_id == g.agent { return some(tool_error(String("That's you."))) }
+        // No agent messages a private one (PLAN.md, "Private agents").
+        if bool_at(to.copy(), "private") == some(true) { return some(rule_refusal("private", "{str_at(to.copy(), "name") ?? key} is private: no other agent messages it, and it messages none.")) }
         // The agents that asked on the way here, oldest first (PLAN.md, "Agents
         // talking to agents have limits"): at most CHAIN_MOST deep, and never
         // back to one already in it.
@@ -7643,8 +7738,15 @@ impl Instance {
     // no more than its own (PLAN.md, "Agents talking to agents have limits"):
     // an isolated agent's new agents are isolated, with its network unless
     // they name a narrower one. The text is why not, when it isn't empty.
-    fn reach_for(i: Instance, g: Grant, a: Json, making: bool) -> (Json, String) ! Error {
+    fn reach_for(i: Instance, g: Grant, asked: Json, making: bool) -> (Json, String) ! Error {
         let me = try i.store.agent(g.user.copy(), g.agent.copy()) ?? Json.Null
+        // A private agent's new agents are private too, or it would reach the
+        // rest through them (PLAN.md, "Private agents").
+        var a = asked.copy()
+        if bool_at(me.copy(), "private") == some(true) {
+            if bool_at(a.copy(), "private") == some(false) { return (a.copy(), String("You're private, so an agent you make is private too: no more than you have yourself. Your person can change that, in the app.")) }
+            if making { a = merge(a, Obj.new().b("private", true).done()) }
+        }
         if not i.isolated(g.user.copy(), me.copy()) { return (a.copy(), String()) }
         let mine = hosts_of(me)
         if bool_at(a.copy(), "isolated") == some(false) { return (a.copy(), String("You run isolated, in a sandbox, so you can't give an agent more than that: no more than you have yourself. Your person can, in the app.")) }
@@ -7713,6 +7815,20 @@ impl Instance {
             if let why = try i.more_than_it_has(g.copy(), m) { return some(rule_refusal("no-more-than-its-own", why)) }
         }
         if name == "agent.delete" and str_at(a.copy(), "agent") == some(g.agent.copy()) { return some(rule_refusal("not-itself", String("An agent can't delete itself. Your person can, in the app."))) }
+        // Whether an agent is private is the person's (PLAN.md, "Private agents"):
+        // an agent never changes its own, and asks them to change another's.
+        if (name == "agent.update" or name == "agent.create") and defaults.has(a.copy(), "private") {
+            if name == "agent.update" and str_at(a.copy(), "agent") == some(g.agent.copy()) { return some(rule_refusal("own-private", String("An agent can't change whether it's private. Your person can, in the app."))) }
+            if name == "agent.update" { access = commands.Access.Asks(String("other")) }
+        }
+        // The wall holds before the person is asked, too.
+        let private = i.private_ids(g.user.copy())
+        if private.len() > 0 {
+            let (_, refused) = try i.walled(g.user.copy(), g.agent.copy(), name.copy(), a.copy(), private)
+            if let r = refused {
+                if let Answer.Refused(_, why) = r { return some(rule_refusal("private", why)) }
+            }
+        }
         if name == "token.make_to_file" { return try i.ask_token_file(req, g, a) }
         // A tool's name isn't a command: refused before it could ask the person, as it
         // would fail once they said yes anyway (LOO-451).
@@ -8419,8 +8535,16 @@ impl Instance {
     fn table_command(i: Instance, user: String, device: String, name: String, args: Json) -> Answer ! Error {
         // The agent writing, or empty for the person.
         let writer = if device.starts_with("a_") { device.copy() } else { String() }
+        // A private agent's tables are its own, and it reaches no other's
+        // (PLAN.md, "Private agents"); the person reaches all of them.
+        let private = if writer.len() > 0 { i.private_ids(user.copy()) } else { List<String>() }
         if name == "table.list" {
-            return Answer.Value(Obj.new().j("tables", Json.Array(try i.store.shared_tables(user))).done())
+            var listed = List<Json>()
+            for kept in try i.store.shared_tables(user) {
+                if walls.apart(writer.copy(), str_at(kept.copy(), "owner") ?? String(), private.copy()) { continue }
+                listed.push(kept.copy())
+            }
+            return Answer.Value(Obj.new().j("tables", Json.Array(listed)).done())
         }
         let table = (str_at(args.copy(), "table") ?? String()).trim().copy()
         if name == "table.create" {
@@ -8435,6 +8559,10 @@ impl Instance {
         }
         let found = try i.store.shared_table(user.copy(), table.copy()) else return Answer.Refused(String("not_found"), "There's no table {table}. table.list gives their names.")
         let owner = str_at(found.copy(), "owner") ?? String()
+        if writer.len() > 0 and walls.apart(writer.copy(), owner.copy(), private.copy()) {
+            let why = if private.contains(writer.copy()) { "You're private, so {table}, another agent's table, is out of your reach: make one of your own." } else { "{table} is a private agent's table: no other agent reaches it." }
+            return Answer.Refused(String("private"), why)
+        }
         if name == "table.rows" {
             let q = match tables.query_of(args) {
                 ok(q) => q,
@@ -9166,7 +9294,7 @@ impl Instance {
         if let p = place {
             let b = i.boxes.copy() else { fail "its agent runs in a sandbox, and this instance has none" }
             try b.ready(p.copy())
-            if p.closed() { _ = try i.door(user.copy(), agent.copy()) }
+            if p.closed { _ = try i.door(user.copy(), agent.copy()) }
             let (shell, args) = if calx_file.len() > 0 { routines.calx_run(calx_file.copy()) } else { routines.gate_shell(command, false) }
             let (c, a) = b.wrap(p, folder.copy(), names, shell, args)
             return routine_gate.Job { run: run.copy(), program: c, args: a, env: env, dir: folder, ms: ms }
@@ -9333,8 +9461,11 @@ impl Instance {
         let message_id = try i.store.new_id("msg")
         let blocks = Json.Array([Obj.new().s("kind", String("text")).s("text", h.text.copy()).done()])
         let message = Obj.new().s("id", message_id.copy()).s("conversation", h.conversation.copy()).s("role", String("agent")).s("agent", h.agent.copy()).s("routine", h.routine.copy()).s("routine_name", h.name.copy()).i("at", now()).s("status", String("done")).j("blocks", blocks).done()
+        let posted = int_at(message.copy(), "at") ?? now()
         try i.store.put_message(h.user.copy(), message.copy())
         try i.event(h.user.copy(), "message.created", Obj.new().s("conversation", h.conversation.copy()).j("message", message).done())
+        // In front of someone now: read, before its notify.
+        try i.read_if_looked_at(h.user.copy(), h.conversation.copy(), posted)
         try i.store.post_untold(h.user.copy(), h.conversation.copy(), message_id, h.routine.copy(), String())
         if h.notify {
             i.log(h.user.copy(), h.agent.copy(), "notify", "Notified you: {h.name}", h.agent.copy())
@@ -11125,7 +11256,7 @@ impl Instance {
         if not mine { return Answer.Refused(String("not_found"), String("That card's turn is over.")) }
         let server = str_at(spec.copy(), "name") ?? String()
         if answer == "cancel" {
-            if state != "asking" { return Answer.Refused(String("not_now"), "{server} was added already. It's on the MCP servers page, to remove.") }
+            if state != "asking" { return Answer.Refused(String("not_now"), "{server} was added already. It's in Spools, under Installed, to remove.") }
             try i.mcp_add_to(call.copy(), "cancelled", String())
             i.log(user.copy(), agent.copy(), "approval", "Didn't add the MCP server {server}", device)
             i.mcp_add_tell(call.copy(), rule_refusal("person-said-no", "Your person said no: {server} wasn't added."))
@@ -11236,7 +11367,7 @@ impl Instance {
                 var server = String()
                 if let a = i.mcp_adds.find(call.copy()) { server = str_at(a.spec.copy(), "name") ?? String() }
                 try i.mcp_add_to(call.copy(), "failed", message.copy())
-                i.mcp_add_tell(call, tool_error("Your person added {server}, but it didn't start: {message} They can change it on the MCP servers page."))
+                i.mcp_add_tell(call, tool_error("Your person added {server}, but it didn't start: {message} They can change it in Spools, under Installed."))
             },
         }
     }
@@ -13056,6 +13187,8 @@ impl Instance {
             if let session = mut i.sessions.find(s.id()) {
                 if let key = str_at(f.copy(), "key") { session.key = key }
                 if let Json.Object(_) = at(f.copy(), "tools") { session.tools = at(f.copy(), "tools") }
+                if let a = bool_at(f.copy(), "active") { session.active = a }
+                if let front = str_at(f.copy(), "front") { session.front = front }
                 if let Json.Array(_) = at(f.copy(), "hosts") { session.hosts = hosts_given(at(f, "hosts")) }
             }
         } else if t == "device.result" {
@@ -13091,6 +13224,9 @@ impl Instance {
             return
         }
         if let tz = str_at(at(f.copy(), "device"), "tz") { try i.store.update_device_tz(device.id.copy(), tz) }
+        // Whether someone is using it, and the chat in front of them there (shared/notices.calx).
+        let in_use = bool_at(at(f.copy(), "device"), "active") ?? false
+        let in_front = str_at(at(f.copy(), "device"), "front") ?? String()
         let user = device.user.copy()
         // The group chats' members as the agents are now, before catching up.
         try i.keep_rooms(user.copy())
@@ -13153,7 +13289,7 @@ impl Instance {
         // And the sidebar's folders as they are, so a cache that never kept them, as one
         // from before them, has them all.
         _ = i.server.send_text(s, "{Obj.new().s("t", String("synced")).i("seq", last).j("runs", Json.Array(going)).j("groups", Json.Array(try i.store.groups(user.copy()))).j("emoji", Json.Array(try i.store.emoji(user.copy()))).done()}")
-        i.sessions.insert(s.id(), Session { socket: s, user: user.copy(), device: device.id, live: true, key: String(), tools: Json.Null, hosts: Json.Null, version: version, shown: (0, 0) })
+        i.sessions.insert(s.id(), Session { socket: s, user: user.copy(), device: device.id, live: true, key: String(), tools: Json.Null, hosts: Json.Null, version: version, shown: (0, 0), active: in_use, front: in_front })
         // A person who opens an app is likely to write soon (LOO-223).
         i.prestart(user.copy())
         // The owner's first device after an update the instance made by itself hears of
@@ -13393,7 +13529,12 @@ impl Instance {
                     continue
                 }
                 let other = try i.store.agent(user.copy(), m.target.copy()) else continue
-                let name = str_at(other, "name") ?? m.shown.copy()
+                let name = str_at(other.copy(), "name") ?? m.shown.copy()
+                // Neither reaches the other when either is private (PLAN.md, "Private agents").
+                if i.is_private(user.copy(), agent.copy()) or bool_at(other, "private") == some(true) {
+                    parts.push("@{m.shown} is {name}, another of your person's agents, which you can't reach: one of you is private")
+                    continue
+                }
                 parts.push("@{m.shown} is {name}, another of your person's agents: message_agent with agent \"{name}\" reaches it")
             } else if m.kind == "skill" {
                 if try i.store.skill(user.copy(), m.target.copy()) == none { continue }
@@ -13402,7 +13543,7 @@ impl Instance {
                 let mine = i.folder_of(user.copy(), agent.copy())
                 let shared = i.shared_of(user.copy(), agent.copy())
                 if handoff_path(m.target.copy(), mine, shared.copy()) == none { continue }
-                let place = if path_key(m.target.copy()).starts_with(path_key(shared)) { String("the shared folder") } else { String("your folder") }
+                let place = if path_key(m.target.copy()).starts_with(path_key(shared.copy())) and path_key(shared) != path_key(i.folder_of(user.copy(), agent.copy())) { String("the shared folder") } else { String("your folder") }
                 parts.push("`{m.target}` is a file in {place}")
             }
         }
@@ -13872,6 +14013,13 @@ impl Instance {
     // room.create, room.update, room.resend and room.forget.
     fn room_cmd(i: Instance, user: String, _device: String, name: String, args: Json) -> Answer ! Error {
         let all = try i.agent_ids(user.copy())
+        // A private agent isn't in group chats, where agents read each other
+        // (PLAN.md, "Private agents").
+        for m in rooms.ids_in(at(args.copy(), "members")) {
+            if let a = try i.store.agent(user.copy(), m) {
+                if bool_at(a.copy(), "private") == some(true) { return Answer.Refused(String("private"), "{str_at(a, "name") ?? String("That agent")} is private, so it isn't in group chats, where agents read each other.") }
+            }
+        }
         if name == "room.create" {
             let (room, why) = rooms.room_made(args, all, color_ok)
             if why.len() > 0 { return refusal(why) }
@@ -14471,7 +14619,7 @@ impl Instance {
             }
             try b.ready(p.copy())
             i.ready_now = p.name()
-            if p.closed() { _ = try i.door(user.copy(), agent.copy()) }
+            if p.closed { _ = try i.door(user.copy(), agent.copy()) }
             let (boxed_settings, names) = try i.program_settings(user.copy(), program.copy(), acp_agent.env.copy(), true)
             settings = boxed_settings
             let (c, a) = b.wrap(p, folder.copy(), names, command, args)
@@ -14517,13 +14665,17 @@ impl Instance {
     }
 
     // The tools an agent's sessions start with: "code" in Code Mode, the
-    // default, or "plain" (PLAN.md, "Code Mode").
+    // default, or "plain" (PLAN.md, "Code Mode"), and a private agent's
+    // "code private" or "plain private", which have no plugins' tools and
+    // were told they're private (PLAN.md, "Private agents").
     fn tools_of(i: Instance, user: String, agent: String) -> str {
         let wanted = match i.store.agent(user, agent) {
             ok(some(a)) => a,
             _ => Json.Null,
         }
-        return if bool_at(wanted, "code_mode") ?? true { "code" } else { "plain" }
+        let code = bool_at(wanted.copy(), "code_mode") ?? true
+        if bool_at(wanted, "private") == some(true) { return if code { "code private" } else { "plain private" } }
+        return if code { "code" } else { "plain" }
     }
 
     // Whether the session `session` started with other tools than its agent's
@@ -15015,7 +15167,14 @@ impl Instance {
         }
         // The folder the person's agents share (PLAN.md, "Sharing and
         // learning"), once a session.
-        if str_at(told.copy(), "shared") == none {
+        // A private agent is told it has none, and what it can't reach (PLAN.md,
+        // "Private agents"); its sessions start fresh when that changes.
+        if i.is_private(user.copy(), agent.copy()) {
+            if str_at(told.copy(), "shared") != some(String("private")) {
+                prompt.push(Obj.new().s("type", String("text")).s("text", String(walls.TOLD)).done())
+                told = merge(told, Obj.new().s("shared", String("private")).done())
+            }
+        } else if str_at(told.copy(), "shared") == none {
             prompt.push(Obj.new().s("type", String("text")).s("text", "[loom: Your person's agents share the folder {i.shared_of(user.copy(), agent.copy())}. Put files there for another agent, and look there for what they leave. To hand one over with a message, give message_agent its path in files.]").done())
             told = merge(told, Obj.new().s("shared", String("1")).done())
         }
@@ -16940,8 +17099,11 @@ impl Instance {
             // And each T3 thread it names or its tool calls started (PLAN.md, "T3 threads").
             let carded = i.with_cards(r.user.copy(), linked)
             let message = i.with_threads(r.user.copy(), carded, r.id.copy())
+            let replied = int_at(message.copy(), "at") ?? now()
             try i.store.put_message(r.user.copy(), message.copy())
             try i.event(r.user.copy(), "message.created", Obj.new().s("conversation", r.conversation.copy()).j("message", message).done())
+            // In front of someone now: read, before run.finished.
+            try i.read_if_looked_at(r.user.copy(), r.conversation.copy(), replied)
             // A watch's wake in a session of its own, which the chat's own session
             // hears of with its next turn.
             if woke_alone { try i.store.post_untold(r.user.copy(), r.conversation.copy(), r.message.copy(), String(), r.prompt.copy()) }
@@ -18231,7 +18393,7 @@ impl Instance {
             let task = try i.start_task(user, agent, String("Propose skills and notes from past chats"), prompt, from, device)
             return Answer.Value(Obj.new().j("task", task).done())
         }
-        // Put off on the card under a reply: each waits on the Proposals page.
+        // Put off on the card under a reply: each waits at the top of Skills' list.
         if name == "proposal.later" {
             let Json.Array(ids) = at(args, "ids") else return Answer.Refused(String("bad_request"), String("ids is a list of proposals' ids."))
             var under = List<String>()
@@ -18305,8 +18467,73 @@ impl Instance {
         return none
     }
 
-    // A command's value, or its error's code and message.
+    // A command's value, or its error's code and message. One an agent runs is
+    // walled (PLAN.md, "Private agents"): when the person has a private agent,
+    // it never reaches across between that agent and the rest.
     fn command(i: mut Instance, user: String, device: String, name: String, args: Json) -> Answer ! Error {
+        if not device.starts_with("a_") { return try i.command_of(user, device, name, args) }
+        let private = i.private_ids(user.copy())
+        if private.len() == 0 { return try i.command_of(user, device, name, args) }
+        let (given, refused) = try i.walled(user.copy(), device.copy(), name.copy(), args, private.copy())
+        if let r = refused { return r }
+        return match try i.command_of(user, device.copy(), name, given) {
+            Answer.Value(v) => Answer.Value(walls.strip(v, device, private)),
+            other => other,
+        }
+    }
+
+    // What an agent `by` may do of command `name` with `args`, while `private`
+    // are the person's private agents: the args it runs with, a private agent's
+    // lists narrowed to its own, or why it can't, when either it or an agent
+    // the command is about is private and they aren't the same.
+    fn walled(i: Instance, user: String, by: String, name: String, args: Json, private: List<String>) -> (Json, Answer?) ! Error {
+        let mine = private.contains(by.copy())
+        if mine {
+            if let why = walls.never(name.copy()) { return (args.copy(), some(Answer.Refused(String("private"), why))) }
+        }
+        // Who it's about: the agent it names, a group chat's members, and whose
+        // the conversation, the message, the task or the routine it names is.
+        var about = List<String>()
+        if let a = str_at(args.copy(), "agent") {
+            if a.len() > 0 { about.push(a) }
+        }
+        about.extend(rooms.ids_in(at(args.copy(), "members")))
+        var conversation = str_at(args.copy(), "conversation") ?? String()
+        if let m = str_at(args.copy(), "message") {
+            if let found = try i.store.message(user.copy(), m) { conversation = str_at(found, "conversation") ?? conversation }
+        }
+        if conversation.len() > 0 {
+            if let c = try i.store.conversation(user.copy(), conversation.copy()) {
+                if let a = str_at(c.copy(), "agent") {
+                    if a.len() > 0 { about.push(a) }
+                }
+                if let a = str_at(c.copy(), "asked_by") {
+                    if a.len() > 0 { about.push(a) }
+                }
+                about.extend(rooms.ids_in(at(at(c, "room"), "members")))
+            }
+        }
+        if let id = str_at(args.copy(), "id") {
+            let owned = if name.starts_with("task.") { try i.store.task(user.copy(), id) } else if name.starts_with("routine.") { try i.store.routine(user.copy(), id) } else if name.starts_with("watch.") { try i.store.watch(user.copy(), id) } else { none }
+            if let o = owned {
+                if let a = str_at(o, "agent") { about.push(a) }
+            }
+        }
+        for a in about {
+            if walls.apart(by.copy(), a, private.copy()) { return (args.copy(), some(Answer.Refused(String("private"), String(if mine { walls.MINE } else { walls.THEIRS })))) }
+        }
+        // A private agent's notes are its own, and what it searches is its own
+        // chats; no other agent's search finds a private one's.
+        var given = args.copy()
+        if name == "messages.search" {
+            given = without(given, "own")
+            given = if mine { merge(given, Obj.new().s("own", by.copy()).done()) } else { merge(given, Obj.new().j("hide", Json.Array(private.map(|p| Json.Str(p.copy())))).done()) }
+        }
+        if mine and (name == "memory.put" or name == "memory.list" or name == "activity.list" or name == "activity.export") { given = merge(given, Obj.new().s("agent", by).done()) }
+        return (given, none)
+    }
+
+    fn command_of(i: mut Instance, user: String, device: String, name: String, args: Json) -> Answer ! Error {
         let empty = Obj.new().done()
         // Another server, for the person's apps to add and sign in to: from an
         // agent, once the person said yes on a device, which adds it.
@@ -18621,7 +18848,7 @@ impl Instance {
             let color = str_at(args.copy(), "color") ?? String(COLORS[count % COLORS.len()])
             // What it's for, which the group chats' router reads: given, or from its instructions.
             let for_line = rooms.cut(str_at(args.copy(), "for") ?? rooms.for_line(str_at(args.copy(), "instructions") ?? String()), rooms.FOR_MOST)
-            var agent = Obj.new().s("id", id).s("name", str_at(args.copy(), "name") ?? String("Agent")).s("color", color).s("for", for_line).s("acp_agent", program).s("instructions", str_at(args.copy(), "instructions") ?? String()).maybe("folder", str_at(args.copy(), "folder")).j("mcp", names_of(at(args.copy(), "mcp"))).maybe("permission", permission).maybe("busy", busy).maybe("backup", backup).b("code_mode", bool_at(args.copy(), "code_mode") ?? true).b("isolated", isolated).j("network", network).i("revision", 1).i("at", now()).done()
+            var agent = Obj.new().s("id", id).s("name", str_at(args.copy(), "name") ?? String("Agent")).s("color", color).s("for", for_line).s("acp_agent", program).s("instructions", str_at(args.copy(), "instructions") ?? String()).maybe("folder", str_at(args.copy(), "folder")).j("mcp", names_of(at(args.copy(), "mcp"))).maybe("permission", permission).maybe("busy", busy).maybe("backup", backup).b("code_mode", bool_at(args.copy(), "code_mode") ?? true).b("isolated", isolated).b("private", bool_at(args.copy(), "private") ?? false).j("network", network).i("revision", 1).i("at", now()).done()
             if network == Json.Null { agent = without(agent, "network") }
             agent = with_shape(agent, new_shape, drawing)
             // What its program offers, as the person's other agents on it learned it.
@@ -18699,6 +18926,22 @@ impl Instance {
             }
             if let Json.Array(_) = at(args.copy(), "mcp") { o.m.insert(String("mcp"), names_of(at(args.copy(), "mcp"))) }
             if let on = bool_at(args.copy(), "code_mode") { o.m.insert(String("code_mode"), Json.Bool(on)) }
+            // Private or not (PLAN.md, "Private agents"). Agents in a group chat read
+            // each other, so one in any is taken out of them first. Its next
+            // message goes to a fresh session, which has its new tools.
+            let was_private = bool_at(old.copy(), "private") == some(true)
+            var now_private = was_private
+            if let on = bool_at(args.copy(), "private") {
+                if on and not was_private {
+                    var in_rooms = List<String>()
+                    for (_, room) in try i.store.rooms(user.copy()) {
+                        if rooms.ids_in(at(room.copy(), "members")).contains(id.copy()) { in_rooms.push(str_at(room, "name") ?? String("a group chat")) }
+                    }
+                    if in_rooms.len() > 0 { return Answer.Refused(String("in_group"), "{str_at(old.copy(), "name") ?? String("The agent")} is in {in_rooms.join(", ")}, where agents read each other: take it out of the group chat first.") }
+                }
+                now_private = on
+                o.m.insert(String("private"), Json.Bool(on))
+            }
             // Where it runs: isolated or not, and its network. A member's agents
             // are always isolated. A change that moves it to another sandbox, or
             // out of one, waits until it isn't answering; a new list for one closed
@@ -18779,6 +19022,7 @@ impl Instance {
                 let where_now = if not isolated { String("on the instance's computer") } else if let list = hosts_of(agent.copy()) { if list.len() == 0 { String("isolated, with no network") } else { "isolated, reaching only {list.join(", ")}" } } else { String("isolated, with the internet") }
                 i.log(user.copy(), id.copy(), "agent", "Runs {where_now}", device.copy())
             }
+            if now_private != was_private { i.log(user.copy(), id.copy(), "agent", if now_private { "Made private" } else { "Made normal" }, device.copy()) }
             // New sessions start with the new instructions.
             if str_at(args.copy(), "instructions") != none { i.write_instructions(user.copy(), agent.copy()) }
             i.log(user.copy(), id.copy(), "agent", "Changed: revision {int_at(agent.copy(), "revision") ?? 0}", device.copy())
@@ -19278,8 +19522,9 @@ impl Instance {
             if try i.store.agent(user.copy(), id.copy()) == none { return Answer.Refused(String("not_found"), "There's no agent {id}.") }
             let query = str_at(args, "query") ?? String()
             let shared = i.shared_of(user.copy(), id.copy())
+            let private = i.is_private(user.copy(), id.copy())
             var found = files_matching(i.folder_of(user, id), String(), String(), query.copy())
-            found.extend(files_matching(shared.copy(), shared.replace("\\", "/"), String("shared"), query))
+            if not private { found.extend(files_matching(shared.copy(), shared.replace("\\", "/"), String("shared"), query)) }
             return Answer.Value(Obj.new().j("files", Json.Array(best_found(found))).done())
         }
         if name == "files.recent" {

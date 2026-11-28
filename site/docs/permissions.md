@@ -18,7 +18,7 @@ Something that can't be undone says **Risky** in red, or **Deletes**: deleting, 
 
 ## Rules
 
-Rules say what happens when an agent touches something particular, whatever its mode. They're on the **Rules** page, under Agents in Settings.
+Rules say what happens when an agent touches something particular, whatever its mode. They're on the **Defaults** page, under Agents in Settings, below the permission mode.
 
 **New rule** makes one. A rule is:
 

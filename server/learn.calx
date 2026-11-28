@@ -134,7 +134,7 @@ pub fn change(was: String, now: String) -> Json {
 // What a reply shows of proposal `p` under it (protocol.md, "Teaching a task,
 // and proposals"): the proposal as proposal.list gives it, with a fix's
 // skill as fixed, to change it from there, but not as it was, nor a skill's
-// body or a recording's steps, which the Proposals page reads.
+// body or a recording's steps, which Skills reads, at the top of its list.
 pub fn shown(p: Json) -> Json {
     var o = Obj.new().s("id", str_at(p.copy(), "id") ?? String()).s("agent", str_at(p.copy(), "agent") ?? String()).s("kind", str_at(p.copy(), "kind") ?? String()).s("status", str_at(p.copy(), "status") ?? String()).s("why", str_at(p.copy(), "why") ?? String())
     if let by = str_at(p.copy(), "by") { o = o.s("by", by) }

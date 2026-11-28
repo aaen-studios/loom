@@ -821,6 +821,13 @@ impl Cache {
         return try self.one("SELECT json FROM conversations WHERE id = ?", id.copy())
     }
 
+    /// When conversation `id`'s newest agent's message is from (Unix ms), or 0.
+    pub fn replied(self, id: String) -> i64 ! Error {
+        let row = try self.db.query_one(String("SELECT replied FROM conversations WHERE id = ?"), [t(id.copy())])
+        let r = row else return 0
+        return int(r[0])
+    }
+
     pub fn agent(self, id: String) -> Json? ! Error {
         return try self.one("SELECT json FROM agents WHERE id = ?", id.copy())
     }

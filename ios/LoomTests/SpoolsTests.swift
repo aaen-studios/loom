@@ -479,4 +479,40 @@ import Testing
         #expect(m.mcpServers[0].badge?.initial == "A")
         #expect(m.mcpServers[1].why == "It answered 401.")
     }
+
+    /// Installed's form, as the desktop's (`the_mcp_form_keeps_a_secrets_prefix` in
+    /// desktop/src/model.rs): a server's settings show with a secret's prefix, and Save
+    /// sends them back as they were, under the name it's saved as.
+    @Test func theServerFormKeepsWhatItShows() {
+        let m = caughtUp()
+        m.take(["t": "result", "id": "app.mcp_list_1", "ok": true, "value": ["servers": [
+            ["name": "github", "url": "https://api.githubcopilot.com/mcp/", "client_id": "c1", "headers": [
+                "Authorization": ["secret": "GITHUB_TOKEN", "prefix": "Bearer "],
+                "X-Plain": ["secret": "PLAIN"],
+                "X-Text": "hello",
+            ]],
+        ]]])
+        let s = m.mcpServers[0]
+        #expect(s.settings == "Authorization=Bearer secret:GITHUB_TOKEN\nX-Plain=secret:PLAIN\nX-Text=hello")
+        #expect(s.clientId == "c1")
+        let put = m.putServer(name: "github ", line: s.url, settings: s.settings, clientId: s.clientId, clientSecret: "", was: "github")
+        #expect(put?["name"] == "mcp.put")
+        #expect(put?["args"]["name"] == "github" && put?["args"]["was"] == "github")
+        #expect(put?["args"]["headers"] == ["Authorization": ["secret": "GITHUB_TOKEN", "prefix": "Bearer "], "X-Plain": ["secret": "PLAIN"], "X-Text": "hello"])
+        // A client secret left empty stays as it was; one typed is sent.
+        #expect(put?["args"]["client_id"] == "c1" && put?["args"]["client_secret"] == .null)
+        let secret = m.putServer(name: "g", line: s.url, settings: "", clientId: "c1", clientSecret: "secret:G_CLIENT", was: nil)
+        #expect(secret?["args"]["client_secret"] == ["secret": "G_CLIENT"])
+        // A command line, added by hand: its words, and text that only has secret: in it.
+        let local = m.putServer(name: "x", line: "npx -y x", settings: "URL=https://x.example/secret:y\nEMPTY=Bearer secret:\nNAME=my secret:has space\nKEY=secret:X_KEY", clientId: "c1", clientSecret: "", was: nil)
+        #expect(local?["args"]["command"] == "npx" && local?["args"]["args"] == ["-y", "x"])
+        #expect(local?["args"]["was"] == .null && local?["args"]["client_id"] == .null)
+        #expect(local?["args"]["env"]["URL"] == "https://x.example/secret:y")
+        #expect(local?["args"]["env"]["EMPTY"] == "Bearer secret:")
+        #expect(local?["args"]["env"]["NAME"] == "my secret:has space")
+        #expect(local?["args"]["env"]["KEY"] == ["secret": "X_KEY"])
+        // With no name, or nothing to run, it isn't sent.
+        #expect(m.putServer(name: " ", line: "npx x", settings: "", clientId: "", clientSecret: "", was: nil) == nil)
+        #expect(m.putServer(name: "x", line: "", settings: "", clientId: "", clientSecret: "", was: nil) == nil)
+    }
 }

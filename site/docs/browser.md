@@ -33,7 +33,7 @@ Show an agent how to do something once, in its browser, and it writes the steps 
 
 While it records, loom keeps each page you're on, what you click, what you type and where, and the keys you press. What goes into a password or one-time-code field is never kept, only that something secret went there. Any of your secrets typed anywhere else is kept as `[secret NAME]`.
 
-When you stop, the agent gets a task, beside its chat, to write the steps up as a skill. The skill isn't saved: it's proposed, and waits for you on the Proposals page.
+When you stop, the agent gets a task, beside its chat, to write the steps up as a skill. The skill isn't saved: it's proposed, and waits for you at the top of **Skills** in Settings.
 
 ## Proposals
 
@@ -48,7 +48,7 @@ A fix follows the agent's [permission mode](permissions.md#permission-modes):
 
 Notes that were waiting from before are kept when loom starts, and their reply's line says so.
 
-A fix you don't answer waits on the **Proposals** page, under Agents in Settings, with the skills agents propose, from a recording or on their own. Open one to read and change it before you **Keep** or **Drop** it. **Ask**, with the agent's name, asks the agent on screen to look over its chats for more.
+A fix you don't answer waits at the top of **Skills**, under Agents in Settings, marked Proposed, with the skills agents propose, from a recording or on their own. Open one to read and change it before you **Keep** or **Drop** it. A note left waiting is on **About you**, under **Proposed notes**, with **Keep** and **Drop**. While anything waits, Skills and About you show how many beside their names. Under Skills' list, **Ask Juniper to look over its chats**, with the name of the agent on screen, asks it for more.
 
 Every note and fix that was kept is in the agent's activity log, with **Undo**. An agent can't keep, drop or undo its own.
 

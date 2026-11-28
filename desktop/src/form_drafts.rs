@@ -5,15 +5,16 @@
 use super::*;
 use crate::model::drafts::{self, Form, Page, RoutineDraft};
 
-/// The list page whose forms are kept, of the popup's page `screen`.
-pub(super) fn draft_page(screen: Screen) -> Option<Page> {
+/// The kinds of form whose drafts are kept on the popup's page `screen`: Skills has the
+/// skills and what's proposed at the top of its list, and Spools' Installed the person's
+/// MCP servers.
+pub(super) fn draft_pages(screen: Screen) -> &'static [Page] {
     match screen {
-        Screen::Programs => Some(Page::Brains),
-        Screen::Skills => Some(Page::Skills),
-        Screen::Proposals => Some(Page::Proposals),
-        Screen::Mcp => Some(Page::Mcp),
-        Screen::Routines => Some(Page::Routines),
-        _ => None,
+        Screen::Programs => &[Page::Brains],
+        Screen::Skills => &[Page::Skills, Page::Proposals],
+        Screen::Installed => &[Page::Mcp],
+        Screen::Routines => &[Page::Routines],
+        _ => &[],
     }
 }
 
@@ -216,7 +217,7 @@ impl Loom {
         let Some((page, _)) = self.model.drafts.open_key().cloned() else {
             return false;
         };
-        if self.popup.and_then(draft_page) != Some(page) {
+        if !self.popup.is_some_and(|s| draft_pages(s).contains(&page)) {
             return false;
         }
         let Some(now) = self.form_now(page, cx) else {

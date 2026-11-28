@@ -165,6 +165,9 @@ pub struct Agent {
     /// Whether it runs in a sandbox: every member's agent does, and the owner's marked
     /// isolated.
     pub isolated: bool,
+    /// Whether it's private: cut off from everything the person's other agents share,
+    /// and they from it (PLAN.md, "Private agents"). A lock marks it in the sidebar.
+    pub private: bool,
     /// The hosts it may reach from its sandbox, or None for everything; empty is none.
     pub network: Option<Vec<String>>,
 }
@@ -2086,11 +2089,17 @@ impl Proposal {
 
     /// What it's called in the list: a skill's name, or the note.
     pub fn title(&self) -> String {
-        if self.kind == "skill" || self.kind == "fix" {
+        if self.is_skill() {
             self.name.clone()
         } else {
             self.text.clone()
         }
+    }
+
+    /// Whether it's a skill or a fix to one, which waits on Skills; a note waits on
+    /// About you.
+    pub fn is_skill(&self) -> bool {
+        self.kind == "skill" || self.kind == "fix"
     }
 
     /// Why a fix's skill failed, in a line.
@@ -6375,6 +6384,11 @@ pub struct Model {
     conversation_read: HashMap<String, i64>,
     /// The instance keeps what's read: some conversation came with `read`.
     reads_known: bool,
+    /// No one is looking at this model's chat: the window isn't focused (minimised, in
+    /// the tray or behind another), or its server isn't the one on screen. Nothing is
+    /// marked read meanwhile, so the person's other devices still notify, until they
+    /// look again.
+    unseen: bool,
     /// How full each conversation's session context is, as its program last said.
     contexts: HashMap<String, ContextFill>,
     /// The list has come, so a chat with no conversation is known to be empty.
@@ -7387,7 +7401,7 @@ impl Model {
     /// keeps it for every device, once it's further than it had (protocol.md,
     /// "Unread").
     fn mark_read(&mut self, conversation: &str, at: i64) {
-        if at <= 0 || conversation.is_empty() {
+        if at <= 0 || conversation.is_empty() || self.unseen {
             return;
         }
         let had = self
@@ -7400,6 +7414,17 @@ impl Model {
         *had = at;
         let id = self.id("app.read");
         self.to_send.push(json!({"t": "cmd", "id": id, "name": "conversation.read", "args": {"conversation": conversation, "at": at}}));
+    }
+
+    /// Someone started or stopped looking at this model's chat: its window was focused
+    /// or left, or its server came on screen or went away. Looking again reads what's
+    /// open.
+    pub fn set_looked_at(&mut self, looked_at: bool) {
+        let was = !self.unseen;
+        self.unseen = !looked_at;
+        if looked_at && !was {
+            self.read_open();
+        }
     }
 
     /// Opening an agent's chat reads every conversation of its that marks it unread:
@@ -7798,6 +7823,8 @@ impl Model {
             "synced" => {
                 self.synced = true;
                 self.caught_up(f);
+                // What waits for the person, for the badges in the settings' nav.
+                self.proposals_stale = true;
                 self.routines_stale = true;
                 self.defaults_stale = true;
                 self.rules_stale = true;
@@ -9645,9 +9672,10 @@ impl Model {
                 .pointer("/value/sandboxes")
                 .and_then(Value::as_bool)
                 .unwrap_or(false);
-        } else if id.starts_with("app.place") {
+        } else if id.starts_with("app.place") || id.starts_with("app.private") {
             // Where it runs was refused, as on an instance without sandboxes, or
-            // while it answers: the list as the instance has it again.
+            // while it answers, or making it private, while it's in a group chat:
+            // the list as the instance has it again.
             if let Some(e) = f.get("error") {
                 self.notices.push(s(e, "message"));
                 self.dirty.insert(List::Agents);
@@ -9730,6 +9758,7 @@ impl Model {
                         muted: a.get("muted").is_some_and(|m| !m.is_null()),
                         code_mode: a.get("code_mode").and_then(Value::as_bool).unwrap_or(true),
                         isolated: a.get("isolated").and_then(Value::as_bool).unwrap_or(false),
+                        private: a.get("private").and_then(Value::as_bool).unwrap_or(false),
                         network: a.get("network").and_then(Value::as_array).map(|hs| {
                             hs.iter()
                                 .filter_map(Value::as_str)
@@ -10988,6 +11017,7 @@ impl Model {
         program: &str,
         instructions: &str,
         color: &str,
+        private: bool,
     ) -> Value {
         let id = self.id("app.new_agent");
         let mut args =
@@ -10995,7 +11025,23 @@ impl Model {
         if !color.is_empty() {
             args["color"] = json!(color);
         }
+        if private {
+            args["private"] = json!(true);
+        }
         json!({"t": "cmd", "id": id, "name": "agent.create", "args": args})
+    }
+
+    /// Makes `agent` private, or normal again (PLAN.md, "Private agents"). The
+    /// instance refuses one in a group chat, and the list goes back to what it has.
+    pub fn set_private(&mut self, agent: &str, on: bool) -> Value {
+        if let Some(a) = Rc::make_mut(&mut self.agents)
+            .iter_mut()
+            .find(|a| a.id == agent)
+        {
+            a.private = on;
+        }
+        let id = self.id("app.private");
+        json!({"t": "cmd", "id": id, "name": "agent.update", "args": {"agent": agent, "private": on}})
     }
 
     pub fn start_fresh(&mut self) -> Option<Value> {
@@ -11634,6 +11680,22 @@ impl Model {
     pub fn delete_skill(&mut self, name: &str) -> Value {
         let id = self.id("app.skill_delete");
         json!({"t": "cmd", "id": id, "name": "skill.delete", "args": {"name": name}})
+    }
+
+    /// The skills and fixes agents propose that wait, for the top of Skills' list.
+    pub fn proposed_skills(&self) -> Vec<Proposal> {
+        self.proposals
+            .iter()
+            .filter(|k| k.is_skill())
+            .cloned()
+            .collect()
+    }
+
+    /// How many proposals wait for the person: skills and fixes, on Skills, and notes, on
+    /// About you, for their badges in the settings' nav.
+    pub fn waiting(&self) -> (usize, usize) {
+        let skills = self.proposals.iter().filter(|k| k.is_skill()).count();
+        (skills, self.proposals.len() - skills)
     }
 
     /// Asks for what agents propose that waits for the person.
@@ -14721,6 +14783,21 @@ mod tests {
         m.to_send.clear();
         m.take(&json!({"t": "event", "kind": "message.created", "conversation": "c_3", "message": {"id": "msg_5", "conversation": "c_3", "role": "agent", "agent": "a_3", "at": 80}}));
         assert_eq!(reads(&m), vec![("c_3".to_string(), 80)]);
+        // Away from the window, what comes isn't read, so the person's other devices
+        // still notify for it; looking again reads it.
+        m.set_looked_at(false);
+        m.to_send.clear();
+        m.take(&json!({"t": "event", "kind": "message.created", "conversation": "c_3", "message": {"id": "msg_6", "conversation": "c_3", "role": "agent", "agent": "a_3", "at": 90}}));
+        assert!(
+            reads(&m).is_empty(),
+            "what comes while no one looks at the window isn't read"
+        );
+        m.set_looked_at(true);
+        assert_eq!(
+            reads(&m),
+            vec![("c_3".to_string(), 90)],
+            "and it's read once someone does"
+        );
         // An instance that keeps no reads leaves the dots as replies come.
         let mut old = Model::new();
         old.take(&agents);
@@ -17821,6 +17898,33 @@ mod tests {
         m.result(&json!({"t": "result", "id": f["id"], "ok": false, "error": {"code": "not_here", "message": "No sandboxes."}}));
         assert_eq!(m.notices.last().map(String::as_str), Some("No sandboxes."));
         assert!(m.dirty.contains(&List::Agents));
+    }
+
+    #[test]
+    fn an_agent_is_made_private_and_back() {
+        let mut m = Model::new();
+        m.take(&json!({"t": "core.data", "what": "agents", "items": [
+            {"id": "a_1", "name": "One", "private": true},
+            {"id": "a_2", "name": "Two"},
+        ]}));
+        assert!(m.agents[0].private && !m.agents[1].private);
+        let f = m.set_private("a_2", true);
+        assert_eq!(f["name"], "agent.update");
+        assert_eq!(f["args"], json!({"agent": "a_2", "private": true}));
+        assert!(m.agents[1].private);
+        // Refused, as for one in a group chat: the list as the instance has it comes again.
+        m.dirty.clear();
+        m.result(&json!({"t": "result", "id": f["id"], "ok": false, "error": {"code": "in_group", "message": "Two is in Shop."}}));
+        assert_eq!(
+            m.notices.last().map(String::as_str),
+            Some("Two is in Shop.")
+        );
+        assert!(m.dirty.contains(&List::Agents));
+        let made = m.new_agent("Three", "fake", "", "", true);
+        assert_eq!(made["args"]["private"], true);
+        assert!(m.new_agent("Four", "fake", "", "", false)["args"]
+            .get("private")
+            .is_none());
     }
 
     #[test]

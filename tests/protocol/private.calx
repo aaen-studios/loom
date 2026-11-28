@@ -1,0 +1,159 @@
+module tests.protocol.private
+
+// Private agents (PLAN.md, "Private agents"): an agent made private has only
+// its own notes, chats, files, tables and tools. It reads no shared note and
+// writes none, has no shared folder, reaches no other agent's table, messages
+// no agent and is messaged by none, finds only its own chats, gets no plugin's
+// tools, and isn't in group chats; and no other agent lists it, searches its
+// chats, reads its notes or its tables. The person reaches all of it.
+//
+//     calx tests/protocol/private.calx
+import std.fs
+import std.json.{Json}
+import std.process.{exit}
+import shared.obj.{Obj, at, bool_at, str_at}
+import shared.client.{Session, reply_text}
+import tests.kit.{Instance, check}
+
+const TOOLED: str = "name = \"Weather\"\nversion = \"1.0.0\"\n[tools]\ncommand = \"calx\"\nargs = [\"tools.calx\"]\n"
+
+fn reply_in(app: mut Session, conversation: String) -> String ! Error {
+    loop {
+        let created = try app.until("event", "message.created")
+        let m = at(created, "message")
+        if str_at(m.copy(), "role") == some(String("agent")) and str_at(m.copy(), "conversation") == some(conversation.copy()) { return reply_text(m) }
+    }
+}
+
+fn say(app: mut Session, conversation: String, cid: str, text: String) -> String ! Error {
+    try app.send(Obj.new().s("t", String("send")).s("cid", String(cid)).s("conversation", conversation.copy()).s("text", text).done())
+    return try reply_in(mut app, conversation)
+}
+
+// An agent's call of `tool`, with `args`.
+fn call(app: mut Session, conversation: String, cid: str, tool: str, args: Json) -> String ! Error {
+    return try say(mut app, conversation, cid, "/mcp {tool} {args}")
+}
+
+fn code(r: Json) -> String {
+    return str_at(at(r, "error"), "code") ?? String()
+}
+
+fn agent(app: mut Session, id: str, conversation_id: str, name: str, private: bool) -> (String, String) ! Error {
+    let made = try app.cmd(id, "agent.create", Obj.new().s("name", String(name)).s("acp_agent", String("fake")).s("instructions", String("You are a test.")).b("code_mode", false).b("private", private).done())
+    let a = str_at(at(at(made, "value"), "agent"), "id") ?? String()
+    let c = try app.cmd(conversation_id, "conversation.create", Obj.new().s("agent", a.copy()).done())
+    return (a, str_at(at(c, "value"), "conversation") ?? String())
+}
+
+fn run(i: Instance) ! Error {
+    var app = try Session.connect(i.base.copy(), i.token.copy(), 0)
+    // A plugin with a tool server, the person's, so it's allowed: every normal agent gets it.
+    let tooled = Obj.new().s("plugin.toml", String(TOOLED)).s("tools.calx", String("fn main() \{\}")).done()
+    _ = try app.cmd("q_0", "plugin.put", Obj.new().s("id", String("weather")).j("files", tooled).done())
+
+    let (casper, chat_c) = try agent(mut app, "q_1", "q_1c", "Casper", false)
+    let (rosa, chat_r) = try agent(mut app, "q_2", "q_2c", "Rosa", true)
+    let got = try app.cmd("q_3", "agent.update", Obj.new().s("agent", rosa.copy()).s("name", String("Rosa")).done())
+    try check(bool_at(at(at(got, "value"), "agent"), "private") == some(true), "an agent is made private, and its agent says so")
+
+    // --- Shared notes ---
+    _ = try call(mut app, chat_c.copy(), "m_1", "remember", Obj.new().s("text", String("The office wifi is heron42")).b("shared", true).done())
+    let kept = try call(mut app, chat_r.copy(), "m_2", "remember", Obj.new().s("text", String("Rosa's heron is grey")).b("shared", true).done())
+    try check(kept.contains("yours alone"), "a private agent's shared note is kept as its own, and it's told so")
+    let rosa_recalls = try call(mut app, chat_r.copy(), "m_3", "recall", Obj.new().s("query", String("heron")).done())
+    try check(rosa_recalls.contains("grey") and not rosa_recalls.contains("heron42"), "it recalls its own notes, never the shared ones")
+    let casper_recalls = try call(mut app, chat_c.copy(), "m_4", "recall", Obj.new().s("query", String("heron")).done())
+    try check(casper_recalls.contains("heron42") and not casper_recalls.contains("grey"), "and another agent never sees its notes")
+    let listed = try call(mut app, chat_c.copy(), "m_5", "run_command", Obj.new().s("name", String("memory.list")).j("args", Obj.new().s("agent", rosa.copy()).done()).done())
+    try check(listed.contains("private") and not listed.contains("grey"), "nor lists them with memory.list")
+
+    // --- The shared folder ---
+    var shared = String()
+    for name in try fs.list("{i.data}/shared") { shared = "{i.data}/shared/{name}" }
+    let left = "{shared}/plan.txt"
+    try fs.write_text(left.copy(), String("the shared plan"))
+    let casper_attaches = try call(mut app, chat_c.copy(), "m_6", "attach_files", Obj.new().j("paths", Json.Array([Json.Str(left.copy())])).done())
+    let rosa_attaches = try call(mut app, chat_r.copy(), "m_7", "attach_files", Obj.new().j("paths", Json.Array([Json.Str(left.copy())])).done())
+    try check(casper_attaches.starts_with("attach_files: ") and not rosa_attaches.starts_with("attach_files: "), "a private agent reaches no file in the shared folder, which others do")
+    let picked = try app.cmd("q_4", "agent.files", Obj.new().s("agent", rosa.copy()).s("query", String("plan")).done())
+    try check(not "{picked}".contains("plan.txt"), "and the @ picker offers it none")
+
+    // --- Shared tables ---
+    _ = try call(mut app, chat_c.copy(), "m_8", "create_table", Obj.new().s("table", String("books")).done())
+    _ = try call(mut app, chat_r.copy(), "m_9", "create_table", Obj.new().s("table", String("rosa-notes")).done())
+    let rosa_tables = try call(mut app, chat_r.copy(), "m_10", "list_tables", Obj.new().done())
+    let casper_tables = try call(mut app, chat_c.copy(), "m_11", "list_tables", Obj.new().done())
+    try check(rosa_tables.contains("rosa-notes") and not rosa_tables.contains("books") and casper_tables.contains("books") and not casper_tables.contains("rosa-notes"), "a private agent lists only its own tables, and no other lists its")
+    let rosa_reads = try call(mut app, chat_r.copy(), "m_12", "query_rows", Obj.new().s("table", String("books")).done())
+    let casper_writes = try call(mut app, chat_c.copy(), "m_13", "write_rows", Obj.new().s("table", String("rosa-notes")).j("rows", Json.Array([Obj.new().s("x", String("y")).done()])).done())
+    try check(rosa_reads.contains("out of your reach") and casper_writes.contains("private agent's table"), "it can't read another's table, and another can't write to its")
+    let person_tables = try app.cmd("q_5", "table.list", Obj.new().done())
+    try check("{person_tables}".contains("books") and "{person_tables}".contains("rosa-notes"), "the person sees every table")
+
+    // --- Agent to agent ---
+    let rosa_lists = try call(mut app, chat_r.copy(), "m_14", "list_agents", Obj.new().done())
+    let casper_lists = try call(mut app, chat_c.copy(), "m_15", "list_agents", Obj.new().done())
+    try check(rosa_lists.contains("Rosa") and not rosa_lists.contains("Casper") and casper_lists.contains("Casper") and not casper_lists.contains("Rosa"), "a private agent lists only itself, and no other lists it")
+    let rosa_asks = try call(mut app, chat_r.copy(), "m_16", "message_agent", Obj.new().s("agent", String("Casper")).s("text", String("Hi")).done())
+    let casper_asks = try call(mut app, chat_c.copy(), "m_17", "message_agent", Obj.new().s("agent", String("Rosa")).s("text", String("Hi")).done())
+    try check(rosa_asks.contains("private") and casper_asks.contains("private"), "it messages no agent, and none messages it")
+    let read_chat = try call(mut app, chat_c.copy(), "m_18", "run_command", Obj.new().s("name", String("messages.list")).j("args", Obj.new().s("conversation", chat_r.copy()).done()).done())
+    let read_back = try call(mut app, chat_r.copy(), "m_19", "run_command", Obj.new().s("name", String("messages.list")).j("args", Obj.new().s("conversation", chat_c.copy()).done()).done())
+    try check(read_chat.contains("private") and read_back.contains("private"), "and neither reads the other's chat with run_command")
+    let routine = try call(mut app, chat_r.copy(), "m_20", "run_command", Obj.new().s("name", String("routine.put")).j("args", Obj.new().s("agent", casper.copy()).s("name", String("Nudge")).s("schedule", String("every day at 9:00")).s("prompt", String("Hi")).done()).done())
+    try check(routine.contains("private"), "nor gives another agent a routine")
+
+    // --- Search ---
+    try app.send(Obj.new().s("t", String("send")).s("cid", String("m_22")).s("conversation", chat_c.copy()).s("text", String("the walrus plan for casper")).done())
+    _ = try reply_in(mut app, chat_c.copy())
+    try app.send(Obj.new().s("t", String("send")).s("cid", String("m_23")).s("conversation", chat_r.copy()).s("text", String("the walrus plan for rosa")).done())
+    _ = try reply_in(mut app, chat_r.copy())
+    let rosa_finds = try call(mut app, chat_r.copy(), "m_24", "search_messages", Obj.new().s("query", String("walrus")).done())
+    let casper_finds = try call(mut app, chat_c.copy(), "m_25", "search_messages", Obj.new().s("query", String("walrus")).done())
+    try check(rosa_finds.contains("for rosa") and not rosa_finds.contains("for casper"), "a private agent's search finds only its own chats")
+    try check(casper_finds.contains("for casper") and not casper_finds.contains("for rosa"), "and no other agent's search finds its")
+    let person_finds = try app.cmd("q_6", "messages.search", Obj.new().s("query", String("walrus")).done())
+    try check("{person_finds}".contains("for rosa") and "{person_finds}".contains("for casper"), "the person's search finds both")
+
+    // --- Tools ---
+    let casper_servers = try say(mut app, chat_c.copy(), "m_26", String("/servers"))
+    let rosa_servers = try say(mut app, chat_r.copy(), "m_27", String("/servers"))
+    try check(casper_servers.contains("plugin-weather") and not rosa_servers.contains("plugin-weather"), "a private agent gets no plugin's tools, which every other agent gets")
+    let profile = try call(mut app, chat_r.copy(), "m_28", "update_profile", Obj.new().s("text", String("Likes herons")).done())
+    let skill = try call(mut app, chat_r.copy(), "m_29", "save_skill", Obj.new().s("name", String("herons")).s("description", String("Herons.")).s("body", String("Look up.")).done())
+    try check(profile.contains("private") and skill.contains("private"), "it writes nothing every agent reads: the profile and skills")
+    let made = try call(mut app, chat_r.copy(), "m_30", "create_agent", Obj.new().s("name", String("Rosa Jr")).s("acp_agent", String("fake")).done())
+    try check(made.contains(#""private":true"#), "an agent it makes is private too")
+
+    // --- Group chats, and switching ---
+    let room = try app.cmd("q_7", "room.create", Obj.new().s("name", String("Pair")).j("members", Json.Array([Json.Str(casper.copy()), Json.Str(rosa.copy())])).done())
+    try check(code(room) == "private", "a private agent isn't put in a group chat")
+    let (other, _) = try agent(mut app, "q_8", "q_8c", "Otto", false)
+    let pair = try app.cmd("q_9", "room.create", Obj.new().s("name", String("Pair")).j("members", Json.Array([Json.Str(casper.copy()), Json.Str(other.copy())])).done())
+    try check(str_at(at(at(pair, "value"), "conversation"), "id") != none, "two normal agents are")
+    let in_room = try app.cmd("q_10", "agent.update", Obj.new().s("agent", other.copy()).b("private", true).done())
+    try check(code(in_room) == "in_group", "and one in a group chat is taken out of it before it's made private")
+    let to_normal = try app.cmd("q_11", "agent.update", Obj.new().s("agent", rosa.copy()).b("private", false).done())
+    try check(bool_at(at(at(to_normal, "value"), "agent"), "private") == some(false), "the person makes a private agent normal again")
+    let now_servers = try say(mut app, chat_r.copy(), "m_31", String("/servers"))
+    let now_recalls = try call(mut app, chat_r.copy(), "m_32", "recall", Obj.new().s("query", String("heron")).done())
+    try check(now_servers.contains("plugin-weather") and now_recalls.contains("heron42") and now_recalls.contains("grey"), "and its next session has the shared notes and the plugins' tools, with its own notes still its own")
+    let own_switch = try call(mut app, chat_c.copy(), "m_33", "run_command", Obj.new().s("name", String("agent.update")).j("args", Obj.new().s("agent", casper.copy()).b("private", true).done()).done())
+    try check(own_switch.contains("can't change whether it's private"), "an agent never changes whether it's private itself")
+    app.close()
+}
+
+fn main() ! Error {
+    let inst = try Instance.start()
+    let failure: String? = match run(inst.copy()) {
+        ok => none,
+        err(e) => some("{e}"),
+    }
+    inst.stop()
+    if let f = failure {
+        eprintln("\n{f}")
+        exit(1)
+    }
+    println("\nprivate: all good")
+}

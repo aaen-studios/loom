@@ -4536,7 +4536,6 @@ dependencies = [
  "qrcode",
  "raw-window-handle",
  "serde_json",
- "tauri-winrt-notification",
  "tray-icon",
  "webview2-com",
  "windows 0.62.2",
