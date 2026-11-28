@@ -1988,8 +1988,13 @@ ACTA_KEY=secret:ACTA_KEY",
             notice: None,
         };
         loom.model.keep_boards(&loom.prefs.card_boards);
-        // What's open is read only while the window is in front of someone.
-        loom.model.set_looked_at(window.is_window_active());
+        // What's open is read only while the window is in front of someone: GPUI takes a
+        // window that opened behind another app, or in the tray, as active until it's
+        // first left, so as it opens it's asked whether it's really in front.
+        let looked_at = window.is_window_active() && crate::shell::in_front(loom.hwnd);
+        loom.model.set_looked_at(looked_at);
+        // The core takes the app as looked at until it's told, so it's told now.
+        loom.send(serde_json::json!({"t": "app.active", "active": looked_at}));
         loom.fetch();
         window.focus(&loom.keys, cx);
         loom

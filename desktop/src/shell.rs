@@ -690,6 +690,22 @@ pub fn window_shown(_hwnd: isize) -> bool {
     true
 }
 
+/// Whether the window is the one in front of the person, on screen. GPUI's
+/// `is_window_active` starts as its thread's active window, which a window that opened
+/// behind another app, at login or in the tray, can be without being in front; so as it
+/// opens, loom also asks this before it takes the chat as looked at (LOO-453).
+#[cfg(windows)]
+pub fn in_front(hwnd: isize) -> bool {
+    use windows_sys::Win32::UI::WindowsAndMessaging::GetForegroundWindow;
+    // SAFETY: GetForegroundWindow only reads which window is in front.
+    window_shown(hwnd) && unsafe { GetForegroundWindow() } as isize == hwnd
+}
+
+#[cfg(not(windows))]
+pub fn in_front(hwnd: isize) -> bool {
+    window_shown(hwnd)
+}
+
 /// The name of loom's entry in HKCU's Run key, which the setup removes on uninstall.
 #[cfg(not(target_os = "macos"))]
 const LOGIN_NAME: &str = "loom";
