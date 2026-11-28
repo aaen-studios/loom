@@ -708,6 +708,9 @@ pub struct Instance {
     next_search: u64
     disk_used: Map<String, (i64, i64)>    // a sandbox folder -> when it was measured, and its bytes
     doors: LinkedMap<String, egress.Door>    // "user/agent" -> the egress of an agent closed to the network (server/egress.calx)
+    file_moves: Map<String, FileMove>    // "user/agent" -> an agent.update waiting on the agent's files moving
+    files_moved: Receiver<sandbox.Moved>    // how each of those moves went, from its thread
+    update_waiter: Waiter?    // who hears an agent.update whose files move, while `waited_command` runs it
     moving: String    // where the instance is moving to, while it is
     move_waiters: List<Waiter>    // instance.move commands waiting on the move
     moved: Json    // once the instance has moved: the signed moved frame, which every device gets
@@ -877,6 +880,24 @@ struct Waiter {
     socket: ServerSocket?
     id: String
 }
+
+// An agent.update that waits on the agent's files moving to its other folder, on a
+// thread of its own (sandbox.move_on_thread): who changed it, the agent as it was and as
+// it'll be, the sandboxes that see the old folder and the new, whether its instructions
+// changed, and who hears how it went.
+struct FileMove {
+    user: String
+    device: String
+    old: Json
+    agent: Json
+    out: sandbox.Place
+    into: sandbox.Place
+    instructions: bool
+    waiter: Waiter
+}
+
+// Why an agent doesn't run, or change, while its files move.
+const FILES_MOVING: str = "Its files are moving; try again in a moment."
 
 // A call to one of a person's MCP servers' tools, under way on the thread that
 // makes them (server/mcpcall.calx): whose server, and what it's for: `boards`
@@ -2626,7 +2647,7 @@ impl Instance {
         let browser_done = Receiver<browser.Back>()
         let browser_to = browser_done.sender()
         let (picture_to, picture_done) = files.start_pictures(waker)
-        var i = Instance { release: config.release.copy(), host: update.host(config.in_app), exe: current_exe(), mcp_exe: config.mcp.copy(), update_to: update_to, update_back: update_back, updating: no_update(), next_update_check: 0, last_busy: now(), restart_stops: List<String>(), restart: false, told_update: Json.Null, told_update_at: 0, picks: LinkedMap<String, Pick>(), route_counts: Map<String, i64>(), handoffs: Map<String, (String, String)>(), browsers: LinkedMap<String, Browser>(), watchers: Map<u32, String>(), followers: List<u32>(), browser_pages: Map<String, String>(), browsers_to_check: List<String>(), browser_done: browser_done, browser_to: browser_to, stopped_browsers: Map<u64, Thread>(), closing_browsers: Map<String, u64>(), next_browser: 0, fills: Map<String, Fill>(), turns_ended: List<(String, String, String)>(), next_browser_sweep: 0, task_stops: Map<String, String>(), resumes: List<(String, String)>(), push_to: push_to, push_gone: push_gone, move_to: move_to, move_done: move_done, lan: config.lan, bridge: none, stop_bridge: none, lan_port: 0, announcer: none, stop_announcer: none, to_close: List<ServerSocket>(), boxes: none, boxes_pulled: Receiver<String>(), stale_boxes: List<String>(), gate: none, stop_gate: none, checkpointer: some(checkpointer), stop_checkpoints: stop_checkpoints, wal_big: wal_big, search_to: search_to, search_done: search_done, searches: Map<String, Waiter>(), next_search: 0, disk_used: Map<String, (i64, i64)>(), doors: LinkedMap<String, egress.Door>(), moving: String(), move_waiters: List<Waiter>(), moved: moved, version: config.version.copy(), store: store, server: server, waker: waker, data: config.data.copy(), sessions: Map<u32, Session>(), runs: LinkedMap<String, Run>(), procs: LinkedMap<String, Proc>(), approvals: LinkedMap<String, Approval>(), lines: lines, lines_to: to, stopped_to: stopped_to, stopped: stopped, stopping: 0, hash_to: hash_to, hash_done: hash_done, next_job: 0, auths: Map<i64, Auth>(), dummy_hash: dummy, ready_now: String(), open_secrets: Map<String, List<(String, String)>>(), failures: LinkedMap<String, List<i64>>(), link_asks: LinkedMap<String, LinkAsk>(), thumbs: files.start(), picture_to: picture_to, picture_done: picture_done, picture_thumbs: Map<String, String>(), shots: Map<String, List<Shot>>(), next_shot: 0, events: config.events, next_prune: 0, next_proc_sweep: 0, grants: Map<String, Grant>(), calls: Map<String, Request>(), context: Map<String, (i64, i64)>(), registry_at: config.registry.copy(), registry: Json.Null, registry_time: 0, registry_fetching: false, install_to: install_to, install_done: install_done, mcp_test_to: mcp_test_to, mcp_test_done: mcp_test_done, mcp_tests: Map<i64, McpTest>(), link_to: link_to, link_done: link_done, link_pages: Map<String, Json>(), site_icons: Map<String, List<u8>>(), link_waiting: Map<String, List<(String, String)>>(), link_pictures: Map<String, List<u8>>(), link_previews: Map<String, List<(String, Waiter)>>(), acta_at: config.acta.copy(), call_to: call_to, call_done: call_done, calls_out: Map<i64, OutCall>(), acta_boards: Map<String, ActaBoards>(), acta_cards: Map<String, Json>(), card_asks: Map<String, CardAsk>(), acta_single: Map<String, i64>(), acta_waits: Map<i64, ActaWait>(), watch: new_watches(), t3: t3_state(), oauth_to: oauth_to, oauth_done: oauth_done, oauth_jobs: Map<i64, OauthJob>(), sign_ins: Map<String, SignIn>(), renewing: Map<String, i64>(), next_renewal: 0, fetching: List<Waiter>(), installs: Map<i64, Install>(), deno_job: 0, deno_waiters: List<Request>(), tools_body: String(), follows: Map<i64, (String, String)>(), next_follow: 0, code_acts: Map<i64, String>(), leftovers: List<String>(), next_sweep: 0, device_calls: Map<String, DeviceCall>(), setups: Map<String, Setup>(), mcp_adds: LinkedMap<String, McpAdd>(), drafts_due: List<DraftDue>(), connects: LinkedMap<String, Connect>(), spool_asks: Map<String, SpoolAsk>(), signed_waits: Map<String, SignedWait>(), mcp_registry_at: config.mcp_registry.copy(), mcp_registry_to: mcp_registry_to, mcp_registry_done: mcp_registry_done, pool_to: pool_to, pool_done: pool_done, pool_reads: Map<String, PoolRead>(), mcp_registry_kept: Map<String, RegistryAnswer>(), mcp_registry_asks: Map<String, List<RegistryAsk>>(), minute_ms: config.minute_ms, next_due: 0, routine_runs: Map<String, RoutineRun>(), routine_work: RoutineWork { gates: Map<String, GateWait>(), done: Receiver<routine_gate.Done>(), closing: List<(String, String)>(), closed: List<String>(), held: List<HeldPost>() }, routine_marks: Map<String, (String, String)>(), quiet_turns: Map<String, QuietTurn>(), looking_back: Map<String, String>(), pause_turns: Map<String, (String, bool, bool)>(), compacting: List<String>(), spoken: Map<String, bool>(), paused: LinkedMap<String, Paused>(), run_chains: Map<String, List<String>>(), panel_calls: Map<String, Waiter>(), script_calls: Map<String, Request>(), running_flows: LinkedMap<String, flows.Flow>(), flow_steps: Map<String, (String, usize)>(), advancing: List<String>(), flow_results: List<(String, usize, bool, String)>(), flows_due: List<String>(), slow_calls: Map<String, String>(), acting: 0, call_actions: Map<String, i64>(), tool_actions: Map<String, i64>(), emojis: emoji.load(), sealer: try secret_key(config.data.copy()) }
+        var i = Instance { release: config.release.copy(), host: update.host(config.in_app), exe: current_exe(), mcp_exe: config.mcp.copy(), update_to: update_to, update_back: update_back, updating: no_update(), next_update_check: 0, last_busy: now(), restart_stops: List<String>(), restart: false, told_update: Json.Null, told_update_at: 0, picks: LinkedMap<String, Pick>(), route_counts: Map<String, i64>(), handoffs: Map<String, (String, String)>(), browsers: LinkedMap<String, Browser>(), watchers: Map<u32, String>(), followers: List<u32>(), browser_pages: Map<String, String>(), browsers_to_check: List<String>(), browser_done: browser_done, browser_to: browser_to, stopped_browsers: Map<u64, Thread>(), closing_browsers: Map<String, u64>(), next_browser: 0, fills: Map<String, Fill>(), turns_ended: List<(String, String, String)>(), next_browser_sweep: 0, task_stops: Map<String, String>(), resumes: List<(String, String)>(), push_to: push_to, push_gone: push_gone, move_to: move_to, move_done: move_done, lan: config.lan, bridge: none, stop_bridge: none, lan_port: 0, announcer: none, stop_announcer: none, to_close: List<ServerSocket>(), boxes: none, boxes_pulled: Receiver<String>(), stale_boxes: List<String>(), gate: none, stop_gate: none, checkpointer: some(checkpointer), stop_checkpoints: stop_checkpoints, wal_big: wal_big, search_to: search_to, search_done: search_done, searches: Map<String, Waiter>(), next_search: 0, disk_used: Map<String, (i64, i64)>(), doors: LinkedMap<String, egress.Door>(), file_moves: Map<String, FileMove>(), files_moved: Receiver<sandbox.Moved>(), update_waiter: none, moving: String(), move_waiters: List<Waiter>(), moved: moved, version: config.version.copy(), store: store, server: server, waker: waker, data: config.data.copy(), sessions: Map<u32, Session>(), runs: LinkedMap<String, Run>(), procs: LinkedMap<String, Proc>(), approvals: LinkedMap<String, Approval>(), lines: lines, lines_to: to, stopped_to: stopped_to, stopped: stopped, stopping: 0, hash_to: hash_to, hash_done: hash_done, next_job: 0, auths: Map<i64, Auth>(), dummy_hash: dummy, ready_now: String(), open_secrets: Map<String, List<(String, String)>>(), failures: LinkedMap<String, List<i64>>(), link_asks: LinkedMap<String, LinkAsk>(), thumbs: files.start(), picture_to: picture_to, picture_done: picture_done, picture_thumbs: Map<String, String>(), shots: Map<String, List<Shot>>(), next_shot: 0, events: config.events, next_prune: 0, next_proc_sweep: 0, grants: Map<String, Grant>(), calls: Map<String, Request>(), context: Map<String, (i64, i64)>(), registry_at: config.registry.copy(), registry: Json.Null, registry_time: 0, registry_fetching: false, install_to: install_to, install_done: install_done, mcp_test_to: mcp_test_to, mcp_test_done: mcp_test_done, mcp_tests: Map<i64, McpTest>(), link_to: link_to, link_done: link_done, link_pages: Map<String, Json>(), site_icons: Map<String, List<u8>>(), link_waiting: Map<String, List<(String, String)>>(), link_pictures: Map<String, List<u8>>(), link_previews: Map<String, List<(String, Waiter)>>(), acta_at: config.acta.copy(), call_to: call_to, call_done: call_done, calls_out: Map<i64, OutCall>(), acta_boards: Map<String, ActaBoards>(), acta_cards: Map<String, Json>(), card_asks: Map<String, CardAsk>(), acta_single: Map<String, i64>(), acta_waits: Map<i64, ActaWait>(), watch: new_watches(), t3: t3_state(), oauth_to: oauth_to, oauth_done: oauth_done, oauth_jobs: Map<i64, OauthJob>(), sign_ins: Map<String, SignIn>(), renewing: Map<String, i64>(), next_renewal: 0, fetching: List<Waiter>(), installs: Map<i64, Install>(), deno_job: 0, deno_waiters: List<Request>(), tools_body: String(), follows: Map<i64, (String, String)>(), next_follow: 0, code_acts: Map<i64, String>(), leftovers: List<String>(), next_sweep: 0, device_calls: Map<String, DeviceCall>(), setups: Map<String, Setup>(), mcp_adds: LinkedMap<String, McpAdd>(), drafts_due: List<DraftDue>(), connects: LinkedMap<String, Connect>(), spool_asks: Map<String, SpoolAsk>(), signed_waits: Map<String, SignedWait>(), mcp_registry_at: config.mcp_registry.copy(), mcp_registry_to: mcp_registry_to, mcp_registry_done: mcp_registry_done, pool_to: pool_to, pool_done: pool_done, pool_reads: Map<String, PoolRead>(), mcp_registry_kept: Map<String, RegistryAnswer>(), mcp_registry_asks: Map<String, List<RegistryAsk>>(), minute_ms: config.minute_ms, next_due: 0, routine_runs: Map<String, RoutineRun>(), routine_work: RoutineWork { gates: Map<String, GateWait>(), done: Receiver<routine_gate.Done>(), closing: List<(String, String)>(), closed: List<String>(), held: List<HeldPost>() }, routine_marks: Map<String, (String, String)>(), quiet_turns: Map<String, QuietTurn>(), looking_back: Map<String, String>(), pause_turns: Map<String, (String, bool, bool)>(), compacting: List<String>(), spoken: Map<String, bool>(), paused: LinkedMap<String, Paused>(), run_chains: Map<String, List<String>>(), panel_calls: Map<String, Waiter>(), script_calls: Map<String, Request>(), running_flows: LinkedMap<String, flows.Flow>(), flow_steps: Map<String, (String, usize)>(), advancing: List<String>(), flow_results: List<(String, usize, bool, String)>(), flows_due: List<String>(), slow_calls: Map<String, String>(), acting: 0, call_actions: Map<String, i64>(), tool_actions: Map<String, i64>(), emojis: emoji.load(), sealer: try secret_key(config.data.copy()) }
         if config.sandboxes.len() > 0 and not i.lan { try i.sandboxes_on(config.sandboxes.copy(), config.sandbox_image.copy()) }
         // An action the last run of the instance left started, it never finished.
         try i.store.settle_cut_short()
@@ -2989,30 +3010,121 @@ impl Instance {
         }
     }
 
-    // Moves what `user`'s isolated agent's folder holds when it's made private or normal
+    // What moving `user`'s isolated agent's folder takes when it's made private or normal
     // again, and so moves between its person's folder and one of its own (PLAN.md,
     // "Private agents"): from where `old` had it to where `new` has it, through the
-    // sandboxes that see each, never following a link (sandbox.move_folder). Nothing
-    // moves for an agent that isn't isolated before and after: the folder it names
-    // isn't loom's to move. Its programs stop first, so none writes there meanwhile.
-    // Why it couldn't, or none.
-    fn carry_files(i: mut Instance, user: String, old: Json, new: Json) -> String? {
+    // sandboxes that see each, never following a link (sandbox.move_folder). The
+    // sandboxes, the one that sees the old folder, it, the one that sees the new, and it;
+    // none when nothing moves, as for an agent that isn't isolated before and after,
+    // whose folder isn't loom's to move.
+    fn files_to_carry(i: Instance, user: String, old: Json, new: Json) -> (sandbox.Sandboxes, sandbox.Place, String, sandbox.Place, String)? {
         let b = i.boxes.copy() else return none
         let was = i.place(user.copy(), old.copy()) else return none
         let will = i.place(user.copy(), new.copy()) else return none
         let from = i.agent_folder(user.copy(), old)
-        let to = i.agent_folder(user.copy(), new.copy())
+        let to = i.agent_folder(user.copy(), new)
         if from == to { return none }
         // The person's own sandbox for their folder, and the agent's own for its private one.
         let out = if was.private { was } else { sandbox.person(user.copy()) }
         let into = if will.private { will } else { sandbox.person(user.copy()) }
-        i.stop_programs(user.copy(), str_at(new, "id") ?? String())
-        var why: String? = none
-        if let err(e) = b.move_folder(out.copy(), from.copy(), into.copy(), to) { why = some("{e}") }
+        return some((b, out, from, into, to))
+    }
+
+    // Starts moving `user`'s agent's files, as `files_to_carry` says, on a thread of its
+    // own, since a folder of several GB takes a while: `files_carried` finishes the
+    // update once they're there, and `w` hears then. Its programs stop first, so none
+    // writes there meanwhile, and its runs, and other changes to it, wait for it.
+    fn carry_files(i: mut Instance, w: own Waiter, user: own String, device: own String, old: own Json, agent: own Json, instructions: bool, plan: own (sandbox.Sandboxes, sandbox.Place, String, sandbox.Place, String)) {
+        let (b, out, from, into, to) = plan
+        let id = str_at(agent.copy(), "id") ?? String()
+        i.stop_programs(user.copy(), id.copy())
+        let key = "{user}/{id}"
+        i.file_moves.insert(key.copy(), FileMove { user: user, device: device, old: old, agent: agent, out: out.copy(), into: into.copy(), instructions: instructions, waiter: w })
+        sandbox.move_on_thread(b, out, from, into, to, key, i.files_moved.sender(), i.waker)
+    }
+
+    // An agent's files moved, or not: the update that waited on it is made, or refused,
+    // saying why, with the agent as it was.
+    fn files_carried(i: mut Instance, d: sandbox.Moved) {
+        let m = i.file_moves.remove(d.key.copy()) else return
         // Both folders are measured again before the next run.
-        _ = i.disk_used.remove(b.seen(out))
-        _ = i.disk_used.remove(b.seen(into))
-        return why
+        if let b = i.boxes.copy() {
+            _ = i.disk_used.remove(b.seen(m.out.copy()))
+            _ = i.disk_used.remove(b.seen(m.into.copy()))
+        }
+        if d.error.len() > 0 {
+            i.answer_cmd(m.waiter, Answer.Refused(String("unavailable"), "Its files couldn't be moved, so it's as it was: {d.error}"))
+            return
+        }
+        let id = str_at(m.agent.copy(), "id") ?? String()
+        // Gone meanwhile, with its person.
+        let there = match i.store.agent(m.user.copy(), id.copy()) {
+            ok(a) => a != none,
+            err(_) => false,
+        }
+        if not there {
+            i.answer_cmd(m.waiter, Answer.Refused(String("not_found"), "There's no agent {id}."))
+            return
+        }
+        let answer = match i.agent_updated(m.user.copy(), m.device.copy(), m.old.copy(), m.agent.copy(), m.instructions) {
+            ok(a) => a,
+            err(e) => {
+                eprintln("loom: changing an agent once its files moved: {e}")
+                Answer.Refused(String("internal"), String("Something went wrong in the instance."))
+            },
+        }
+        i.answer_cmd(m.waiter, answer)
+    }
+
+    // Runs the command `name` as `cmd` does, for `w`: its answer, which the caller gives
+    // `w`, or none for an agent.update that waits on the agent's files moving, which `w`
+    // hears once they're there (`carry_files`).
+    fn waited_command(i: mut Instance, w: own Waiter, user: String, device: String, name: String, args: Json) -> Answer? ! Error {
+        i.update_waiter = some(w)
+        let answer = match i.command(user, device, name, args) {
+            ok(a) => a,
+            err(e) => {
+                i.update_waiter = none
+                fail "{e}"
+            },
+        }
+        let waits = match i.update_waiter {
+            some(_) => false,
+            none => true,
+        }
+        i.update_waiter = none
+        if waits { return none }
+        return some(answer)
+    }
+
+    // The end of agent.update: `user`'s agent, `old` before, is `agent` now, as
+    // `device` changed it, with new `instructions` or not. Moved to another sandbox, or
+    // out of one, its programs and browser stop, so its next message starts where it
+    // runs now.
+    fn agent_updated(i: mut Instance, user: String, device: String, old: Json, agent: Json, instructions: bool) -> Answer ! Error {
+        let id = str_at(agent.copy(), "id") ?? String()
+        let old_place = i.place(user.copy(), old.copy())
+        let new_place = i.place(user.copy(), agent.copy())
+        let isolated = i.isolated(user.copy(), agent.copy())
+        let was_isolated = i.isolated(user.copy(), old.copy())
+        let now_private = bool_at(agent.copy(), "private") == some(true)
+        let was_private = bool_at(old.copy(), "private") == some(true)
+        try i.store.put_agent(user.copy(), agent.copy(), device.copy())
+        if old_place != new_place {
+            i.moved_agent(user.copy(), id.copy(), old_place)
+        } else if new_place != none and at(agent.copy(), "network") != at(old.copy(), "network") {
+            if let d = mut i.doors.find("{user}/{id}") { d.hosts.send(hosts_of(agent.copy()) ?? List<String>()) }
+        }
+        if at(agent.copy(), "network") != at(old.copy(), "network") or isolated != was_isolated {
+            let where_now = if not isolated { String("on the instance's computer") } else if let list = hosts_of(agent.copy()) { if list.len() == 0 { String("isolated, with no network") } else { "isolated, reaching only {list.join(", ")}" } } else { String("isolated, with the internet") }
+            i.log(user.copy(), id.copy(), "agent", "Runs {where_now}", device.copy())
+        }
+        if now_private != was_private { i.log(user.copy(), id.copy(), "agent", if now_private { "Made private" } else { "Made normal" }, device.copy()) }
+        // New sessions start with the new instructions.
+        if instructions { i.write_instructions(user.copy(), agent.copy()) }
+        i.log(user.copy(), id.copy(), "agent", "Changed: revision {int_at(agent.copy(), "revision") ?? 0}", device.copy())
+        try i.event(user, "agent.updated", Obj.new().j("agent", agent.copy()).s("by", device.copy()).done())
+        return Answer.Value(Obj.new().j("agent", agent).done())
     }
 
     // --- Budgets (PLAN.md, "Agents and keys") ---
@@ -3590,6 +3702,7 @@ impl Instance {
                     err(e) => eprintln("loom: moving: {e}"),
                 }
             }
+            while let d = i.files_moved.next() { i.files_carried(d) }
             while let done = i.hash_done.next() {
                 match i.hashed(done) {
                     ok => {},
@@ -7890,6 +8003,16 @@ impl Instance {
             try i.test_routine(Waiter { socket: none, id: call }, g.user, g.agent, a)
             return none
         }
+        // An agent.update whose files move answers the call once they're there.
+        if name == "agent.update" {
+            let call = try i.store.new_id("tc")
+            i.hold_call(call.copy(), req.copy())
+            if let result = try i.waited_command(Waiter { socket: none, id: call.copy() }, g.user.copy(), g.agent.copy(), name.copy(), a) {
+                if let Answer.Value(_) = result.copy() { i.log(g.user, g.agent.copy(), "agent", "Ran {name}", g.agent) }
+                i.answer_call(call, answer_text(result))
+            }
+            return none
+        }
         let reads = name.ends_with(".list") or name.ends_with(".get") or name.ends_with(".search") or name.ends_with(".revisions")
         let result = try i.command(g.user.copy(), g.agent.copy(), name.copy(), a)
         if not reads {
@@ -8797,6 +8920,7 @@ impl Instance {
         if not (to.starts_with("https://") or to.starts_with("http://")) { return Answer.Refused(String("bad_request"), String("to is the new place's address, starting with https:// or http://.")) }
         if not move.valid_code(code.copy()) { return Answer.Refused(String("bad_request"), String("code is the move code loom receive printed at the new place, starting loom-move-.")) }
         if i.runs.len() > 0 { return Answer.Refused(String("busy"), String("An agent is still answering. Move once every run is done, or stop them.")) }
+        if i.file_moves.len() > 0 { return Answer.Refused(String("busy"), String("An agent's files are moving to its other folder; try again in a moment.")) }
         i.moving = to.copy()
         i.move_to.send(move.Job { data: i.data.copy(), to: to.copy(), code: code, version: i.version.copy() })
         i.log(user, String(), "device", "Started moving the instance to {to}", by)
@@ -9001,7 +9125,7 @@ impl Instance {
 
     // The same, but for runs: what an update with `now` still waits for.
     fn other_busy(i: Instance) -> bool {
-        if i.installs.len() > 0 or i.deno_job > 0 or i.moving.len() > 0 or i.auths.len() > 0 { return true }
+        if i.installs.len() > 0 or i.deno_job > 0 or i.moving.len() > 0 or i.auths.len() > 0 or i.file_moves.len() > 0 { return true }
         for (_, b) in i.browsers {
             if b.person or b.recording { return true }
         }
@@ -14459,6 +14583,11 @@ impl Instance {
         } else {
             return
         }
+        // Its files are moving to its other folder, which it runs in once they're there.
+        if i.file_moves.contains("{user}/{str_at(a.copy(), "id") ?? String()}") {
+            try i.finish(run_id, String("failed"), some(String(FILES_MOVING)))
+            return
+        }
         if not try i.may_use(user.copy(), program.copy()) {
             try i.finish(run_id, String("failed"), some(not_given(program)))
             return
@@ -15007,6 +15136,7 @@ impl Instance {
             if r.user == user and r.conversation == conversation_id { return }
         }
         let agent = try i.store.agent(user.copy(), agent_id.copy()) else return
+        if i.file_moves.contains("{user}/{agent_id}") { return }
         let its_own = str_at(agent.copy(), "acp_agent") ?? String()
         let program = try i.store.conversation_program(user.copy(), conversation_id.copy()) ?? its_own
         if program.len() == 0 or try i.store.acp_agent(program.copy()) == none or not try i.may_use(user.copy(), program.copy()) { return }
@@ -16632,7 +16762,14 @@ impl Instance {
         }
         var result = rule_refusal("person-said-no", String("Your person said no."))
         if allow {
-            result = match try i.command(user.copy(), by.copy(), name, at(a.action.copy(), "args")) {
+            let answered = try i.waited_command(Waiter { socket: none, id: a.call.copy() }, user.copy(), by.copy(), name, at(a.action.copy(), "args"))
+            let got = answered else {
+                // An agent.update whose files move: its call, and the tool in its chat,
+                // hear once they're there.
+                i.slow_calls.insert(a.call.copy(), user.copy())
+                return
+            }
+            result = match got {
                 Answer.Value(v) => if v == Obj.new().done() { tool_text(String("Done: your person said yes.")) } else { tool_text("Done: your person said yes. {v}") },
                 Answer.Refused(_, message) => tool_error(message),
             }
@@ -18048,8 +18185,9 @@ impl Instance {
             i.acta_panel_cmd(Waiter { socket: some(s), id: id }, user.copy(), name.copy(), args)
             return
         }
-        let result = try i.command(user, device, name.copy(), args)
-        i.answer_cmd(Waiter { socket: some(s), id: id }, result)
+        // An agent.update whose files move is answered once they're there.
+        let w = Waiter { socket: some(s), id: id }
+        if let result = try i.waited_command(w.copy(), user, device, name.copy(), args) { i.answer_cmd(w, result) }
         i.close_gone()
     }
 
@@ -18894,6 +19032,7 @@ impl Instance {
         if name == "agent.update" {
             let id = str_at(args.copy(), "agent") ?? String()
             let old = try i.store.agent(user.copy(), id.copy()) else return Answer.Refused(String("not_found"), "There's no agent {id}.")
+            if i.file_moves.contains("{user}/{id}") { return Answer.Refused(String("busy"), String(FILES_MOVING)) }
             // What it's for alone isn't a revision: the router reads it, the agent doesn't.
             if let line = str_at(args.copy(), "for") {
                 let kept = merge(old.copy(), Obj.new().s("for", rooms.cut(line, rooms.FOR_MOST)).done())
@@ -18960,7 +19099,6 @@ impl Instance {
             // each other, so one in any is taken out of them first. Its next
             // message goes to a fresh session, which has its new tools.
             let was_private = bool_at(old.copy(), "private") == some(true)
-            var now_private = was_private
             if let on = bool_at(args.copy(), "private") {
                 if on and not was_private {
                     var in_rooms = List<String>()
@@ -18969,7 +19107,6 @@ impl Instance {
                     }
                     if in_rooms.len() > 0 { return Answer.Refused(String("in_group"), "{str_at(old.copy(), "name") ?? String("The agent")} is in {in_rooms.join(", ")}, where agents read each other: take it out of the group chat first.") }
                 }
-                now_private = on
                 o.m.insert(String("private"), Json.Bool(on))
             }
             // Where it runs: isolated or not, and its network. A member's agents
@@ -19042,27 +19179,20 @@ impl Instance {
                 o.m.insert(String("config"), Json.Object(config))
             }
             let agent = o.i("revision", (int_at(old.copy(), "revision") ?? 0) + 1).done()
+            let instructions = str_at(args, "instructions") != none
             // Made private or normal again, an isolated agent's files go with it to its
-            // other folder, or nothing changes.
+            // other folder, on a thread of their own, and the change is made once they're
+            // there; or nothing changes. Who asked hears then: a device, or an agent's
+            // run_command (`waited_command`).
             if moves {
-                if let why = i.carry_files(user.copy(), old.copy(), agent.copy()) { return Answer.Refused(String("unavailable"), "Its files couldn't be moved, so it's as it was: {why}") }
+                if let plan = i.files_to_carry(user.copy(), old.copy(), agent.copy()) {
+                    let w = i.update_waiter.copy() else return Answer.Refused(String("not_here"), String("Its files have to move to its other folder: change it in the app."))
+                    i.update_waiter = none
+                    i.carry_files(w, user.copy(), device.copy(), old, agent, instructions, plan)
+                    return Answer.Value(Json.Null)
+                }
             }
-            try i.store.put_agent(user.copy(), agent.copy(), device.copy())
-            if moves {
-                i.moved_agent(user.copy(), id.copy(), old_place)
-            } else if new_place != none and at(agent.copy(), "network") != at(old.copy(), "network") {
-                if let d = mut i.doors.find("{user}/{id}") { d.hosts.send(hosts_of(agent.copy()) ?? List<String>()) }
-            }
-            if at(agent.copy(), "network") != at(old.copy(), "network") or isolated != was_isolated {
-                let where_now = if not isolated { String("on the instance's computer") } else if let list = hosts_of(agent.copy()) { if list.len() == 0 { String("isolated, with no network") } else { "isolated, reaching only {list.join(", ")}" } } else { String("isolated, with the internet") }
-                i.log(user.copy(), id.copy(), "agent", "Runs {where_now}", device.copy())
-            }
-            if now_private != was_private { i.log(user.copy(), id.copy(), "agent", if now_private { "Made private" } else { "Made normal" }, device.copy()) }
-            // New sessions start with the new instructions.
-            if str_at(args.copy(), "instructions") != none { i.write_instructions(user.copy(), agent.copy()) }
-            i.log(user.copy(), id.copy(), "agent", "Changed: revision {int_at(agent.copy(), "revision") ?? 0}", device.copy())
-            try i.event(user, "agent.updated", Obj.new().j("agent", agent.copy()).s("by", device.copy()).done())
-            return Answer.Value(Obj.new().j("agent", agent).done())
+            return try i.agent_updated(user, device, old, agent, instructions)
         }
         if name == "routine.list" {
             let t = now()
@@ -19777,6 +19907,7 @@ impl Instance {
         if name == "agent.delete" {
             let id = str_at(args, "agent") ?? String()
             if try i.store.agent(user.copy(), id.copy()) == none { return Answer.Refused(String("not_found"), "There's no agent {id}.") }
+            if i.file_moves.contains("{user}/{id}") { return Answer.Refused(String("busy"), String(FILES_MOVING)) }
             let gone = i.place(user.copy(), try i.store.agent(user.copy(), id.copy()) ?? Json.Null)
             try i.store.delete_agent(user.copy(), id.copy())
             // Its own sandbox, closed to the network, goes with it, and its egress.
